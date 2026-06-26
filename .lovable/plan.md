@@ -1,72 +1,101 @@
-## Goal
 
-Replace the current widget-based Dashboard tab with a fully styled HTML evidence-review dashboard — same layout and information density as `nse_quant_dashboard_2026-06-25.html`, re-skinned to the existing black + red glassmorphic theme. The same HTML is also written to disk (`output/dashboard_<YYYY-MM-DD>.html`) so it can be shared, archived, or opened in a browser independently of the app.
+## Goals
 
-## What the dashboard will show (matches the reference, driven by real artifacts)
+1. Reopening the desktop app should immediately show the most recent dashboard, scores, and run metadata — no blank state, no need to re-run.
+2. Tone the theme down: red becomes one accent among several (deep indigo/violet base, teal/amber/green for status), with the glassmorphic surfaces kept.
+3. Move the noisy live "steps + log" strip out of the main viewport into a collapsible side surface, so the dashboard owns the screen.
 
-| Section | Source |
-|---|---|
-| Bottom-line banner (Watchlist / Live / Paper) | `validation_status.json` + `shadow_vs_official.json` |
-| Validation verdict card + pills (signal count, regime, mode) | `validation_status.json`, `core/regime.py` output, run_log |
-| Forward-window maturity donut | `forward_return_history.csv` (matured vs maturing) |
-| 5 evidence tiles (Val. Dates, Eff. Dates, Q-spread, t-stat, bootstrap) | `cross_sectional_validation_detail.csv` / `validation_status.json` |
-| Quintile median net-return bar (5D + 10D toggle) | `score_bucket_performance.csv` |
-| Shadow Model chip + reason + overlap pills | `shadow_vs_official.json` + diff of top-N |
-| Top-N watchlist cards (price, buy zone, stop, T1/T2, hold, %/day, flags) | `trade_plan_latest.csv` + `latest_scores.csv` (RSI/vol/news flags) |
-| RSI vs 20-day vol scatter with overbought / hi-vol bands | `latest_scores.csv` |
-| Avoid / downgrade table (governance veto, RSI, vol) | `trade_plan_latest.csv` + governance veto list in `core/config.py` |
-| Shadow-only names to watch (in shadow Top-N, not official) | diff of `latest_scores.csv` vs `latest_scores_v4_shadow.csv` |
-| ETF gaps & data-quality notes | `dq_summary.json` + `etf_quality_latest.csv` |
-| Excel-ready one-line summary footer | composed from above |
+Nothing about scoring, validation, shadow, or DQ logic changes — this is GUI + persistence only.
 
-## Files
+## 1. Persistent last-run state
 
-**New `dashboard_html_builder.py`** (top level, project-relative).
-- `build(date=None) -> Path` reads all artifacts and renders one self-contained HTML file using a template string.
-- Chart.js pulled from CDN, exactly as in the reference (no Python chart dep added).
-- Output paths:
-  - `output/dashboard_latest.html` (always overwritten — used by the desktop app)
-  - `output/dashboard_<YYYY-MM-DD>.html` (dated archive)
-- All data serialized as a single `const DATA = {...}` JSON block, so the renderer JS in the template stays static and the HTML is a clean snapshot of that day's run.
+**On launch (`run_app.py` startup):**
+- Read `output/run_manifest.json` (new, see below) if it exists.
+- Populate header: "Last run: 2026-06-25 18:42 · Official ✓ · Shadow ✓ · Champion: Official".
+- Auto-load `output/dashboard_latest.html` into the Dashboard `QWebEngineView`.
+- Auto-load the latest CSVs into the Scores / Shadow / Compare / DQ / Validation / Trade Plan tabs (same loaders already used at end-of-run, just lifted into a `load_last_run()` helper called both at startup and at run completion).
+- If no artifacts exist yet, show a single empty-state card: "No run yet — click Run to generate today's dashboard."
 
-**Theme (black + red glassmorphic)** — CSS variables aligned with the desktop app's QSS:
+**On run completion:**
+- Orchestrator writes/updates `output/run_manifest.json`:
+  ```json
+  {
+    "completed_at": "...",
+    "official_status": "ok|partial|failed",
+    "shadow_status": "ok|partial|skipped|failed",
+    "champion": "official|shadow",
+    "artifacts": {"dashboard_html": "...", "scores_csv": "...", ...}
+  }
+  ```
+- GUI re-runs `load_last_run()` → dashboard `reload()`, tabs refresh.
+
+**Refresh button** in the dashboard toolbar: calls `load_last_run()` again — picks up any new artifacts on disk (useful if the user regenerated via CLI or edited a file).
+
+## 2. Reduced-red glassmorphic theme
+
+Replace the current red-dominant palette in both the QSS (`run_app.py`) and the dashboard CSS variables (`dashboard_html_builder.py`) so they stay in lockstep:
+
 ```text
---bg #0B0B0F     --panel rgba(24,24,30,0.72) with backdrop-filter blur(18px)
---panel2 rgba(20,20,26,0.55)    --line rgba(255,255,255,0.06)
---red #E53946    --red-soft #FF6B78    --red-bg rgba(229,57,70,0.15)
---amber #F2B13C  --green #3FB950       --blue #58A6FF  --violet #A371F7
---txt #ECEDEE    --muted #9BA1A6
-```
-- Rounded 14–18px corners, gradient header (`#E53946 → #7A0E16`) on the verdict chip and primary pills, subtle red glow shadow on cards (`0 10px 40px -10px rgba(229,57,70,.35)`).
-- Verdict banner colour is conditional: Validation Positive → green tint, Insufficient/Negative → red tint, Watchlist → amber-red mix. So "Watchlist Only" reads bold red instead of amber as in the reference.
-- Cards use the existing `.tile / .card / .lv / .pd` structure from the reference for visual parity; only the palette and glass treatment change.
+--bg            #0A0B12       deep ink
+--bg-grad       linear-gradient(135deg,#0A0B12 0%,#10131F 50%,#0E0A18 100%)
+--panel         rgba(22,24,34,0.62) + backdrop-filter blur(22px)
+--panel-2       rgba(28,30,42,0.45)
+--line          rgba(255,255,255,0.07)
+--txt           #ECEDEE
+--muted         #8A92A6
 
-**`orchestrator.py`** — add a final step:
+--accent        #6E8BFF   (indigo)   ← new primary accent (was red)
+--accent-2      #8E7BFF   (violet)
+--teal          #38BDB0   positive / champion
+--amber         #F2B13C   caution / watchlist
+--green         #3FB950   validated
+--red           #E5556A   reserved for veto / critical only
+--gradient-hero linear-gradient(135deg,#6E8BFF 0%,#8E7BFF 55%,#38BDB0 100%)
+--gradient-warn linear-gradient(135deg,#F2B13C 0%,#E5556A 100%)
+--glow          0 10px 40px -12px rgba(110,139,255,.35)
+```
+
+Usage rules:
+- Verdict banner uses `--gradient-hero` for "Validation Positive", `--gradient-warn` for "Watchlist Only / Insufficient", solid `--red` only for hard veto.
+- Primary buttons, active tab, KPI numbers → indigo/violet gradient.
+- Champion chip, "switch to shadow" recommendation → teal.
+- Governance veto rows, error toasts → red (kept, just no longer the dominant hue).
+
+## 3. Run log moved out of the main view
+
+Replace the top step strip + console pane with a **collapsible right-side Run Drawer**:
+
 ```text
-Step("dashboard_html_builder", _module("dashboard_html_builder"))
+┌──────────────────────────────────────────────┬─────────────┐
+│  Tabs: Dashboard | Scores | Shadow | ...     │  ▸ Run      │
+│                                              │   Drawer    │
+│  (Dashboard fills the screen)                │  (collapsed)│
+└──────────────────────────────────────────────┴─────────────┘
 ```
-Runs after `shadow_vs_official_report` so all inputs exist. Gated on `latest_scores.csv` existing (same gate already in use).
 
-**`run_app.py`** — Dashboard tab changes:
-- Replace the hand-built `Dashboard` widget with a `QWebEngineView` that loads `output/dashboard_latest.html`.
-- Reload the page automatically when the runner thread emits a step event whose name contains "dashboard" (live refresh at the end of the run).
-- Keep all other tabs (Scores, Shadow, Compare, DQ, Validation, Trade Plan) unchanged.
-- Add an "Open in browser" button in the dashboard tab toolbar that does `webbrowser.open(file_url)`.
-- If `PySide6.QtWebEngineWidgets` is not installed, the tab falls back to a "View report in browser" button (no hard crash). `requirements.txt` and `setup_windows.bat` will install `PySide6` (which bundles QtWebEngine on Windows).
+- Default state: collapsed to a 36 px rail showing only a vertical "RUN" label, a live status dot (idle/running/ok/fail), and a small progress ring (e.g. 7/12 steps).
+- Click the rail → drawer slides out to ~340 px:
+  - Top: status header ("Running step 7 of 12: cross_sectional_validation · 00:42 elapsed").
+  - Middle: condensed step list (✓ done, ● current with spinner, ○ pending). Hovering a step shows its duration; clicking a failed step jumps the log to that section.
+  - Bottom: tail of `run.log` (auto-scroll, monospace, ~10 lines visible, "Open full log" link).
+- While idle the drawer header shows the manifest summary ("Last run 18:42 · 12/12 ok"), so the user can always see *something* without opening it.
+- The big "Run" button moves into the dashboard top bar next to the date / refresh / "Open in browser" buttons — it's the primary CTA and shouldn't be hidden in the drawer.
 
-## Edge cases handled
+This keeps the dashboard uncluttered during normal use, but the full pipeline detail is always one click away and never blocks the visual.
 
-- Missing artifact: each section renders a "(no data yet — run pipeline)" placeholder instead of breaking layout.
-- Validation insufficient / no shadow: charts gracefully render with the partial data we have (e.g. donut shows only "maturing" slice).
-- Adani / governance veto: pulled from `core/config.py` list, not hard-coded into the HTML.
-- Shadow recommendation chip uses the `recommendation` text from `shadow_vs_official.json` so "switch to shadow" / "keep official" / "review" colours are driven by data, not strings in the dashboard.
+## Files touched
 
-## Out of scope (will not change)
+- `orchestrator.py` — write `output/run_manifest.json` after each run; emit a `step_done` event with duration so the drawer can render the step list.
+- `run_app.py` — `load_last_run()` helper, startup auto-load, refresh button, new QSS palette, new `RunDrawer` widget (`QDockWidget` on the right, collapsible), removal of the top step strip + bottom log pane.
+- `dashboard_html_builder.py` — swap CSS variables to the new palette, update banner / chip / gradient classes; layout unchanged.
+- `requirements.txt` / `setup_windows.bat` — unchanged.
 
-- The scoring engines, validation logic, fetchers, and other tabs.
-- The data-quality classification (already updated last turn).
-- Any non-Windows packaging beyond what already exists.
+## Out of scope
+
+- Scoring, validation, shadow, DQ logic.
+- Any non-Windows packaging.
+- Live-streaming a remote run — the drawer reads local events only, same as today.
 
 ## Deliverable
 
-Same zip name pattern (`nse_quant_engine_v4_3_patched.zip`) with the new builder, orchestrator step, and updated GUI Dashboard tab. After running once, the user can either watch the dashboard inside the app or double-click `output/dashboard_latest.html` in a browser — both render the same evidence-review layout in the black + red glassmorphic theme.
+Repackaged `nse_quant_engine_v4_4_patched.zip`: launch the app cold → last run's dashboard is already on screen in the new indigo/violet glassmorphic theme; the right-side rail shows "Last run ✓ 12/12"; clicking Run kicks off a fresh pipeline whose progress lives in the drawer, and when it finishes the dashboard reloads in place.
