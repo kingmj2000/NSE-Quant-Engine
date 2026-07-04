@@ -975,6 +975,54 @@ class MainWindow(QMainWindow):
 
         # Boot: show whatever the last run produced.
         self.load_last_run()
+        # Regression guard — log to Activity drawer, never crash the app.
+        try:
+            self._startup_self_check()
+        except Exception as e:
+            _log_crash(f"self-check failed: {e}")
+
+    def _startup_self_check(self):
+        """Post-boot: verify version pill matches APP_VERSION and, once the
+        WebEngine dashboard finishes loading, check that the expected v4.8
+        dashboard blocks are present. Findings go to the Activity drawer."""
+        want = f"v{APP_VERSION}"
+        got = self._version_pill.text()
+        if got != want:
+            _log_crash(f"[self-check] header pill mismatch: expected {want!r}, got {got!r}")
+        else:
+            self.drawer.append_log(f"[self-check] header pill OK ({got})")
+        view = getattr(self.dashboard, "view", None)
+        if view is None:
+            return
+        expected_ids = ("maturityCards", "universeChart", "shadowCards", "shadowBar")
+
+        def _after_load(ok: bool):
+            if not ok:
+                self.drawer.append_log("[self-check] dashboard loadFinished(ok=False)")
+                return
+            js = (
+                "JSON.stringify({"
+                + ",".join(f"{i}: !!document.getElementById('{i}')" for i in expected_ids)
+                + "})"
+            )
+            def _cb(result):
+                try:
+                    missing = [k for k, v in (json.loads(result) if result else {}).items() if not v]
+                except Exception:
+                    missing = list(expected_ids)
+                if missing:
+                    self.drawer.append_log(f"[self-check] dashboard missing blocks: {', '.join(missing)}")
+                else:
+                    self.drawer.append_log("[self-check] dashboard blocks OK")
+            try:
+                view.page().runJavaScript(js, 0, _cb)
+            except Exception as e:
+                self.drawer.append_log(f"[self-check] JS probe failed: {e}")
+
+        try:
+            view.loadFinished.connect(_after_load)
+        except Exception:
+            pass
 
     # ----- tab builders -----
     def _make_table_tab(self):
