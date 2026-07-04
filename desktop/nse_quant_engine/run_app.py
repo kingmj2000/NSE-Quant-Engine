@@ -656,8 +656,10 @@ class TradePlanView(QWidget):
             head = QLabel("Report notes"); head.setObjectName("Sub")
             head.setStyleSheet("font-size:11px;letter-spacing:1px;text-transform:uppercase;margin-top:8px;")
             self._v.addWidget(head)
-            note = QTextEdit(); note.setReadOnly(True); note.setPlainText(report_text[:4000])
-            note.setMaximumHeight(180); self._v.addWidget(note)
+            try:
+                md_to_widgets.render_markdown(report_text, self._v)
+            except Exception as e:
+                _log_crash(f"Trade-plan report render failed: {e}")
         self._v.addStretch()
 
     def _card_for_row(self, r: pd.Series) -> QFrame:
