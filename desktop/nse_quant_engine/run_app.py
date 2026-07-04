@@ -364,33 +364,35 @@ else:
 
 # ----------------------------- Dashboard ------------------------------------
 class Dashboard(QWidget):
-    """Glassmorphic HTML evidence dashboard rendered by Chart.js via QWebEngineView.
+    """Stable native summary dashboard.
 
-    Renders `output/dashboard_latest.html` if it exists; otherwise shows an
-    informational placeholder. The same renderer is used for the persistent
-    last-run view and for live updates during a run.
+    The full Chart.js dashboard is still generated to output/dashboard_latest.html
+    and opened through the browser button. The in-app dashboard intentionally
+    stays native Qt because repeated local-file WebEngine refreshes after long
+    runs were causing Windows access-violation exits (-1073741819).
     """
     def __init__(self):
         super().__init__()
         self._console_callback = None
-        root = QVBoxLayout(self); root.setContentsMargins(0, 0, 0, 0); root.setSpacing(0)
+        self.view = None
+        root = QVBoxLayout(self); root.setContentsMargins(0, 0, 0, 0); root.setSpacing(12)
 
-        if HAS_WEBENGINE:
-            self.view = QWebEngineView()
-            if DashboardPage is not None:
-                self.page = DashboardPage(lambda msg: self._emit_console(msg), self.view)
-                self.view.setPage(self.page)
-            self.view.setStyleSheet("background:#0A0B12;border-radius:14px;")
-            root.addWidget(self.view, 1)
-        else:
-            self.view = None
-            note = QLabel(
-                "<div style='padding:40px;text-align:center;'>"
-                "<h2 style='color:#FF6B8F;font-weight:700'>Install <code>PySide6-WebEngine</code></h2>"
-                "<p style='color:#8A92A6'>Required for the embedded glassmorphic dashboard.<br>"
-                "Run: <code>pip install PySide6-WebEngine</code></p></div>")
-            note.setTextFormat(Qt.RichText); note.setAlignment(Qt.AlignCenter)
-            root.addWidget(note, 1)
+        intro = QFrame(); intro.setObjectName("Card"); intro.setProperty("accent", "blue")
+        iv = QVBoxLayout(intro); iv.setContentsMargins(18, 14, 18, 14); iv.setSpacing(6)
+        title = QLabel("Run Summary")
+        title.setStyleSheet("font-size:18px;font-weight:750;color:#FFFFFF;background:transparent;")
+        sub = QLabel("Stable native overview. Use Open in browser for the full interactive HTML dashboard.")
+        sub.setObjectName("Sub"); sub.setWordWrap(True)
+        iv.addWidget(title); iv.addWidget(sub)
+        root.addWidget(intro)
+
+        self.grid = QGridLayout(); self.grid.setHorizontalSpacing(10); self.grid.setVerticalSpacing(10)
+        root.addLayout(self.grid)
+
+        self.note = QLabel("No run on disk yet — click Run Full Pipeline.")
+        self.note.setObjectName("Sub"); self.note.setWordWrap(True)
+        root.addWidget(self.note)
+        root.addStretch()
 
     def set_console_callback(self, callback):
         self._console_callback = callback
@@ -408,24 +410,66 @@ class Dashboard(QWidget):
             import webbrowser; webbrowser.open(p.as_uri())
 
     def refresh(self):
-        if self.view is None:
-            return
-        p = self._html_path()
-        if p.exists():
-            # cache-bust so the view always shows the freshest HTML
-            url = QUrl.fromLocalFile(str(p))
-            url.setQuery(f"t={int(p.stat().st_mtime)}")
-            self.view.load(url)
-        else:
-            self.view.setHtml(
-                "<html><body style='background:#0A0B12;color:#8A92A6;"
-                "font-family:Segoe UI,Inter,sans-serif;padding:60px;text-align:center;'>"
-                "<h2 style='background:linear-gradient(90deg,#FF6B8F,#FFB193);"
-                "-webkit-background-clip:text;-webkit-text-fill-color:transparent;'>"
-                "No run on disk yet</h2>"
-                "<p>Click <b style='color:#FF6B8F'>▶ Run Full Pipeline</b> on the top bar. "
-                "The dashboard will render here, and will keep showing the latest result "
-                "every time you reopen the app.</p></body></html>")
+        for i in reversed(range(self.grid.count())):
+            item = self.grid.takeAt(i)
+            if item.widget():
+                item.widget().deleteLater()
+
+        def load_csv(p: Path) -> pd.DataFrame:
+            try:
+                return pd.read_csv(p) if p.exists() else pd.DataFrame()
+            except Exception:
+                return pd.DataFrame()
+
+        def load_json(p: Path) -> dict:
+            try:
+                return json.loads(p.read_text(encoding="utf-8").replace(": NaN", ": null")) if p.exists() else {}
+            except Exception:
+                return {}
+
+        status = load_json(OUT / "validation_status.json")
+        manifest = load_json(OUT / "run_manifest.json")
+        scores = load_csv(OUT / "latest_scores.csv")
+        trade = load_csv(OUT / "trade_plan_latest.csv")
+        shadow = load_csv(OUT / "latest_scores_v4_shadow.csv")
+        fwd = load_csv(OUT / "forward_return_history.csv")
+
+        matured = maturing = total = 0
+        if not fwd.empty:
+            f = fwd
+            if "Horizon_Days" in f.columns:
+                try:
+                    f10 = f[pd.to_numeric(f["Horizon_Days"], errors="coerce") == 10]
+                    if not f10.empty:
+                        f = f10
+                except Exception:
+                    pass
+            total = int(len(f))
+            if "Net_Forward_Return" in f.columns:
+                matured = int(f["Net_Forward_Return"].notna().sum())
+                maturing = int(f["Net_Forward_Return"].isna().sum())
+            else:
+                maturing = total
+        rate = f"{(matured / total * 100):.1f}%" if total else "—"
+        verdict = str(status.get("verdict") or "—")
+        cards = [
+            ("Latest scores", str(len(scores)) if not scores.empty else "—", "blue", "official scoring rows"),
+            ("Trade plan", str(len(trade)) if not trade.empty else "—", "teal", "watchlist / plan rows"),
+            ("Shadow rows", str(len(shadow)) if not shadow.empty else "—", "violet", "shadow scoring rows"),
+            ("Verdict", verdict, "green" if verdict == "Validation Positive" else "amber", str(status.get("evidence_grade") or "")),
+            ("Matured", str(matured), "teal", "10-day forward rows"),
+            ("Awaiting maturation", str(maturing), "amber", "10-day forward rows"),
+            ("Total signals", str(total) if total else "—", "blue", "10-day slice"),
+            ("Maturation rate", rate, "green" if matured else "violet", "matured / total"),
+        ]
+        for i, (title, value, tone, subtitle) in enumerate(cards):
+            self.grid.addWidget(_make_kpi_card(title, value, tone, subtitle), i // 4, i % 4)
+
+        html = self._html_path()
+        complete = manifest.get("completed_at") or "latest artifacts"
+        self.note.setText(
+            f"Last completed: {complete}. Interactive dashboard file: {html if html.exists() else 'not generated yet'}."
+        )
 
 
 # ----------------------------- Run Drawer -----------------------------------
