@@ -346,7 +346,9 @@ def _payload() -> dict:
         "bottom_line": bottom_line,
         "regime": (val.get("regime") or "Neutral"),
         "signal_count": maturing,
-        "maturity": {"matured": matured, "maturing": maturing},
+        "maturity": {"matured": matured, "maturing": maturing,
+                     "total": total_signals, "rate": maturation_rate},
+
         "evidence_10": evidence_10,
         "evidence_5": evidence_5,
         "quintile": quintile,
