@@ -1176,7 +1176,11 @@ def main():
 
     global _crash_bridge
     _crash_bridge = _AppCrashBridge()
+    # Anchor the window on the QApplication so Python GC cannot silently drop
+    # it (a common cause of "app closed on its own" symptoms on some Windows
+    # + PySide6 + WebEngine combinations).
     w = MainWindow()
+    app._mainwindow_ref = w  # type: ignore[attr-defined]
     _crash_bridge.line.connect(w.drawer.append_log)
     # flush anything captured before the drawer existed
     for m in _early_log:
