@@ -17,6 +17,9 @@ set "EC=%ERRORLEVEL%"
 echo.
 if not "%EC%"=="0" (
   echo *** The app exited with error code %EC% ***
+  if "%EC%"=="-1073741819" (
+    echo Native Windows access violation detected. Check output\last_crash.log for faulthandler details.
+  )
   if exist "output\last_crash.log" (
     echo ---- output\last_crash.log ----
     type "output\last_crash.log"
