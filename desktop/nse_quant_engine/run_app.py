@@ -214,26 +214,31 @@ QTabBar::tab {
 QTabBar::tab:selected { background: rgba(216,52,95,0.18); color: #FFFFFF; }
 QTabBar::tab:hover:!selected { color: #ECEDEE; }
 
-QPlainTextEdit, QTextEdit {
-    background: rgba(10,12,20,0.85);
+QPlainTextEdit, QTextEdit, QTextBrowser {
+    background: transparent;
     border: 1px solid rgba(255,255,255,0.05);
     border-radius: 12px; padding: 10px;
     color: #D6D7DA;
+    selection-background-color: rgba(216,52,95,0.30);
 }
 QTableView {
-    background: rgba(10,12,20,0.85);
-    gridline-color: rgba(255,255,255,0.05);
-    border: 1px solid rgba(255,255,255,0.05);
-    border-radius: 12px;
-    selection-background-color: rgba(216,52,95,0.30);
+    background: transparent;
+    gridline-color: rgba(255,255,255,0.04);
+    border: none;
+    border-radius: 10px;
+    selection-background-color: rgba(216,52,95,0.28);
     selection-color: #fff;
+    alternate-background-color: rgba(255,255,255,0.025);
+    outline: 0;
 }
+QTableView::item { border: none; padding: 6px 8px; }
 QHeaderView::section {
-    background: #14161F; color: #8A92A6;
+    background: rgba(255,255,255,0.03); color: #8A92A6;
     padding: 6px 8px; border: none;
-    border-bottom: 1px solid rgba(255,255,255,0.05);
+    border-bottom: 1px solid rgba(255,255,255,0.06);
     font-weight: 600;
 }
+
 QProgressBar {
     background: #14141A; border: none; border-radius: 6px; height: 10px; text-align: center;
 }
