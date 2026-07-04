@@ -762,11 +762,133 @@ class ValidationView(QWidget):
             head = QLabel("Validation report"); head.setObjectName("Sub")
             head.setStyleSheet("font-size:11px;letter-spacing:1px;text-transform:uppercase;")
             self._v.addWidget(head)
-            box = QFrame(); box.setObjectName("Card"); box.setProperty("accent", "blue")
-            bv = QVBoxLayout(box); bv.setContentsMargins(14, 12, 14, 12)
-            body = QTextEdit(); body.setReadOnly(True); body.setPlainText(report_text)
-            body.setStyleSheet("background:transparent;border:none;color:#DEE0E5;")
-            bv.addWidget(body); self._v.addWidget(box, 1)
+            try:
+                md_to_widgets.render_markdown(report_text, self._v)
+            except Exception as e:
+                _log_crash(f"Validation report render failed: {e}")
+        self._v.addStretch()
+
+
+# --------------------------- Compare view -----------------------------------
+class CompareView(QWidget):
+    """Shadow-vs-Official comparison: KPI strip + side-by-side table + movers."""
+    def __init__(self):
+        super().__init__()
+        outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0); outer.setSpacing(10)
+        self.kpi = QGridLayout(); self.kpi.setHorizontalSpacing(10); self.kpi.setVerticalSpacing(10)
+        outer.addLayout(self.kpi)
+        self.body = QScrollArea(); self.body.setWidgetResizable(True); self.body.setFrameShape(QFrame.NoFrame)
+        self._holder = QWidget(); self._v = QVBoxLayout(self._holder)
+        self._v.setContentsMargins(0, 0, 0, 0); self._v.setSpacing(10)
+        self.body.setWidget(self._holder)
+        outer.addWidget(self.body, 1)
+
+    def _clear(self):
+        while self.kpi.count():
+            it = self.kpi.takeAt(0)
+            if it.widget(): it.widget().deleteLater()
+        while self._v.count():
+            it = self._v.takeAt(0)
+            if it.widget(): it.widget().deleteLater()
+
+    def render(self, cmp_df: pd.DataFrame, cmp_json: dict):
+        self._clear()
+        # KPI strip driven by shadow_vs_official.json when present
+        def _fmt(v, nd=2, suf=""):
+            try:
+                f = float(v)
+                if pd.isna(f): return "—"
+                return f"{f:.{nd}f}{suf}"
+            except Exception:
+                return "—"
+        jacc = cmp_json.get("jaccard_at_20") or cmp_json.get("jaccard")
+        spear = cmp_json.get("spearman") or cmp_json.get("spearman_full")
+        avg_dr = cmp_json.get("avg_abs_delta_rank") or cmp_json.get("mean_abs_delta_rank")
+        vagree = cmp_json.get("verdict_agreement") or cmp_json.get("recommendation") or "—"
+        kpis = [
+            ("Jaccard@20", _fmt(jacc, 2), "teal", "Top-20 overlap"),
+            ("Spearman", _fmt(spear, 2), "blue", "Full ranking correlation"),
+            ("Avg |ΔRank|", _fmt(avg_dr, 1), "amber", "Lower = more agreement"),
+            ("Verdict", str(vagree)[:60] or "—", "violet", "Recommendation"),
+        ]
+        for i, (t, v, tone, sub) in enumerate(kpis):
+            self.kpi.addWidget(_make_kpi_card(t, v, tone, sub), 0, i)
+
+        if cmp_df is None or cmp_df.empty or len(cmp_df) < 2:
+            note = QFrame(); note.setObjectName("Card"); note.setProperty("accent", "amber")
+            nv = QVBoxLayout(note); nv.setContentsMargins(16, 14, 16, 14)
+            title = QLabel("Shadow run neutralized — insufficient shadow evidence")
+            title.setStyleSheet("color:#F2B13C;font-weight:700;font-size:14px;")
+            hint = QLabel("The shadow pipeline did not produce enough matured signals for a "
+                          "meaningful side-by-side comparison. This is expected during "
+                          "accumulation; check back after more forward-return windows close.")
+            hint.setWordWrap(True); hint.setStyleSheet("color:#B7BCC6;font-size:12px;margin-top:4px;")
+            nv.addWidget(title); nv.addWidget(hint)
+            self._v.addWidget(note); self._v.addStretch(); return
+
+        # Build side-by-side table
+        df = cmp_df.copy()
+        # find likely column names, tolerate variations
+        def _pick(*names):
+            for n in names:
+                if n in df.columns: return n
+            return None
+        c_sym = _pick("Symbol", "symbol")
+        c_bO = _pick("Bucket_Official", "Official_Bucket", "Bucket")
+        c_bS = _pick("Bucket_Shadow", "Shadow_Bucket")
+        c_rO = _pick("Rank_Official", "Official_Rank")
+        c_rS = _pick("Rank_Shadow", "Shadow_Rank")
+        c_sO = _pick("Score_Official", "Official_Score", "Final_Score_Official")
+        c_sS = _pick("Score_Shadow", "Shadow_Score", "Final_Score_Shadow")
+
+        display_cols = [x for x in [c_sym, c_bO, c_bS, c_rO, c_rS, c_sO, c_sS] if x]
+        show = df[display_cols].copy() if display_cols else df.copy()
+        if c_rO and c_rS:
+            try:
+                show["ΔRank"] = pd.to_numeric(df[c_rS], errors="coerce") - pd.to_numeric(df[c_rO], errors="coerce")
+            except Exception:
+                pass
+        if c_sO and c_sS:
+            try:
+                show["ΔScore"] = pd.to_numeric(df[c_sS], errors="coerce") - pd.to_numeric(df[c_sO], errors="coerce")
+            except Exception:
+                pass
+
+        head = QLabel("Side-by-side ranking"); head.setObjectName("Sub")
+        head.setStyleSheet("font-size:11px;letter-spacing:1px;text-transform:uppercase;")
+        self._v.addWidget(head)
+        tbl = QTableView(); tbl.setModel(_df_to_model(show.head(60)))
+        tbl.horizontalHeader().setStretchLastSection(True); tbl.verticalHeader().setVisible(False)
+        tbl.setMinimumHeight(320); tbl.setAlternatingRowColors(True)
+        tbl.setStyleSheet("QTableView{alternate-background-color:rgba(255,255,255,0.025);}")
+        self._v.addWidget(tbl, 1)
+
+        # Top movers panel
+        if c_sym and "ΔRank" in show.columns:
+            movers = show[[c_sym, "ΔRank"]].dropna().copy()
+            movers["ΔRank"] = pd.to_numeric(movers["ΔRank"], errors="coerce")
+            movers = movers.dropna()
+            if not movers.empty:
+                up = movers.nsmallest(5, "ΔRank")   # negative delta = improved
+                down = movers.nlargest(5, "ΔRank")
+                mv_head = QLabel("Top movers"); mv_head.setObjectName("Sub")
+                mv_head.setStyleSheet("font-size:11px;letter-spacing:1px;text-transform:uppercase;margin-top:6px;")
+                self._v.addWidget(mv_head)
+                grid = QGridLayout(); grid.setHorizontalSpacing(10); grid.setVerticalSpacing(6)
+                def _mover_card(sym, dr, tone):
+                    card = QFrame(); card.setObjectName("Card"); card.setProperty("accent", tone)
+                    h = QHBoxLayout(card); h.setContentsMargins(12, 8, 12, 8)
+                    s = QLabel(str(sym)); s.setStyleSheet("color:#fff;font-weight:700;font-size:13px;")
+                    delta = QLabel(f"{'↑' if dr < 0 else '↓'} {abs(int(dr))}")
+                    delta.setStyleSheet(f"color:{'#7FE0C6' if tone=='teal' else '#FF8597'};font-weight:700;")
+                    h.addWidget(s); h.addStretch(); h.addWidget(delta)
+                    return card
+                for i, (_, r) in enumerate(up.iterrows()):
+                    grid.addWidget(_mover_card(r[c_sym], r["ΔRank"], "teal"), i, 0)
+                for i, (_, r) in enumerate(down.iterrows()):
+                    grid.addWidget(_mover_card(r[c_sym], r["ΔRank"], "red"), i, 1)
+                holder = QWidget(); holder.setLayout(grid)
+                self._v.addWidget(holder)
         self._v.addStretch()
 
 
