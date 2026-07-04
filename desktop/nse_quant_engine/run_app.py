@@ -995,7 +995,7 @@ class MainWindow(QMainWindow):
         view = getattr(self.dashboard, "view", None)
         if view is None:
             return
-        expected_ids = ("maturityCards", "universeChart", "shadowCards", "shadowBar")
+        expected_ids = ("maturityCards", "readiness", "universeChart", "shadowCards")
 
         def _after_load(ok: bool):
             if not ok:
