@@ -69,7 +69,18 @@ class _AppCrashBridge(QObject):
 _crash_bridge: "_AppCrashBridge | None" = None
 _early_log: list[str] = []
 
+def _write_crash_log(msg: str) -> None:
+    """Append to output/last_crash.log so run_app.bat can surface it."""
+    try:
+        log_dir = Path(__file__).resolve().parent / "output"
+        log_dir.mkdir(exist_ok=True)
+        with (log_dir / "last_crash.log").open("a", encoding="utf-8") as fh:
+            fh.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
+    except Exception:
+        pass
+
 def _log_crash(msg: str) -> None:
+    _write_crash_log(msg)
     if _crash_bridge is not None:
         try:
             _crash_bridge.line.emit(msg)
@@ -78,6 +89,7 @@ def _log_crash(msg: str) -> None:
             pass
     _early_log.append(msg)
     print(msg, file=sys.stderr)
+
 
 def _install_global_hooks() -> None:
     def _sys_hook(exc_type, exc, tb):
