@@ -5,20 +5,22 @@ Install once:
 Run:
     python run_app.py   (or double-click run_app.bat)
 
-v4.6
+v4.8
 ----
-- New palette: controlled crimson primary, teal/amber/green status accents.
-- Dashboard HTML embeds Chart.js locally so charts load inside QWebEngineView.
-- Runner and dashboard JS errors are reported in the Activity drawer instead of
-  closing the app window.
-- Run log + per-step strip moved out of the main canvas into a collapsible
-  right-side **Run Drawer** (toggle with the ☰ button or F9). The dashboard
-  now owns the full window when the drawer is closed.
-- Persistent last-run: on launch, the GUI reads `output/run_manifest.json`
-  and renders the most recent dashboard + tables automatically. They stay on
-  screen until you start a fresh run. A "⟳ Reload last run" header button
-  re-reads the manifest at any time.
+- Header + About show a single "v4.8" pill (no descriptor).
+- Report content in the Validation and Trade Plan tabs is rendered through
+  `md_to_widgets` into themed glass panels, styled tables, and bulleted
+  paragraphs — no more raw markdown / pipe tables in a QTextEdit.
+- Compare tab replaced with a real `CompareView` (KPI strip + side-by-side
+  table + top-movers panel + scatter fallback).
+- Per-element glow: each Card/panel gets a border + shadow matching its
+  accent color instead of the previous blanket crimson glow.
+- Startup self-check logs the header version and the presence of expected
+  dashboard blocks to the Activity drawer.
+- Auto-close hardening: window is anchored on self, WebEngine + tab renders
+  are wrapped so a single render error never tears down the QApplication.
 """
+APP_VERSION = "4.8"
 from __future__ import annotations
 import sys
 import json
