@@ -65,6 +65,7 @@ class _AppCrashBridge(QObject):
 
 _crash_bridge: "_AppCrashBridge | None" = None
 _early_log: list[str] = []
+_fault_log_fh = None
 
 def _write_crash_log(msg: str) -> None:
     """Append to output/last_crash.log so run_app.bat can surface it."""
@@ -1241,16 +1242,17 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    global _fault_log_fh
     _install_global_hooks()
     try:
         OUT.mkdir(parents=True, exist_ok=True)
         fault_path = OUT / "last_crash.log"
-        fault_fh = fault_path.open("a", encoding="utf-8")
-        fault_fh.write(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] starting app with faulthandler enabled\n")
-        fault_fh.flush()
-        faulthandler.enable(file=fault_fh, all_threads=True)
+        _fault_log_fh = fault_path.open("a", encoding="utf-8")
+        _fault_log_fh.write(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] starting app with faulthandler enabled\n")
+        _fault_log_fh.flush()
+        faulthandler.enable(file=_fault_log_fh, all_threads=True)
     except Exception:
-        fault_fh = None
+        _fault_log_fh = None
     app = QApplication(sys.argv)
     app.setStyleSheet(QSS)
     app.setQuitOnLastWindowClosed(False)
