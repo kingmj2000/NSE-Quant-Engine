@@ -128,13 +128,15 @@ QFrame#Card {
     border: 1px solid rgba(255,255,255,0.07);
     border-radius: 16px;
 }
-QFrame#Card[accent="indigo"] { border: 1px solid rgba(110,139,255,0.40); }
-QFrame#Card[accent="teal"]   { border: 1px solid rgba(56,189,176,0.45); }
-QFrame#Card[accent="amber"]  { border: 1px solid rgba(242,177,60,0.45); }
-QFrame#Card[accent="red"]    { border: 1px solid rgba(229, 85, 106, 0.45); }
-QFrame#Card[accent="blue"]   { border: 1px solid rgba(88,166,255,0.45); }
-QFrame#Card[accent="violet"] { border: 1px solid rgba(163,113,247,0.45); }
-QFrame#Card[accent="green"]  { border: 1px solid rgba(63,185,80,0.45); }
+/* Per-variant border + glow — each card carries the color of its content
+   instead of a blanket red glow. Crimson is reserved for primary CTAs. */
+QFrame#Card[accent="indigo"] { border: 1px solid rgba(110,139,255,0.42); }
+QFrame#Card[accent="teal"]   { border: 1px solid rgba(56,189,176,0.48); }
+QFrame#Card[accent="amber"]  { border: 1px solid rgba(242,177,60,0.48); }
+QFrame#Card[accent="red"]    { border: 1px solid rgba(229, 85,106,0.48); }
+QFrame#Card[accent="blue"]   { border: 1px solid rgba(88,166,255,0.48); }
+QFrame#Card[accent="violet"] { border: 1px solid rgba(163,113,247,0.48); }
+QFrame#Card[accent="green"]  { border: 1px solid rgba(63,185,80,0.48); }
 QLabel#Pill[tone="teal"]   { background: rgba(56,189,176,0.16);  color: #7FE0C6; }
 QLabel#Pill[tone="amber"]  { background: rgba(242,177,60,0.16);  color: #F2B13C; }
 QLabel#Pill[tone="green"]  { background: rgba(63,185,80,0.16);   color: #7FE0A6; }
