@@ -712,7 +712,7 @@ class TradePlanView(QWidget):
             v.addWidget(rl)
         if risk and risk != "no major technical risk flagged":
             rk = QLabel(f"Risk: {r.get('Key_Risk')}"); rk.setWordWrap(True)
-            rk.setStyleSheet(f"color:{'#FF8597' if tone=='red' else '#F2B13C'};font-size:11.5px;font-weight:600;")
+            rk.setStyleSheet("color:#F2B13C;font-size:11.5px;font-weight:600;")
             v.addWidget(rk)
         return card
 
