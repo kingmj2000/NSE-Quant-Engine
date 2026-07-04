@@ -27,6 +27,7 @@ import sys
 import json
 import threading
 import traceback
+import faulthandler
 from datetime import datetime
 from pathlib import Path
 
@@ -134,7 +135,15 @@ DATA = BASE / "data"
 # red veto/error     : #E5556A  (used sparingly)
 QSS = """
 * { font-family: 'Segoe UI', 'Inter', sans-serif; color: #ECEDEE; }
-QMainWindow, QWidget { background: #0A0B12; }
+QMainWindow { background: #0A0B12; }
+QWidget { background: transparent; }
+QWidget#AppRoot, QWidget#MainColumn { background: #0A0B12; }
+QScrollArea, QScrollArea > QWidget, QScrollArea > QWidget > QWidget,
+QAbstractScrollArea, QAbstractScrollArea::viewport {
+    background: transparent;
+    border: none;
+}
+QLabel { background: transparent; }
 
 QFrame#Card {
     background: rgba(22,24,34,0.62);
@@ -235,17 +244,19 @@ QPlainTextEdit, QTextEdit, QTextBrowser {
 }
 QTableView {
     background: transparent;
+    background-color: transparent;
     gridline-color: rgba(255,255,255,0.04);
     border: none;
     border-radius: 10px;
     selection-background-color: rgba(216,52,95,0.28);
     selection-color: #fff;
-    alternate-background-color: rgba(255,255,255,0.025);
+    alternate-background-color: transparent;
     outline: 0;
 }
-QTableView::item { border: none; padding: 6px 8px; }
+QTableView::item { background: transparent; border: none; padding: 6px 8px; }
+QTableView::item:alternate { background: transparent; }
 QHeaderView::section {
-    background: rgba(255,255,255,0.03); color: #8A92A6;
+    background: rgba(255,255,255,0.025); color: #8A92A6;
     padding: 6px 8px; border: none;
     border-bottom: 1px solid rgba(255,255,255,0.06);
     font-weight: 600;
