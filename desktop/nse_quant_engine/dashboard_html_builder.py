@@ -531,21 +531,25 @@ canvas{margin-top:4px}
 
 <div class="banner" id="banner"></div>
 
-<h2>Signal maturation &amp; universe composition</h2>
+<h2>Signal maturation &amp; validation readiness</h2>
 <div class="grid twocol">
   <div class="glass g-teal panel">
     <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Signal maturation (10-day horizon)</div>
-    <div class="evid" id="maturityCards" style="grid-template-columns:1fr 1fr"></div>
-    <canvas id="maturityBar" height="80" style="margin-top:10px"></canvas>
-    <div class="sub" id="maturityNote" style="margin-top:8px"></div>
+    <div class="evid" id="maturityCards" style="grid-template-columns:repeat(4,1fr)"></div>
+    <div class="sub" id="maturityNote" style="margin-top:10px"></div>
   </div>
   <div class="glass g-violet panel">
-    <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Universe composition &amp; evidence gauge</div>
-    <canvas id="universeChart" height="150"></canvas>
-    <div class="evid" id="evidence10" style="grid-template-columns:repeat(5,1fr);margin-top:10px"></div>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Validation readiness (10-day)</div>
+    <div class="rmeter" id="readiness"></div>
     <div class="sub" id="evidenceNote" style="margin-top:10px"></div>
   </div>
 </div>
+
+<h2>Universe composition</h2>
+<div class="glass g-blue panel">
+  <canvas id="universeChart" height="110"></canvas>
+</div>
+
 
 <h2>Shadow vs Official &mdash; ranking overlap</h2>
 <div class="glass g-blue panel">
