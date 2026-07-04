@@ -896,7 +896,7 @@ class CompareView(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("NSE Quant Engine — One-Button Runner")
+        self.setWindowTitle(f"NSE Quant Engine — v{APP_VERSION}")
         self.resize(1480, 920)
 
         central = QWidget(); self.setCentralWidget(central)
@@ -910,7 +910,8 @@ class MainWindow(QMainWindow):
         topbar = QFrame(); topbar.setObjectName("TopBar")
         tb = QHBoxLayout(topbar); tb.setContentsMargins(18, 12, 14, 12); tb.setSpacing(12)
         title = QLabel("NSE Quant Engine"); title.setObjectName("Header")
-        pill = QLabel("v4.6 · glassmorphic"); pill.setObjectName("Pill")
+        self._version_pill = QLabel(f"v{APP_VERSION}"); self._version_pill.setObjectName("Pill")
+        pill = self._version_pill
         self.lbl_lastrun = QLabel("no runs yet"); self.lbl_lastrun.setObjectName("PillAge")
         tb.addWidget(title); tb.addSpacing(8); tb.addWidget(pill)
         tb.addSpacing(8); tb.addWidget(self.lbl_lastrun)
