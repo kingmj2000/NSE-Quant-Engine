@@ -1243,9 +1243,18 @@ class MainWindow(QMainWindow):
 
 def main():
     _install_global_hooks()
+    try:
+        OUT.mkdir(parents=True, exist_ok=True)
+        fault_path = OUT / "last_crash.log"
+        fault_fh = fault_path.open("a", encoding="utf-8")
+        fault_fh.write(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] starting app with faulthandler enabled\n")
+        fault_fh.flush()
+        faulthandler.enable(file=fault_fh, all_threads=True)
+    except Exception:
+        fault_fh = None
     app = QApplication(sys.argv)
     app.setStyleSheet(QSS)
-    app.setQuitOnLastWindowClosed(True)
+    app.setQuitOnLastWindowClosed(False)
     pal = app.palette()
     pal.setColor(QPalette.Window, QColor("#0A0B12"))
     pal.setColor(QPalette.Base, QColor("#0A0B12"))
