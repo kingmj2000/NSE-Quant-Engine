@@ -1,0 +1,1006 @@
+"""PySide6 desktop runner — glassmorphic black/crimson theme, one-button pipeline.
+
+Install once:
+    pip install PySide6 PySide6-WebEngine pandas numpy yfinance
+Run:
+    python run_app.py   (or double-click run_app.bat)
+
+v4.6
+----
+- New palette: controlled crimson primary, teal/amber/green status accents.
+- Dashboard HTML embeds Chart.js locally so charts load inside QWebEngineView.
+- Runner and dashboard JS errors are reported in the Activity drawer instead of
+  closing the app window.
+- Run log + per-step strip moved out of the main canvas into a collapsible
+  right-side **Run Drawer** (toggle with the ☰ button or F9). The dashboard
+  now owns the full window when the drawer is closed.
+- Persistent last-run: on launch, the GUI reads `output/run_manifest.json`
+  and renders the most recent dashboard + tables automatically. They stay on
+  screen until you start a fresh run. A "⟳ Reload last run" header button
+  re-reads the manifest at any time.
+"""
+from __future__ import annotations
+import sys
+import json
+import threading
+import traceback
+from datetime import datetime
+from pathlib import Path
+
+try:
+    from PySide6.QtCore import Qt, Signal, QObject, QThread, QUrl, QPropertyAnimation, QEasingCurve, qInstallMessageHandler, QtMsgType
+    from PySide6.QtGui import QFont, QStandardItemModel, QStandardItem, QColor, QPalette, QShortcut, QKeySequence
+    from PySide6.QtWidgets import (
+        QApplication, QMainWindow, QWidget, QPushButton, QVBoxLayout, QHBoxLayout,
+        QTextEdit, QCheckBox, QTabWidget, QTableView, QLabel, QGridLayout,
+        QStatusBar, QPlainTextEdit, QSplitter, QFrame, QProgressBar, QScrollArea,
+        QSizePolicy, QStackedWidget, QToolButton, QMessageBox,
+    )
+except ImportError:
+    print("PySide6 not installed. Run:  pip install PySide6 PySide6-WebEngine")
+    sys.exit(1)
+
+import pandas as pd
+import orchestrator
+
+try:
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+    try:
+        from PySide6.QtWebEngineCore import QWebEnginePage
+    except Exception:
+        QWebEnginePage = None
+    HAS_WEBENGINE = True
+except ImportError:
+    QWebEnginePage = None
+    HAS_WEBENGINE = False
+
+
+# --------------------------- Global crash guards ----------------------------
+# Any unhandled exception (Python, Qt, worker thread, WebEngine JS) is routed
+# through this bridge to the Activity drawer instead of terminating the app.
+class _AppCrashBridge(QObject):
+    line = Signal(str)
+
+_crash_bridge: "_AppCrashBridge | None" = None
+_early_log: list[str] = []
+
+def _log_crash(msg: str) -> None:
+    if _crash_bridge is not None:
+        try:
+            _crash_bridge.line.emit(msg)
+            return
+        except Exception:
+            pass
+    _early_log.append(msg)
+    print(msg, file=sys.stderr)
+
+def _install_global_hooks() -> None:
+    def _sys_hook(exc_type, exc, tb):
+        _log_crash(f"[unhandled] {exc_type.__name__}: {exc}\n" + "".join(traceback.format_exception(exc_type, exc, tb)))
+    sys.excepthook = _sys_hook
+
+    def _thread_hook(args):
+        _log_crash(f"[thread {args.thread.name}] {args.exc_type.__name__}: {args.exc_value}\n"
+                   + "".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)))
+    try:
+        threading.excepthook = _thread_hook
+    except Exception:
+        pass
+
+    def _qt_msg(mode, ctx, message):
+        prefix = {QtMsgType.QtDebugMsg: "qt-debug",
+                  QtMsgType.QtInfoMsg: "qt-info",
+                  QtMsgType.QtWarningMsg: "qt-warn",
+                  QtMsgType.QtCriticalMsg: "qt-critical",
+                  QtMsgType.QtFatalMsg: "qt-fatal"}.get(mode, "qt")
+        _log_crash(f"[{prefix}] {message}")
+    try:
+        qInstallMessageHandler(_qt_msg)
+    except Exception:
+        pass
+
+
+BASE = Path(__file__).resolve().parent
+OUT = BASE / "output"
+DATA = BASE / "data"
+
+
+# ----------------------------- Theme (QSS) ----------------------------------
+# Palette
+# bg gradient        : #0A0B12 → #10131F → #0E0A18
+# panel              : rgba(22,24,34,0.62) with white-7% border
+# accent (crimson)   : #D8345F  ·  soft #FF6B8F  ·  deep #8F1837
+# accent2 (coral)    : #FF8A5C  ·  soft #FFB193
+# teal positive      : #38BDB0
+# amber caution      : #F2B13C
+# green ok           : #3FB950
+# red veto/error     : #E5556A  (used sparingly)
+QSS = """
+* { font-family: 'Segoe UI', 'Inter', sans-serif; color: #ECEDEE; }
+QMainWindow, QWidget { background: #0A0B12; }
+
+QFrame#Card {
+    background: rgba(22,24,34,0.62);
+    border: 1px solid rgba(255,255,255,0.07);
+    border-radius: 16px;
+}
+QFrame#Card[accent="indigo"] { border: 1px solid rgba(110,139,255,0.40); }
+QFrame#Card[accent="teal"]   { border: 1px solid rgba(56,189,176,0.45); }
+QFrame#Card[accent="amber"]  { border: 1px solid rgba(242,177,60,0.45); }
+QFrame#Card[accent="red"]    { border: 1px solid rgba(229, 85, 106, 0.45); }
+QFrame#Card[accent="blue"]   { border: 1px solid rgba(88,166,255,0.45); }
+QFrame#Card[accent="violet"] { border: 1px solid rgba(163,113,247,0.45); }
+QFrame#Card[accent="green"]  { border: 1px solid rgba(63,185,80,0.45); }
+QLabel#Pill[tone="teal"]   { background: rgba(56,189,176,0.16);  color: #7FE0C6; }
+QLabel#Pill[tone="amber"]  { background: rgba(242,177,60,0.16);  color: #F2B13C; }
+QLabel#Pill[tone="green"]  { background: rgba(63,185,80,0.16);   color: #7FE0A6; }
+QLabel#Pill[tone="blue"]   { background: rgba(88,166,255,0.16);  color: #9CC6FF; }
+QLabel#Pill[tone="violet"] { background: rgba(163,113,247,0.16); color: #C6A8FA; }
+QLabel#Pill[tone="red"]    { background: rgba(229,85,106,0.18);  color: #FF8597; }
+QLabel#Pill[tone="dim"]    { background: rgba(255,255,255,0.05); color: #B7BCC6; }
+
+QFrame#Drawer {
+    background: rgba(14,16,26,0.92);
+    border-left: 1px solid rgba(255,255,255,0.08);
+}
+QFrame#TopBar {
+    background: rgba(16,18,28,0.55);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 18px;
+}
+
+QLabel#Header    { font-size: 19px; font-weight: 700; letter-spacing: 0.3px; }
+QLabel#Sub       { color: #8A92A6; font-size: 12px; }
+QLabel#Metric    { font-size: 26px; font-weight: 800; color: #FFFFFF; }
+QLabel#MetricInd { font-size: 26px; font-weight: 800; color: #FF6B8F; }
+QLabel#Pill {
+    padding: 4px 11px; border-radius: 10px;
+    background: rgba(216,52,95,0.15);
+    color: #FF6B8F; font-weight: 600; font-size: 11px;
+}
+QLabel#PillAge {
+    padding: 4px 11px; border-radius: 10px;
+    background: rgba(255,255,255,0.05);
+    color: #B7BCC6; font-weight: 600; font-size: 11px;
+}
+
+QPushButton#Primary {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #D8345F, stop:1 #FF8A5C);
+    color: white; font-weight: 700; font-size: 14px;
+    border: none; border-radius: 14px;
+    padding: 11px 22px;
+}
+QPushButton#Primary:hover  {
+    background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
+        stop:0 #E54870, stop:1 #FF9B73);
+}
+QPushButton#Primary:disabled{ background: #23252F; color: #6B6B72; }
+
+QPushButton#Ghost {
+    background: rgba(255,255,255,0.04);
+    color: #DEE0E5; font-weight: 600; font-size: 13px;
+    border: 1px solid rgba(255,255,255,0.10);
+    border-radius: 12px; padding: 9px 16px;
+}
+QPushButton#Ghost:hover  { background: rgba(216,52,95,0.14); border-color: rgba(216,52,95,0.40); color: #fff; }
+
+QToolButton#Drawer {
+    background: rgba(216,52,95,0.12);
+    color: #FF6B8F; font-weight: 700;
+    border: 1px solid rgba(216,52,95,0.30);
+    border-radius: 12px; padding: 8px 12px;
+}
+QToolButton#Drawer:hover { background: rgba(216,52,95,0.22); color: #fff; }
+
+QCheckBox { spacing: 8px; color: #C8C9CC; }
+QCheckBox::indicator { width: 16px; height: 16px; border-radius: 4px;
+    border: 1px solid #3A3A45; background: #14141A; }
+QCheckBox::indicator:checked { background: #D8345F; border-color: #D8345F; }
+
+QTabWidget::pane { border: none; background: transparent; top: 8px; }
+QTabBar::tab {
+    background: transparent; color: #8C8F94;
+    padding: 8px 18px; margin-right: 4px;
+    border-radius: 10px; font-weight: 600;
+}
+QTabBar::tab:selected { background: rgba(216,52,95,0.18); color: #FFFFFF; }
+QTabBar::tab:hover:!selected { color: #ECEDEE; }
+
+QPlainTextEdit, QTextEdit {
+    background: rgba(10,12,20,0.85);
+    border: 1px solid rgba(255,255,255,0.05);
+    border-radius: 12px; padding: 10px;
+    color: #D6D7DA;
+}
+QTableView {
+    background: rgba(10,12,20,0.85);
+    gridline-color: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.05);
+    border-radius: 12px;
+    selection-background-color: rgba(216,52,95,0.30);
+    selection-color: #fff;
+}
+QHeaderView::section {
+    background: #14161F; color: #8A92A6;
+    padding: 6px 8px; border: none;
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+    font-weight: 600;
+}
+QProgressBar {
+    background: #14141A; border: none; border-radius: 6px; height: 10px; text-align: center;
+}
+QProgressBar::chunk {
+    background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #D8345F, stop:1 #FF8A5C);
+    border-radius: 6px;
+}
+QStatusBar { background: transparent; color: #8C8F94; }
+QScrollBar:vertical { background: transparent; width: 10px; }
+QScrollBar::handle:vertical { background: #2A2A33; border-radius: 5px; min-height: 30px; }
+QScrollBar::handle:vertical:hover { background: #D8345F; }
+QScrollBar:horizontal { background: transparent; height: 10px; }
+QScrollBar::handle:horizontal { background: #2A2A33; border-radius: 5px; min-width: 30px; }
+"""
+
+
+# ----------------------------- Helpers --------------------------------------
+class LogBridge(QObject):
+    line = Signal(str)
+    step = Signal(dict)
+
+
+class RunnerThread(QThread):
+    done = Signal(dict)
+
+    def __init__(self, steps, bridge: LogBridge):
+        super().__init__()
+        self.steps = steps
+        self.bridge = bridge
+
+    def run(self):
+        try:
+            def _step_cb(s):
+                self.bridge.step.emit({"name": s.name, "status": s.status,
+                                       "duration_s": s.duration_s, "error": s.error})
+            summary = orchestrator.run_all(
+                self.steps,
+                on_log=lambda m: self.bridge.line.emit(m),
+                on_step=_step_cb,
+            )
+        except BaseException as exc:
+            tb = traceback.format_exc()
+            self.bridge.line.emit(f"FATAL runner error kept app open: {type(exc).__name__}: {exc}")
+            self.bridge.line.emit(tb)
+            summary = {
+                "started": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "finished": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "duration_s": 0,
+                "steps": [{"name": "runner", "status": "error", "duration_s": 0, "error": f"{type(exc).__name__}: {exc}"}],
+            }
+        self.done.emit(summary)
+
+
+def _df_to_model(df: pd.DataFrame) -> QStandardItemModel:
+    model = QStandardItemModel(len(df), len(df.columns))
+    model.setHorizontalHeaderLabels([str(c) for c in df.columns])
+    for r, row in enumerate(df.itertuples(index=False)):
+        for c, v in enumerate(row):
+            it = QStandardItem("" if pd.isna(v) else str(v))
+            it.setEditable(False)
+            model.setItem(r, c, it)
+    return model
+
+
+def _human_age(iso_ts: str | None) -> str:
+    if not iso_ts:
+        return "no runs yet"
+    try:
+        ts = datetime.strptime(iso_ts, "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return iso_ts
+    delta = datetime.now() - ts
+    s = int(delta.total_seconds())
+    if s < 60:    return f"{s}s ago"
+    if s < 3600:  return f"{s//60}m ago"
+    if s < 86400: return f"{s//3600}h ago"
+    return f"{s//86400}d ago"
+
+
+if HAS_WEBENGINE and QWebEnginePage is not None:
+    class DashboardPage(QWebEnginePage):
+        def __init__(self, callback=None, parent=None):
+            super().__init__(parent)
+            self.callback = callback
+
+        def javaScriptConsoleMessage(self, level, message, lineNumber, sourceID):
+            try:
+                if self.callback and message:
+                    self.callback(f"[dashboard js] {message} (line {lineNumber})")
+            except Exception:
+                pass
+            # never re-raise: a JS error must not close the window
+            try:
+                return super().javaScriptConsoleMessage(level, message, lineNumber, sourceID)
+            except Exception:
+                return None
+else:
+    DashboardPage = None
+
+
+# ----------------------------- Dashboard ------------------------------------
+class Dashboard(QWidget):
+    """Glassmorphic HTML evidence dashboard rendered by Chart.js via QWebEngineView.
+
+    Renders `output/dashboard_latest.html` if it exists; otherwise shows an
+    informational placeholder. The same renderer is used for the persistent
+    last-run view and for live updates during a run.
+    """
+    def __init__(self):
+        super().__init__()
+        self._console_callback = None
+        root = QVBoxLayout(self); root.setContentsMargins(0, 0, 0, 0); root.setSpacing(0)
+
+        if HAS_WEBENGINE:
+            self.view = QWebEngineView()
+            if DashboardPage is not None:
+                self.page = DashboardPage(lambda msg: self._emit_console(msg), self.view)
+                self.view.setPage(self.page)
+            self.view.setStyleSheet("background:#0A0B12;border-radius:14px;")
+            root.addWidget(self.view, 1)
+        else:
+            self.view = None
+            note = QLabel(
+                "<div style='padding:40px;text-align:center;'>"
+                "<h2 style='color:#FF6B8F;font-weight:700'>Install <code>PySide6-WebEngine</code></h2>"
+                "<p style='color:#8A92A6'>Required for the embedded glassmorphic dashboard.<br>"
+                "Run: <code>pip install PySide6-WebEngine</code></p></div>")
+            note.setTextFormat(Qt.RichText); note.setAlignment(Qt.AlignCenter)
+            root.addWidget(note, 1)
+
+    def set_console_callback(self, callback):
+        self._console_callback = callback
+
+    def _emit_console(self, msg: str):
+        if self._console_callback:
+            self._console_callback(msg)
+
+    def _html_path(self) -> Path:
+        return OUT / "dashboard_latest.html"
+
+    def open_browser(self):
+        p = self._html_path()
+        if p.exists():
+            import webbrowser; webbrowser.open(p.as_uri())
+
+    def refresh(self):
+        if self.view is None:
+            return
+        p = self._html_path()
+        if p.exists():
+            # cache-bust so the view always shows the freshest HTML
+            url = QUrl.fromLocalFile(str(p))
+            url.setQuery(f"t={int(p.stat().st_mtime)}")
+            self.view.load(url)
+        else:
+            self.view.setHtml(
+                "<html><body style='background:#0A0B12;color:#8A92A6;"
+                "font-family:Segoe UI,Inter,sans-serif;padding:60px;text-align:center;'>"
+                "<h2 style='background:linear-gradient(90deg,#FF6B8F,#FFB193);"
+                "-webkit-background-clip:text;-webkit-text-fill-color:transparent;'>"
+                "No run on disk yet</h2>"
+                "<p>Click <b style='color:#FF6B8F'>▶ Run Full Pipeline</b> on the top bar. "
+                "The dashboard will render here, and will keep showing the latest result "
+                "every time you reopen the app.</p></body></html>")
+
+
+# ----------------------------- Run Drawer -----------------------------------
+class RunDrawer(QFrame):
+    """Collapsible right-side panel holding the per-step progress + scrolling log.
+
+    Closed by default — the dashboard owns the full window. Opens when the user
+    starts a run (auto) or clicks ☰ / presses F9.
+    """
+    EXPANDED_W = 380
+    COLLAPSED_W = 0
+
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("Drawer")
+        self.setFixedWidth(self.COLLAPSED_W)
+        self._anim = QPropertyAnimation(self, b"minimumWidth")
+        self._anim.setDuration(220); self._anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._anim2 = QPropertyAnimation(self, b"maximumWidth")
+        self._anim2.setDuration(220); self._anim2.setEasingCurve(QEasingCurve.OutCubic)
+
+        wrap = QVBoxLayout(self); wrap.setContentsMargins(16, 16, 16, 16); wrap.setSpacing(12)
+
+        title_row = QHBoxLayout()
+        t = QLabel("Run activity"); t.setObjectName("Header")
+        title_row.addWidget(t); title_row.addStretch()
+        self.lbl_status = QLabel("idle"); self.lbl_status.setObjectName("Sub")
+        title_row.addWidget(self.lbl_status)
+        wrap.addLayout(title_row)
+
+        # Step list
+        steps_label = QLabel("Pipeline steps"); steps_label.setObjectName("Sub")
+        wrap.addWidget(steps_label)
+        self.steps_area = QScrollArea(); self.steps_area.setWidgetResizable(True)
+        self.steps_area.setFrameShape(QFrame.NoFrame)
+        self.steps_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.steps_area.setMaximumHeight(280)
+        self.steps_inner = QWidget()
+        self.steps_v = QVBoxLayout(self.steps_inner)
+        self.steps_v.setContentsMargins(0, 0, 0, 0); self.steps_v.setSpacing(5)
+        self.steps_v.addStretch()
+        self.steps_area.setWidget(self.steps_inner)
+        wrap.addWidget(self.steps_area)
+        self.step_cells: dict[str, QLabel] = {}
+
+        log_label = QLabel("Log"); log_label.setObjectName("Sub")
+        wrap.addWidget(log_label)
+        self.log = QPlainTextEdit(); self.log.setReadOnly(True)
+        self.log.setFont(QFont("Consolas", 9))
+        wrap.addWidget(self.log, 1)
+
+    # ---- programmatic API ----
+    def set_open(self, opened: bool):
+        target = self.EXPANDED_W if opened else self.COLLAPSED_W
+        self._anim.stop(); self._anim2.stop()
+        self._anim.setStartValue(self.width()); self._anim.setEndValue(target)
+        self._anim2.setStartValue(self.width()); self._anim2.setEndValue(target)
+        self._anim.start(); self._anim2.start()
+
+    def is_open(self) -> bool:
+        return self.width() > 20
+
+    def toggle(self):
+        self.set_open(not self.is_open())
+
+    def append_log(self, msg: str):
+        self.log.appendPlainText(msg)
+        sb = self.log.verticalScrollBar(); sb.setValue(sb.maximum())
+
+    def reset_steps(self, names: list[str]):
+        # clear
+        while self.steps_v.count():
+            it = self.steps_v.takeAt(0)
+            w = it.widget()
+            if w: w.deleteLater()
+        self.step_cells.clear()
+        for n in names:
+            lbl = QLabel(f"○  {n}")
+            lbl.setStyleSheet(self._cell_style("pending"))
+            self.steps_v.addWidget(lbl); self.step_cells[n] = lbl
+        self.steps_v.addStretch()
+
+    def update_step(self, name: str, status: str, duration_s: float):
+        lbl = self.step_cells.get(name)
+        if not lbl: return
+        icon = {"ok": "●", "error": "✕", "skipped": "◌"}.get(status, "○")
+        lbl.setText(f"{icon}  {name}    {duration_s:.1f}s")
+        lbl.setStyleSheet(self._cell_style(status))
+
+    def set_status(self, text: str):
+        self.lbl_status.setText(text)
+
+    @staticmethod
+    def _cell_style(status: str) -> str:
+        colors = {
+            "pending": ("#8A92A6", "rgba(255,255,255,0.03)"),
+            "ok":      ("#7FE0C6", "rgba(56,189,176,0.14)"),
+            "error":   ("#FF8597", "rgba(229,85,106,0.18)"),
+            "skipped": ("#E6BB6A", "rgba(242,177,60,0.14)"),
+        }
+        fg, bg = colors.get(status, colors["pending"])
+        return (f"padding:7px 10px;border-radius:8px;background:{bg};"
+                f"color:{fg};font-weight:600;font-size:12px;")
+
+
+# --------------------------- Rich tab renderers -----------------------------
+# Structured cards + tables replace raw CSV/MD dumps for the DQ, Trade Plan
+# and Validation tabs.
+_PILL_TONE_FOR_STATUS = {"ok": "teal", "warn": "amber", "bad": "red", "info": "blue", "muted": "dim"}
+
+
+def _make_pill(text: str, tone: str = "dim") -> QLabel:
+    lbl = QLabel(text)
+    lbl.setObjectName("Pill")
+    lbl.setProperty("tone", tone)
+    lbl.style().unpolish(lbl); lbl.style().polish(lbl)
+    return lbl
+
+
+def _make_kpi_card(title: str, value: str, tone: str = "dim", subtitle: str = "") -> QFrame:
+    card = QFrame(); card.setObjectName("Card"); card.setProperty("accent", tone)
+    v = QVBoxLayout(card); v.setContentsMargins(14, 12, 14, 12); v.setSpacing(4)
+    t = QLabel(title.upper()); t.setObjectName("Sub"); t.setStyleSheet("letter-spacing:1px;font-size:10.5px;")
+    val = QLabel(value); val.setObjectName("Metric")
+    tone_color = {"teal": "#7FE0C6", "amber": "#F2B13C", "red": "#FF8597",
+                  "blue": "#9CC6FF", "violet": "#C6A8FA", "green": "#7FE0A6",
+                  "indigo": "#A9BCFF", "dim": "#FFFFFF"}.get(tone, "#FFFFFF")
+    val.setStyleSheet(f"color:{tone_color};font-size:26px;font-weight:800;")
+    v.addWidget(t); v.addWidget(val)
+    if subtitle:
+        s = QLabel(subtitle); s.setObjectName("Sub"); s.setWordWrap(True)
+        v.addWidget(s)
+    return card
+
+
+class DQReportView(QWidget):
+    """Structured Data-Quality dashboard: KPI header + colored flag table."""
+    def __init__(self):
+        super().__init__()
+        outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0); outer.setSpacing(10)
+        self.kpi_row = QGridLayout(); self.kpi_row.setHorizontalSpacing(10); self.kpi_row.setVerticalSpacing(10)
+        outer.addLayout(self.kpi_row)
+        self.body = QScrollArea(); self.body.setWidgetResizable(True); self.body.setFrameShape(QFrame.NoFrame)
+        self._body_holder = QWidget(); self._body_v = QVBoxLayout(self._body_holder)
+        self._body_v.setContentsMargins(0, 0, 0, 0); self._body_v.setSpacing(10)
+        self.body.setWidget(self._body_holder)
+        outer.addWidget(self.body, 1)
+
+    def _clear(self):
+        while self.kpi_row.count():
+            it = self.kpi_row.takeAt(0)
+            if it.widget(): it.widget().deleteLater()
+        while self._body_v.count():
+            it = self._body_v.takeAt(0)
+            if it.widget(): it.widget().deleteLater()
+
+    def render(self, dq_summary: dict, quality_df: pd.DataFrame):
+        self._clear()
+        rows = dq_summary.get("rows") or (len(quality_df) if quality_df is not None else 0)
+        health = dq_summary.get("health_score")
+        cov_act = dq_summary.get("coverage_actionable", {}) or {}
+        cov_str = dq_summary.get("coverage_structural", {}) or {}
+        def _pct(v):
+            try: return f"{float(v)*100:.0f}%"
+            except Exception: return "—"
+        kpis = [
+            ("Rows analysed", str(rows), "blue", "ETF universe covered"),
+            ("Health score", f"{health if health is not None else '—'} / 100", "teal", "0 = broken · 100 = pristine"),
+            ("NAV filled", _pct(cov_act.get("nav")), "green", "actionable"),
+            ("AUM filled", _pct(cov_act.get("aum")), "green", "actionable"),
+            ("TER filled", _pct(cov_act.get("ter")), "amber", "actionable"),
+            ("Benchmark", _pct(cov_act.get("benchmark")), "violet", "actionable"),
+            ("Tracking quality", _pct(cov_str.get("tracking") or cov_act.get("tracking")), "blue", "TE or tracking-difference"),
+        ]
+        for i, (title, val, tone, sub) in enumerate(kpis):
+            self.kpi_row.addWidget(_make_kpi_card(title, val, tone, sub), i // 4, i % 4)
+
+        flags = dq_summary.get("flag_counts", {}) or {}
+        if flags:
+            head = QLabel("ETF quality flag distribution"); head.setObjectName("Sub")
+            head.setStyleSheet("font-size:11px;letter-spacing:1px;text-transform:uppercase;")
+            self._body_v.addWidget(head)
+            grid = QGridLayout(); grid.setHorizontalSpacing(8); grid.setVerticalSpacing(8)
+            for i, (flag, count) in enumerate(sorted(flags.items(), key=lambda x: -x[1])):
+                tone = "teal" if flag.lower() == "complete" else ("amber" if "missing" in flag.lower() else "red")
+                card = QFrame(); card.setObjectName("Card"); card.setProperty("accent", tone)
+                cv = QHBoxLayout(card); cv.setContentsMargins(12, 8, 12, 8)
+                cv.addWidget(_make_pill(str(count), tone))
+                lbl = QLabel(flag); lbl.setWordWrap(True); lbl.setStyleSheet("color:#DEE0E5;font-size:12.5px;")
+                cv.addWidget(lbl, 1)
+                grid.addWidget(card, i // 2, i % 2)
+            holder = QWidget(); holder.setLayout(grid)
+            self._body_v.addWidget(holder)
+
+        if quality_df is not None and not quality_df.empty:
+            head = QLabel("Per-ETF quality snapshot"); head.setObjectName("Sub")
+            head.setStyleSheet("font-size:11px;letter-spacing:1px;text-transform:uppercase;margin-top:8px;")
+            self._body_v.addWidget(head)
+            preview_cols = [c for c in ("Symbol", "Name", "ETF_Quality_Data_Flag",
+                                        "NAV", "AUM_INR_Cr", "TER", "Benchmark_Index",
+                                        "Tracking_Error", "Tracking_Difference")
+                            if c in quality_df.columns]
+            tbl = QTableView(); tbl.setModel(_df_to_model(quality_df[preview_cols].head(400)))
+            tbl.horizontalHeader().setStretchLastSection(True); tbl.verticalHeader().setVisible(False)
+            tbl.setMinimumHeight(320)
+            self._body_v.addWidget(tbl, 1)
+        self._body_v.addStretch()
+
+
+class TradePlanView(QWidget):
+    def __init__(self):
+        super().__init__()
+        outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0); outer.setSpacing(10)
+        self.header_row = QHBoxLayout(); self.header_row.setSpacing(10)
+        outer.addLayout(self.header_row)
+        self.body = QScrollArea(); self.body.setWidgetResizable(True); self.body.setFrameShape(QFrame.NoFrame)
+        self._holder = QWidget(); self._v = QVBoxLayout(self._holder)
+        self._v.setContentsMargins(0, 0, 0, 0); self._v.setSpacing(10)
+        self.body.setWidget(self._holder)
+        outer.addWidget(self.body, 1)
+
+    def _clear(self):
+        while self.header_row.count():
+            it = self.header_row.takeAt(0)
+            if it.widget(): it.widget().deleteLater()
+        while self._v.count():
+            it = self._v.takeAt(0)
+            if it.widget(): it.widget().deleteLater()
+
+    def render(self, trade_df: pd.DataFrame, validation_status: dict, report_text: str):
+        self._clear()
+        verdict = validation_status.get("verdict", "Insufficient History")
+        grade = validation_status.get("evidence_grade", "Insufficient Evidence")
+        use_mode = "LIVE" if verdict == "Validation Positive" else "WATCHLIST ONLY"
+        tone_v = "green" if verdict == "Validation Positive" else "amber"
+        tone_m = "green" if use_mode == "LIVE" else "amber"
+        self.header_row.addWidget(_make_kpi_card("Verdict", verdict, tone_v))
+        self.header_row.addWidget(_make_kpi_card("Evidence grade", grade, "blue"))
+        self.header_row.addWidget(_make_kpi_card("Use mode", use_mode, tone_m,
+                                                 "Trade levels are mechanical reference levels only." if use_mode != "LIVE" else ""))
+        self.header_row.addWidget(_make_kpi_card("Plan rows", str(len(trade_df) if trade_df is not None else 0), "violet"))
+        self.header_row.addStretch()
+
+        if trade_df is None or trade_df.empty:
+            note = QLabel("(no trade plan yet — run the pipeline)")
+            note.setObjectName("Sub"); self._v.addWidget(note); self._v.addStretch(); return
+
+        grid = QGridLayout(); grid.setHorizontalSpacing(10); grid.setVerticalSpacing(10)
+        preview = trade_df.head(24) if "Final_Score" not in trade_df.columns else \
+                  trade_df.sort_values("Final_Score", ascending=False).head(24)
+        for i, (_, r) in enumerate(preview.iterrows()):
+            grid.addWidget(self._card_for_row(r), i // 3, i % 3)
+        holder = QWidget(); holder.setLayout(grid)
+        self._v.addWidget(holder)
+
+        if report_text:
+            head = QLabel("Report notes"); head.setObjectName("Sub")
+            head.setStyleSheet("font-size:11px;letter-spacing:1px;text-transform:uppercase;margin-top:8px;")
+            self._v.addWidget(head)
+            note = QTextEdit(); note.setReadOnly(True); note.setPlainText(report_text[:4000])
+            note.setMaximumHeight(180); self._v.addWidget(note)
+        self._v.addStretch()
+
+    def _card_for_row(self, r: pd.Series) -> QFrame:
+        def _num(v, nd=2):
+            try:
+                f = float(v)
+                if pd.isna(f): return "—"
+                return f"{f:,.{nd}f}"
+            except Exception:
+                return "—"
+        risk = str(r.get("Key_Risk", "") or "").strip().lower()
+        if "veto" in risk: tone = "red"
+        elif "overbought" in risk or "elevated" in risk: tone = "amber"
+        else: tone = "teal"
+        card = QFrame(); card.setObjectName("Card"); card.setProperty("accent", tone)
+        v = QVBoxLayout(card); v.setContentsMargins(14, 12, 14, 12); v.setSpacing(6)
+        top = QHBoxLayout()
+        sym = QLabel(str(r.get("Symbol", "?"))); sym.setStyleSheet("font-size:15px;font-weight:700;color:#fff;")
+        bucket = str(r.get("Bucket", "") or "")
+        bt = "teal" if "Top" in bucket else "amber" if "Risky" in bucket else "blue"
+        pill = _make_pill(bucket or "—", bt)
+        top.addWidget(sym); top.addStretch(); top.addWidget(pill)
+        v.addLayout(top)
+        name = QLabel(str(r.get("Name", "") or "")); name.setStyleSheet("color:#8A92A6;font-size:11px;"); name.setWordWrap(True)
+        v.addWidget(name)
+
+        grid = QGridLayout(); grid.setHorizontalSpacing(8); grid.setVerticalSpacing(4)
+        def _cell(row, col, label, val, color="#ECEDEE"):
+            l = QLabel(label); l.setStyleSheet("color:#6B6F76;font-size:10px;text-transform:uppercase;letter-spacing:.4px;")
+            n = QLabel(val); n.setStyleSheet(f"color:{color};font-size:12.5px;font-weight:650;")
+            grid.addWidget(l, row * 2, col); grid.addWidget(n, row * 2 + 1, col)
+        _cell(0, 0, "Buy zone", f"{_num(r.get('Buy_Zone_Low'))}–{_num(r.get('Buy_Zone_High'))}")
+        _cell(0, 1, "Stop", _num(r.get('Stop_Loss')), "#FF8597")
+        _cell(0, 2, "Hold", f"{int(r.get('Hold_Days_Min',5) or 5)}–{int(r.get('Hold_Days_Max',15) or 15)}d")
+        _cell(1, 0, "Target 1", _num(r.get('Target_1')), "#7FE0C6")
+        _cell(1, 1, "Target 2", _num(r.get('Target_2')), "#7FE0C6")
+        _cell(1, 2, "Score", _num(r.get('Final_Score'), 1), "#9CC6FF")
+        v.addLayout(grid)
+
+        reason = str(r.get("Reason", "") or "").strip()
+        if reason:
+            rl = QLabel(reason); rl.setWordWrap(True); rl.setStyleSheet("color:#B7BCC6;font-size:11.5px;margin-top:4px;")
+            v.addWidget(rl)
+        if risk and risk != "no major technical risk flagged":
+            rk = QLabel(f"Risk: {r.get('Key_Risk')}"); rk.setWordWrap(True)
+            rk.setStyleSheet(f"color:{'#FF8597' if tone=='red' else '#F2B13C'};font-size:11.5px;font-weight:600;")
+            v.addWidget(rk)
+        return card
+
+
+class ValidationView(QWidget):
+    def __init__(self):
+        super().__init__()
+        outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0); outer.setSpacing(10)
+        self.top = QGridLayout(); self.top.setHorizontalSpacing(10); self.top.setVerticalSpacing(10)
+        outer.addLayout(self.top)
+        self.body = QScrollArea(); self.body.setWidgetResizable(True); self.body.setFrameShape(QFrame.NoFrame)
+        self._holder = QWidget(); self._v = QVBoxLayout(self._holder)
+        self._v.setContentsMargins(0, 0, 0, 0); self._v.setSpacing(10)
+        self.body.setWidget(self._holder)
+        outer.addWidget(self.body, 1)
+
+    def _clear(self):
+        while self.top.count():
+            it = self.top.takeAt(0)
+            if it.widget(): it.widget().deleteLater()
+        while self._v.count():
+            it = self._v.takeAt(0)
+            if it.widget(): it.widget().deleteLater()
+
+    def render(self, status: dict, report_text: str):
+        self._clear()
+        verdict = status.get("verdict", "Insufficient History")
+        grade = status.get("evidence_grade", "Insufficient Evidence")
+        horizon = status.get("horizon_days", "—")
+        stats = status.get("stats", {}) or {}
+        tone_v = "green" if verdict == "Validation Positive" else "amber"
+
+        def fmt(v, nd=2, suf=""):
+            try:
+                f = float(v)
+                if pd.isna(f): return "—"
+                return f"{f:.{nd}f}{suf}"
+            except Exception:
+                return "—"
+        cards = [
+            ("Verdict", verdict, tone_v, f"Horizon: {horizon}d"),
+            ("Evidence grade", grade, "blue", ""),
+            ("Validation dates", fmt(stats.get("validation_dates"), 0), "violet", "distinct signal dates"),
+            ("Effective dates", fmt(stats.get("effective_validation_dates"), 1), "violet", "quality-weighted"),
+            ("Top-Bottom spread", fmt(stats.get("spread"), 4), "teal", "quintile spread (return units)"),
+            ("Hit rate", fmt((stats.get("hit_rate") or 0) * 100, 1, "%"), "teal", "top-beats-bottom days"),
+            ("Adj. t-stat", fmt(stats.get("adj_tstat"), 2), "amber", ">=2 = strong"),
+            ("Bootstrap P(+)", fmt(stats.get("bootstrap_prob"), 2), "amber", ">=0.9 = strong"),
+        ]
+        for i, (t, v, tone, sub) in enumerate(cards):
+            self.top.addWidget(_make_kpi_card(t, v, tone, sub), i // 4, i % 4)
+
+        if report_text:
+            head = QLabel("Validation report"); head.setObjectName("Sub")
+            head.setStyleSheet("font-size:11px;letter-spacing:1px;text-transform:uppercase;")
+            self._v.addWidget(head)
+            box = QFrame(); box.setObjectName("Card"); box.setProperty("accent", "blue")
+            bv = QVBoxLayout(box); bv.setContentsMargins(14, 12, 14, 12)
+            body = QTextEdit(); body.setReadOnly(True); body.setPlainText(report_text)
+            body.setStyleSheet("background:transparent;border:none;color:#DEE0E5;")
+            bv.addWidget(body); self._v.addWidget(box, 1)
+        self._v.addStretch()
+
+
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("NSE Quant Engine — One-Button Runner")
+        self.resize(1480, 920)
+
+        central = QWidget(); self.setCentralWidget(central)
+        outer = QHBoxLayout(central); outer.setContentsMargins(0, 0, 0, 0); outer.setSpacing(0)
+
+        # ---- Left: main column (top bar + tabs) ----
+        left = QWidget()
+        col = QVBoxLayout(left); col.setContentsMargins(20, 16, 16, 12); col.setSpacing(12)
+
+        # Top bar
+        topbar = QFrame(); topbar.setObjectName("TopBar")
+        tb = QHBoxLayout(topbar); tb.setContentsMargins(18, 12, 14, 12); tb.setSpacing(12)
+        title = QLabel("NSE Quant Engine"); title.setObjectName("Header")
+        pill = QLabel("v4.6 · glassmorphic"); pill.setObjectName("Pill")
+        self.lbl_lastrun = QLabel("no runs yet"); self.lbl_lastrun.setObjectName("PillAge")
+        tb.addWidget(title); tb.addSpacing(8); tb.addWidget(pill)
+        tb.addSpacing(8); tb.addWidget(self.lbl_lastrun)
+        tb.addStretch()
+
+        self.cb_shadow = QCheckBox("Include shadow"); self.cb_shadow.setChecked(True)
+        self.cb_fetch  = QCheckBox("Refresh data");   self.cb_fetch.setChecked(True)
+        tb.addWidget(self.cb_shadow); tb.addWidget(self.cb_fetch)
+
+        self.btn_reload = QPushButton("⟳ Reload last run"); self.btn_reload.setObjectName("Ghost")
+        self.btn_browser = QPushButton("Open in browser ↗"); self.btn_browser.setObjectName("Ghost")
+        self.btn_run = QPushButton("▶  Run Full Pipeline"); self.btn_run.setObjectName("Primary")
+        self.btn_drawer = QToolButton(); self.btn_drawer.setObjectName("Drawer")
+        self.btn_drawer.setText("☰  Activity")
+        self.btn_drawer.setToolTip("Toggle run activity drawer (F9)")
+        tb.addWidget(self.btn_reload); tb.addWidget(self.btn_browser)
+        tb.addWidget(self.btn_run); tb.addWidget(self.btn_drawer)
+        col.addWidget(topbar)
+
+        # Tabs
+        self.tabs = QTabWidget()
+        self.dashboard = Dashboard()
+        self.tab_scores = self._make_table_tab()
+        self.tab_shadow = self._make_table_tab()
+        self.tab_compare = self._make_table_tab()
+        self.tab_dq = DQReportView()
+        self.tab_validation = ValidationView()
+        self.tab_trade = TradePlanView()
+        self.tabs.addTab(self.dashboard, "Dashboard")
+        for tab, name in [
+            (self.tab_scores, "Scores"), (self.tab_shadow, "Shadow"),
+            (self.tab_compare, "Compare"), (self.tab_dq, "DQ Report"),
+            (self.tab_validation, "Validation"), (self.tab_trade, "Trade Plan"),
+        ]:
+            self.tabs.addTab(tab, name)
+        col.addWidget(self.tabs, 1)
+
+        outer.addWidget(left, 1)
+
+        # ---- Right: collapsible drawer ----
+        self.drawer = RunDrawer()
+        outer.addWidget(self.drawer)
+        self.dashboard.set_console_callback(self.drawer.append_log)
+
+        # Status bar
+        self.status = QStatusBar(); self.setStatusBar(self.status)
+        self.status.showMessage("Ready.")
+
+        # Wire up
+        self.btn_run.clicked.connect(self.start_run)
+        self.btn_reload.clicked.connect(self.load_last_run)
+        self.btn_browser.clicked.connect(self.dashboard.open_browser)
+        self.btn_drawer.clicked.connect(self.drawer.toggle)
+        QShortcut(QKeySequence("F9"), self, activated=self.drawer.toggle)
+        QShortcut(QKeySequence("Ctrl+R"), self, activated=self.load_last_run)
+
+        self.bridge = LogBridge()
+        self.bridge.line.connect(self.drawer.append_log)
+        self.bridge.step.connect(self._on_step)
+        self.thread: RunnerThread | None = None
+
+        # Boot: show whatever the last run produced.
+        self.load_last_run()
+
+    # ----- tab builders -----
+    def _make_table_tab(self):
+        w = QWidget(); l = QVBoxLayout(w); l.setContentsMargins(0, 0, 0, 0)
+        tv = QTableView(); tv.horizontalHeader().setStretchLastSection(True)
+        tv.verticalHeader().setVisible(False)
+        l.addWidget(tv); w.table = tv
+        return w
+
+    def _make_text_tab(self):
+        w = QWidget(); l = QVBoxLayout(w); l.setContentsMargins(0, 0, 0, 0)
+        t = QTextEdit(); t.setReadOnly(True); l.addWidget(t); w.text = t
+        return w
+
+    # ----- live run hooks -----
+    def _on_step(self, info: dict):
+        self.drawer.update_step(info["name"], info["status"], info["duration_s"])
+        # live-refresh the dashboard whenever new artifacts may have landed
+        self.dashboard.refresh()
+
+    def start_run(self):
+        if self.thread and self.thread.isRunning():
+            return
+        self.drawer.log.clear()
+        self.drawer.set_status("running…")
+        self.status.showMessage("Running… (shadow waits for normal run to finish)")
+        self.btn_run.setEnabled(False)
+        steps = orchestrator.build_steps(
+            include_shadow=self.cb_shadow.isChecked(),
+            include_fetch=self.cb_fetch.isChecked(),
+        )
+        self.drawer.reset_steps([s.name for s in steps])
+        if not self.drawer.is_open():
+            self.drawer.set_open(True)
+        self.thread = RunnerThread(steps, self.bridge)
+        self.thread.done.connect(self._on_done)
+        self.thread.start()
+
+    def _on_done(self, summary: dict):
+        self.btn_run.setEnabled(True)
+        ok = sum(1 for s in summary["steps"] if s["status"] == "ok")
+        bad = sum(1 for s in summary["steps"] if s["status"] == "error")
+        skp = sum(1 for s in summary["steps"] if s["status"] == "skipped")
+        msg = f"Done in {summary['duration_s']}s — {ok} ok, {skp} skipped, {bad} errors."
+        self.status.showMessage(msg)
+        self.drawer.set_status("idle")
+        self.load_last_run()  # re-read manifest + refresh everything
+
+    def closeEvent(self, event):
+        # Guard against Qt/WebEngine-driven close attempts while a run is live.
+        if self.thread and self.thread.isRunning():
+            resp = QMessageBox.question(
+                self, "Run in progress",
+                "The pipeline is still running. Quit anyway?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if resp != QMessageBox.Yes:
+                event.ignore(); return
+        event.accept()
+
+    # ----- persistent last-run loading -----
+    def load_last_run(self):
+        """Read output/run_manifest.json (if present) and rehydrate the UI."""
+        manifest_path = OUT / "run_manifest.json"
+        manifest = {}
+        if manifest_path.exists():
+            try:
+                manifest = json.loads(manifest_path.read_text())
+            except Exception:
+                manifest = {}
+
+        # header age pill
+        finished = manifest.get("completed_at")
+        if finished:
+            champ = manifest.get("champion", "official").title()
+            self.lbl_lastrun.setText(f"last run: {_human_age(finished)} · champion: {champ}")
+        else:
+            self.lbl_lastrun.setText("no runs yet — click ▶ Run Full Pipeline")
+
+        # tabs (CSV / text)
+        def load_csv(p: Path):
+            try:
+                return pd.read_csv(p) if p.exists() else pd.DataFrame()
+            except Exception:
+                return pd.DataFrame()
+        self.tab_scores.table.setModel(_df_to_model(load_csv(OUT / "latest_scores.csv").head(250)))
+        self.tab_shadow.table.setModel(_df_to_model(load_csv(OUT / "latest_scores_v4_shadow.csv").head(250)))
+        self.tab_compare.table.setModel(_df_to_model(load_csv(OUT / "shadow_vs_official.csv")))
+        # Structured tabs (DQ, Validation, Trade Plan)
+        def _safe_json(p: Path) -> dict:
+            if not p.exists(): return {}
+            try:
+                return json.loads(p.read_text(encoding="utf-8").replace(": NaN", ": null"))
+            except Exception:
+                return {}
+        def _safe_text(p: Path) -> str:
+            try:
+                return p.read_text(encoding="utf-8") if p.exists() else ""
+            except Exception:
+                return ""
+
+        dq_summary = _safe_json(DATA / "dq_summary.json")
+        quality_df = load_csv(OUT / "etf_quality_latest.csv")
+        if quality_df.empty:
+            quality_df = load_csv(DATA / "etf_quality_latest.csv")
+        val_status = _safe_json(OUT / "validation_status.json")
+        val_report = _safe_text(OUT / "cross_sectional_validation_report.md")
+        trade_df = load_csv(OUT / "trade_plan_latest.csv")
+        trade_report = _safe_text(OUT / "trade_plan_report.md")
+        try:
+            self.tab_dq.render(dq_summary, quality_df)
+        except Exception as e:
+            _log_crash(f"DQ tab render failed: {e}")
+        try:
+            self.tab_validation.render(val_status, val_report)
+        except Exception as e:
+            _log_crash(f"Validation tab render failed: {e}")
+        try:
+            self.tab_trade.render(trade_df, val_status, trade_report)
+        except Exception as e:
+            _log_crash(f"Trade Plan tab render failed: {e}")
+
+        # drawer: hydrate step list from last run so users can see what ran
+        steps = manifest.get("steps") or []
+        if steps and not (self.thread and self.thread.isRunning()):
+            self.drawer.reset_steps([s["name"] for s in steps])
+            for s in steps:
+                self.drawer.update_step(s["name"], s["status"], s.get("duration_s", 0.0))
+            self.drawer.set_status(f"last run · {finished or ''}")
+
+        # dashboard (HTML)
+        self.dashboard.refresh()
+
+
+def main():
+    _install_global_hooks()
+    app = QApplication(sys.argv)
+    app.setStyleSheet(QSS)
+    app.setQuitOnLastWindowClosed(True)
+    pal = app.palette()
+    pal.setColor(QPalette.Window, QColor("#0A0B12"))
+    pal.setColor(QPalette.Base, QColor("#0A0B12"))
+    pal.setColor(QPalette.Text, QColor("#ECEDEE"))
+    pal.setColor(QPalette.WindowText, QColor("#ECEDEE"))
+    pal.setColor(QPalette.Highlight, QColor("#D8345F"))
+    app.setPalette(pal)
+
+    global _crash_bridge
+    _crash_bridge = _AppCrashBridge()
+    w = MainWindow()
+    _crash_bridge.line.connect(w.drawer.append_log)
+    # flush anything captured before the drawer existed
+    for m in _early_log:
+        w.drawer.append_log(m)
+    _early_log.clear()
+    w.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()

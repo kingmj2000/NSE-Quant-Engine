@@ -1,0 +1,27 @@
+Rule_Name,Applies_To,Parameter,Value,Notes
+Return_21D_Min_For_Low_Risk,All,Return_21D_Min,0.02,Top Low Risk sheet avoids low-return parking candidates
+Return_21D_Absolute_Pass,All,Return_21D_Absolute_Pass,0.00,Prevents falling-market percentile winners from becoming candidates
+Return_5D_Min,All,Return_5D_Min,-0.02,Recent move cannot be sharply negative
+Risk_Score_Min_For_Low_Risk,All,Risk_Score_Min,70,Minimum risk score for low-risk candidates
+Final_Score_Min_For_Low_Risk,All,Final_Score_Min,65,Minimum final score for low-risk candidates
+Max_NAV_Premium,ETF,Abs_NAV_Premium_Max,0.02,Penalize ETF if market price deviates more than 2 percent from NAV
+TER_Good,ETF,TER_Good,0.005,0.5 percent or less treated as good
+Tracking_Error_Good,ETF,Tracking_Error_Good,0.02,2 percent or less treated as good
+AUM_Good_Cr,ETF,AUM_Good_Cr,100,100 crore and above treated as better quality
+Round_Trip_Cost,All,Round_Trip_Cost,0.0030,Default round-trip transaction cost haircut
+Stock_Round_Trip_Cost,Stock,Stock_Round_Trip_Cost,0.0035,Estimated stock round-trip cost including taxes/slippage
+ETF_Round_Trip_Cost,ETF,ETF_Round_Trip_Cost,0.0025,Estimated liquid ETF round-trip cost
+ETF_MidLiquidity_Round_Trip_Cost,ETF,ETF_MidLiquidity_Round_Trip_Cost,0.0050,Estimated ETF cost for mid-liquidity names
+ETF_LowLiquidity_Round_Trip_Cost,ETF,ETF_LowLiquidity_Round_Trip_Cost,0.0100,Estimated ETF cost for low-liquidity names
+ETF_MidLiquidity_Value,ETF,ETF_MidLiquidity_Value,100000000,10 crore INR average traded value threshold
+ETF_LowLiquidity_Value,ETF,ETF_LowLiquidity_Value,20000000,2 crore INR average traded value threshold
+CrossVal_Min_Obs,All,CrossVal_Min_Obs,50,Minimum average observations per validation date for breadth
+CrossVal_Min_Dates,All,CrossVal_Min_Dates,10,Minimum matured signal dates before verdict can be positive/negative
+CrossVal_Min_Effective_Dates,All,CrossVal_Min_Effective_Dates,6,Minimum overlap-adjusted dates before verdict
+CrossVal_Min_Spread,All,CrossVal_Min_Spread,0.005,Top-bottom net spread required for positive validation
+CrossVal_Min_HitRate,All,CrossVal_Min_HitRate,0.55,Top bucket must beat bottom on this share of dates
+CrossVal_Min_TStat,All,CrossVal_Min_TStat,1.50,Minimum overlap-adjusted t-stat for positive validation
+CrossVal_Min_Bootstrap_Prob,All,CrossVal_Min_Bootstrap_Prob,0.70,Minimum bootstrap probability that top-bottom spread is positive
+CrossVal_Horizon,All,CrossVal_Horizon,10,Default horizon for validation verdict
+Bootstrap_Iterations,All,Bootstrap_Iterations,2000,Number of bootstrap resamples for spread confidence
+Bootstrap_Random_Seed,All,Bootstrap_Random_Seed,42,Seed for reproducible bootstrap
