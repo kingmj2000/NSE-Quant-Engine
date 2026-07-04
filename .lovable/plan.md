@@ -1,53 +1,33 @@
 ## Plan
 
-1. **Replace red-heavy dashboard visuals**
-   - Remove the matured/maturing donut entirely.
-   - Add clean metric cards: Matured, Awaiting maturation, Total signals, Maturation rate.
-   - Compute counts from the full `forward_return_history.csv`, filtered to the 10-day horizon when a horizon column exists so numbers reflect the actual dataset slice.
+1. **Stop the native auto-close crash**
+   - Treat exit code `-1073741819` as a native Qt/WebEngine access violation, not a normal Python exception.
+   - Stop auto-refreshing the embedded WebEngine dashboard during and immediately after pipeline steps.
+   - Replace the default in-app dashboard view with a stable native Qt summary when running inside the desktop app, while keeping `output/dashboard_latest.html` available through **Open in browser** for the full Chart.js dashboard.
+   - Enable Python fault logging at startup so native crashes write usable details to `output/last_crash.log` when Windows permits it.
+   - Set `QApplication.setQuitOnLastWindowClosed(False)` and add explicit quit handling so transient WebEngine/page destruction cannot close the whole app.
 
-2. **Replace the 5-day vs 10-day evidence field card**
-   - Remove the current thin/error-styled evidence tile block.
-   - Replace with a Validation Readiness visual: validation breadth, effective sample size, top-vs-bottom spread, adjusted t-stat, bootstrap confidence.
-   - Status colors: teal (usable), blue/violet (building), amber (thin) — no red.
+2. **Make the pipeline finish without closing the app**
+   - After `dashboard_html_builder` completes, keep the main window open, reload only the native tabs, and show a completion status.
+   - Add defensive guards around final reload/render calls so a bad report/dashboard artifact logs to Activity instead of terminating the app.
 
-3. **Dashboard color overhaul**
-   - Reserve crimson strictly for primary CTA, tabs, header pill, and a few key note headers.
-   - Remove red glow, red borders, and red fills from candidate cards, chart palettes, risk chips, avoid rows, per-day tiles, stop-loss numbers, and shadow blocks.
-   - Modern dark glassmorphic trading palette:
-     - Teal / green for positive
-     - Amber / coral for caution
-     - Blue / violet for neutral / structural
-     - Muted slate for unknown
-   - Repaint scatter dots, quintile bars, universe donut, shadow bar, verdict banners, and stop level accordingly.
+3. **Remove dark row/rectangle artifacts across cards**
+   - Fix the global QSS root rule so it does **not** paint every child `QWidget` dark.
+   - Make card holders, scroll-area contents, table viewports, labels, and markdown report widgets transparent by default.
+   - Remove the striped/opaque row fills in `QTableView`, markdown tables, and Trade Plan card value grids.
+   - Keep only subtle borders and accent colors, not black bands behind every line.
 
-4. **Fix the dark row rectangles inside Trade Plan and Validation cards**
-   - The dark bars are from `QTableView` / `QPlainTextEdit` / `QTextBrowser` and inner mini-cells rendering opaque dark rectangles inside translucent glass cards.
-   - Make inner value cells, tables, and text panels transparent with subtle glass styling:
-     - Remove solid backgrounds on table backgrounds, row cells, and inner `.lv` / `.pd` mini-cells.
-     - Replace with `background: transparent` or `rgba(...,0.04)` and remove hard borders.
-     - Consistent 8–10px radius, no visible row separators inside cards.
-   - Apply the same clean-up to md_to_widgets tables, DQ tab tables, and Trade Plan card level rows.
+4. **Increase report content height**
+   - Change markdown report rendering so text panels expand to content instead of being capped around one visible line.
+   - For Validation and Trade Plan reports, render sections as full-height panels inside the scroll area with larger minimum heights.
+   - Ensure report tables get enough height for multiple rows and use the parent tab scroll, not tiny nested scrollbars.
 
-5. **Clean up the scatter plot**
-   - Remove axis grid and tick labels.
-   - Keep clean plotting area, subtle bands optional, and rich hover tooltip with symbol, RSI, and volatility.
-   - Non-red dot colors: teal for clean, amber for caution.
+5. **Files to update**
+   - `desktop/nse_quant_engine/run_app.py`
+   - `desktop/nse_quant_engine/md_to_widgets.py`
+   - `desktop/nse_quant_engine/run_app.bat` if needed for improved native-crash logging
 
-6. **Fix Windows auto-close / invisible terminal output**
-   - Harden `run_app.py` so any startup or shutdown exception surfaces a persistent error dialog and a written crash log under `output/last_crash.log` before the process exits.
-   - Explicitly set the app not to quit implicitly on transient WebEngine close; ignore stray quit calls while a run is active.
-   - Update `run_app.bat` to keep the console open on both success and failure, print the exit code, and use `cmd /k pause` semantics so users can read errors regardless of how the app exited.
-
-7. **Validation after changes**
-   - Syntax-check every changed Python file.
-   - Regenerate dashboard HTML if data is present; inspect for removed donut, new metric cards, non-red palette, gridless scatter, and transparent inner rows.
-   - Confirm no remaining red borders/glow outside primary CTA/tabs/header.
-
-## Files to change
-
-- `desktop/nse_quant_engine/dashboard_html_builder.py`
-- `desktop/nse_quant_engine/run_app.py`
-- `desktop/nse_quant_engine/md_to_widgets.py`
-- `desktop/nse_quant_engine/run_app.bat`
-
-No web frontend files are changed.
+6. **Validation**
+   - Syntax-check changed Python files.
+   - Confirm the app can complete a run and remain open.
+   - Confirm Validation and Trade Plan cards no longer show black row bands and reports show multiple lines/sections at usable height.
