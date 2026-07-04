@@ -974,11 +974,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"NSE Quant Engine — v{APP_VERSION}")
         self.resize(1480, 920)
 
-        central = QWidget(); self.setCentralWidget(central)
+        central = QWidget(); central.setObjectName("AppRoot"); self.setCentralWidget(central)
         outer = QHBoxLayout(central); outer.setContentsMargins(0, 0, 0, 0); outer.setSpacing(0)
 
         # ---- Left: main column (top bar + tabs) ----
-        left = QWidget()
+        left = QWidget(); left.setObjectName("MainColumn")
         col = QVBoxLayout(left); col.setContentsMargins(20, 16, 16, 12); col.setSpacing(12)
 
         # Top bar
@@ -1115,8 +1115,10 @@ class MainWindow(QMainWindow):
     # ----- live run hooks -----
     def _on_step(self, info: dict):
         self.drawer.update_step(info["name"], info["status"], info["duration_s"])
-        # live-refresh the dashboard whenever new artifacts may have landed
-        self.dashboard.refresh()
+        # Do not refresh the dashboard on every step. On Windows, repeated
+        # dashboard reloads after long runs can trigger native Qt/WebEngine
+        # access violations outside Python exception handling. The final reload
+        # happens once in _on_done.
 
     def start_run(self):
         if self.thread and self.thread.isRunning():
@@ -1144,7 +1146,10 @@ class MainWindow(QMainWindow):
         msg = f"Done in {summary['duration_s']}s — {ok} ok, {skp} skipped, {bad} errors."
         self.status.showMessage(msg)
         self.drawer.set_status("idle")
-        self.load_last_run()  # re-read manifest + refresh everything
+        try:
+            self.load_last_run()  # re-read manifest + refresh everything once
+        except Exception as e:
+            _log_crash(f"Final reload after run failed but app stayed open: {type(e).__name__}: {e}")
 
     def closeEvent(self, event):
         # Guard against Qt/WebEngine-driven close attempts while a run is live.
