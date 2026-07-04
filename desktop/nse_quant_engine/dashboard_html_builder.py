@@ -115,14 +115,26 @@ def _payload() -> dict:
         f"{'🟢 GREEN' if shadow_state=='green' else '🔴 RED' if shadow_state=='red' else '🟡 AMBER'}."
     )
 
-    # --- maturity donut (matured vs maturing) ---
+    # --- maturity metric cards (matured vs maturing) — filtered to 10-day slice ---
     matured = maturing = 0
+    total_signals = 0
     if not forward.empty:
-        if "Net_Forward_Return" in forward.columns:
-            matured = int(forward["Net_Forward_Return"].notna().sum())
-            maturing = int(forward["Net_Forward_Return"].isna().sum())
+        fwd = forward
+        if "Horizon_Days" in fwd.columns:
+            try:
+                fwd10 = fwd[fwd["Horizon_Days"] == 10]
+                if not fwd10.empty:
+                    fwd = fwd10
+            except Exception:
+                pass
+        total_signals = int(len(fwd))
+        if "Net_Forward_Return" in fwd.columns:
+            matured = int(fwd["Net_Forward_Return"].notna().sum())
+            maturing = int(fwd["Net_Forward_Return"].isna().sum())
         else:
-            maturing = int(len(forward))
+            maturing = total_signals
+    maturation_rate = round(100.0 * matured / total_signals, 1) if total_signals else 0.0
+
 
     # --- evidence tiles for 5D + 10D ---
     def _evidence(horizon: int) -> dict:
