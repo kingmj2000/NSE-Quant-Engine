@@ -469,9 +469,9 @@ h2{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:1.4px;
   border-top:3px solid var(--blue);backdrop-filter:blur(18px);box-shadow:var(--glow-blue);transition:transform .2s}
 .card.clean{border-top-color:var(--teal);box-shadow:var(--glow-teal)}
 .card.warn{border-top-color:var(--amber);box-shadow:var(--glow-amber)}
-.card.risk{border-top-color:var(--red);box-shadow:0 12px 44px -14px rgba(229,85,106,0.32)}
+.card.risk{border-top-color:var(--amber);box-shadow:var(--glow-amber)}
 .card:hover{transform:translateY(-2px)}
-.card.clean{border-top-color:var(--teal)}
+
 
 .card .top{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
 .card .sym{font-size:16px;font-weight:700}
