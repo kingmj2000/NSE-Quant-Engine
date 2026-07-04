@@ -20,8 +20,9 @@ v4.8
 - Auto-close hardening: window is anchored on self, WebEngine + tab renders
   are wrapped so a single render error never tears down the QApplication.
 """
-APP_VERSION = "4.8"
 from __future__ import annotations
+
+APP_VERSION = "4.8"
 import sys
 import json
 import threading
