@@ -49,16 +49,12 @@ import orchestrator
 import md_to_widgets
 
 
-try:
-    from PySide6.QtWebEngineWidgets import QWebEngineView
-    try:
-        from PySide6.QtWebEngineCore import QWebEnginePage
-    except Exception:
-        QWebEnginePage = None
-    HAS_WEBENGINE = True
-except ImportError:
-    QWebEnginePage = None
-    HAS_WEBENGINE = False
+# The in-app dashboard is native Qt. Avoid importing QtWebEngine in the desktop
+# process because local-file Chart.js reloads were the source of the Windows
+# native access-violation exit (-1073741819). The generated HTML still opens in
+# the user's external browser via Dashboard.open_browser().
+QWebEnginePage = None
+HAS_WEBENGINE = False
 
 
 # --------------------------- Global crash guards ----------------------------
@@ -934,8 +930,8 @@ class CompareView(QWidget):
         self._v.addWidget(head)
         tbl = QTableView(); tbl.setModel(_df_to_model(show.head(60)))
         tbl.horizontalHeader().setStretchLastSection(True); tbl.verticalHeader().setVisible(False)
-        tbl.setMinimumHeight(320); tbl.setAlternatingRowColors(True)
-        tbl.setStyleSheet("QTableView{alternate-background-color:rgba(255,255,255,0.025);}")
+        tbl.setMinimumHeight(360); tbl.setAlternatingRowColors(False)
+        tbl.setStyleSheet("QTableView{alternate-background-color:transparent;gridline-color:transparent;}")
         self._v.addWidget(tbl, 1)
 
         # Top movers panel
