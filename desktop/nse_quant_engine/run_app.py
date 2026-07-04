@@ -1109,7 +1109,7 @@ class MainWindow(QMainWindow):
                 return pd.DataFrame()
         self.tab_scores.table.setModel(_df_to_model(load_csv(OUT / "latest_scores.csv").head(250)))
         self.tab_shadow.table.setModel(_df_to_model(load_csv(OUT / "latest_scores_v4_shadow.csv").head(250)))
-        self.tab_compare.table.setModel(_df_to_model(load_csv(OUT / "shadow_vs_official.csv")))
+        cmp_df = load_csv(OUT / "shadow_vs_official.csv")
         # Structured tabs (DQ, Validation, Trade Plan)
         def _safe_json(p: Path) -> dict:
             if not p.exists(): return {}
