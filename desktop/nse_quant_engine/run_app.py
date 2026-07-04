@@ -1210,4 +1210,20 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except BaseException as exc:
+        tb = traceback.format_exc()
+        _write_crash_log(f"[startup fatal] {type(exc).__name__}: {exc}\n{tb}")
+        print(f"\n*** Startup fatal: {type(exc).__name__}: {exc}\n{tb}", file=sys.stderr)
+        try:
+            from PySide6.QtWidgets import QApplication as _QA, QMessageBox as _MB
+            _app = _QA.instance() or _QA(sys.argv)
+            _MB.critical(None, "NSE Quant Engine crashed",
+                         f"{type(exc).__name__}: {exc}\n\nDetails written to output/last_crash.log")
+        except Exception:
+            pass
+        sys.exit(1)
+
