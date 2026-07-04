@@ -115,14 +115,26 @@ def _payload() -> dict:
         f"{'🟢 GREEN' if shadow_state=='green' else '🔴 RED' if shadow_state=='red' else '🟡 AMBER'}."
     )
 
-    # --- maturity donut (matured vs maturing) ---
+    # --- maturity metric cards (matured vs maturing) — filtered to 10-day slice ---
     matured = maturing = 0
+    total_signals = 0
     if not forward.empty:
-        if "Net_Forward_Return" in forward.columns:
-            matured = int(forward["Net_Forward_Return"].notna().sum())
-            maturing = int(forward["Net_Forward_Return"].isna().sum())
+        fwd = forward
+        if "Horizon_Days" in fwd.columns:
+            try:
+                fwd10 = fwd[fwd["Horizon_Days"] == 10]
+                if not fwd10.empty:
+                    fwd = fwd10
+            except Exception:
+                pass
+        total_signals = int(len(fwd))
+        if "Net_Forward_Return" in fwd.columns:
+            matured = int(fwd["Net_Forward_Return"].notna().sum())
+            maturing = int(fwd["Net_Forward_Return"].isna().sum())
         else:
-            maturing = int(len(forward))
+            maturing = total_signals
+    maturation_rate = round(100.0 * matured / total_signals, 1) if total_signals else 0.0
+
 
     # --- evidence tiles for 5D + 10D ---
     def _evidence(horizon: int) -> dict:
@@ -334,7 +346,9 @@ def _payload() -> dict:
         "bottom_line": bottom_line,
         "regime": (val.get("regime") or "Neutral"),
         "signal_count": maturing,
-        "maturity": {"matured": matured, "maturing": maturing},
+        "maturity": {"matured": matured, "maturing": maturing,
+                     "total": total_signals, "rate": maturation_rate},
+
         "evidence_10": evidence_10,
         "evidence_5": evidence_5,
         "quintile": quintile,
@@ -455,37 +469,49 @@ h2{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:1.4px;
   border-top:3px solid var(--blue);backdrop-filter:blur(18px);box-shadow:var(--glow-blue);transition:transform .2s}
 .card.clean{border-top-color:var(--teal);box-shadow:var(--glow-teal)}
 .card.warn{border-top-color:var(--amber);box-shadow:var(--glow-amber)}
-.card.risk{border-top-color:var(--red);box-shadow:0 12px 44px -14px rgba(229,85,106,0.32)}
+.card.risk{border-top-color:var(--amber);box-shadow:var(--glow-amber)}
 .card:hover{transform:translateY(-2px)}
-.card.clean{border-top-color:var(--teal)}
+
 
 .card .top{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
 .card .sym{font-size:16px;font-weight:700}
 .card .nm{font-size:11px;color:var(--dim)}
 .card .px{text-align:right} .card .px .lbl{font-size:10px;color:var(--dim)} .card .px .p{font-size:16px;font-weight:700}
-.lblchip{font-size:10px;font-weight:700;padding:3px 9px;border-radius:6px;background:var(--red-bg);color:var(--red-soft);white-space:nowrap}
-.lblchip.review{background:var(--green-bg);color:var(--green)}
+.lblchip{font-size:10px;font-weight:700;padding:3px 9px;border-radius:6px;background:var(--amber-bg);color:var(--amber);white-space:nowrap}
+.lblchip.review{background:var(--teal-bg);color:var(--teal)}
 .levels{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-top:11px}
-.lv{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:7px 9px}
+.lv{background:rgba(255,255,255,0.03);border:1px solid var(--line);border-radius:8px;padding:7px 9px}
 .lv .l{font-size:9.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.4px}
 .lv .n{font-size:13px;font-weight:640;margin-top:1px}
-.lv.stop .n{color:var(--red-soft)} .lv.t .n{color:var(--green)}
+.lv.stop .n{color:var(--amber)} .lv.t .n{color:var(--teal)}
 .perday{display:flex;gap:8px;margin-top:9px;flex-wrap:wrap}
-.pd{flex:1;min-width:90px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 8px;text-align:center}
+.pd{flex:1;min-width:90px;background:rgba(255,255,255,0.03);border:1px solid var(--line);border-radius:8px;padding:6px 8px;text-align:center}
 .pd .l{font-size:9px;color:var(--dim)} .pd .n{font-size:13px;font-weight:650}
 .pd.edge .n{color:var(--dim)}
 .flags{margin-top:10px;display:flex;flex-direction:column;gap:5px}
 .flag{font-size:11px;color:var(--muted)} .flag b{color:var(--txt)}
 .fdot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;vertical-align:middle}
-.d-red{background:var(--red)} .d-amber{background:var(--amber)} .d-green{background:var(--green)} .d-dim{background:var(--dim)}
+.d-red{background:var(--amber)} .d-amber{background:var(--amber)} .d-green{background:var(--teal)} .d-dim{background:var(--dim)}
 
 table{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:4px}
 th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
 th{color:var(--dim);font-size:10.5px;text-transform:uppercase;letter-spacing:.5px;font-weight:600}
 td .rsym{font-weight:640}
 .rchip{font-size:10px;font-weight:650;padding:2px 7px;border-radius:5px}
-.rc-veto{background:var(--red-bg);color:var(--red-soft)} .rc-rsi{background:var(--amber-bg);color:var(--amber)}
+.rc-veto{background:var(--amber-bg);color:var(--amber)} .rc-rsi{background:var(--amber-bg);color:var(--amber)}
 .rc-vol{background:rgba(163,113,247,.14);color:var(--violet)} .rc-etf{background:rgba(88,166,255,.12);color:var(--blue)}
+
+/* Readiness visual (replaces 5D vs 10D evidence tile row) */
+.rmeter{display:flex;flex-direction:column;gap:9px;margin-top:8px}
+.rrow{display:grid;grid-template-columns:130px 1fr 68px;gap:10px;align-items:center;font-size:11.5px}
+.rrow .rl{color:var(--muted);text-transform:uppercase;letter-spacing:.5px;font-size:10.5px}
+.rrow .rv{color:var(--txt);text-align:right;font-weight:650}
+.rbar{position:relative;height:8px;border-radius:6px;background:rgba(255,255,255,0.05);overflow:hidden}
+.rbar > span{position:absolute;left:0;top:0;bottom:0;border-radius:6px}
+.rbar.ok  > span{background:linear-gradient(90deg,var(--teal),#7FE0C6)}
+.rbar.mid > span{background:linear-gradient(90deg,var(--blue),var(--violet))}
+.rbar.low > span{background:linear-gradient(90deg,var(--amber),#FFD07A)}
+
 
 .caption{background:var(--panel2);border:1px dashed var(--line2);border-radius:10px;padding:11px 14px;font-size:11.5px;color:var(--muted);margin-top:12px}
 .caption b{color:var(--txt)}
@@ -505,21 +531,25 @@ canvas{margin-top:4px}
 
 <div class="banner" id="banner"></div>
 
-<h2>Signal maturation &amp; universe composition</h2>
+<h2>Signal maturation &amp; validation readiness</h2>
 <div class="grid twocol">
   <div class="glass g-teal panel">
     <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Signal maturation (10-day horizon)</div>
-    <div class="evid" id="maturityCards" style="grid-template-columns:1fr 1fr"></div>
-    <canvas id="maturityBar" height="80" style="margin-top:10px"></canvas>
-    <div class="sub" id="maturityNote" style="margin-top:8px"></div>
+    <div class="evid" id="maturityCards" style="grid-template-columns:repeat(4,1fr)"></div>
+    <div class="sub" id="maturityNote" style="margin-top:10px"></div>
   </div>
   <div class="glass g-violet panel">
-    <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Universe composition &amp; evidence gauge</div>
-    <canvas id="universeChart" height="150"></canvas>
-    <div class="evid" id="evidence10" style="grid-template-columns:repeat(5,1fr);margin-top:10px"></div>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Validation readiness (10-day)</div>
+    <div class="rmeter" id="readiness"></div>
     <div class="sub" id="evidenceNote" style="margin-top:10px"></div>
   </div>
 </div>
+
+<h2>Universe composition</h2>
+<div class="glass g-blue panel">
+  <canvas id="universeChart" height="110"></canvas>
+</div>
+
 
 <h2>Shadow vs Official &mdash; ranking overlap</h2>
 <div class="glass g-blue panel">
@@ -601,35 +631,38 @@ document.getElementById("banner").innerHTML = `
    </div>
  </div>`;
 
-// evidence tiles
-function tagFor(field, val10){
-  if (val10===null||val10===undefined) return ["t-thin","Thin"];
-  if (field==="spread")          return val10>0.01 ? ["t-ok","Strong"] : val10>0 ? ["t-build","Building"] : ["t-thin","Inverted"];
-  if (field==="validation_dates")return val10>=20 ? ["t-ok","Sufficient"] : val10>=10 ? ["t-build","Building"] : ["t-thin","Thin"];
-  if (field==="effective_validation_dates") return val10>=5 ? ["t-ok","Sufficient"] : val10>=2 ? ["t-build","Building"] : ["t-thin","Thin"];
-  if (field==="adj_tstat")       return val10>=2 ? ["t-ok","Strong"] : val10>=1 ? ["t-build","Building"] : ["t-thin","Thin"];
-  if (field==="bootstrap_prob")  return val10>=0.9 ? ["t-ok","Strong"] : val10>=0.7 ? ["t-build","Building"] : ["t-thin","Thin"];
-  return ["t-thin","Thin"];
+// Readiness meter — replaces the 5D-vs-10D evidence tile row with a
+// horizontal progress-bar visual driven by the 10-day validation stats.
+function readinessRow(label, val, cfg){
+  // cfg = {ok, mid, nd, suffix} — thresholds and display precision
+  const nd = cfg.nd ?? 2, suf = cfg.suffix ?? "";
+  const v = (val===null||val===undefined) ? null : Number(val);
+  let pct = 0, cls = "low";
+  if (v !== null){
+    pct = Math.max(2, Math.min(100, Math.round((v / cfg.ok) * 100)));
+    if (v >= cfg.ok)      cls = "ok";
+    else if (v >= cfg.mid) cls = "mid";
+    else                   cls = "low";
+  }
+  const shown = v === null ? "—" : v.toFixed(nd) + suf;
+  return `<div class="rrow"><div class="rl">${label}</div>
+    <div class="rbar ${cls}"><span style="width:${pct}%"></span></div>
+    <div class="rv">${shown}</div></div>`;
 }
-const evLabels = [
-  ["validation_dates","Validation Dates",0],
-  ["effective_validation_dates","Effective Val. Dates",1],
-  ["spread","Top&minus;Bottom Quintile",4],
-  ["adj_tstat","Adj. t-stat",2],
-  ["bootstrap_prob","Bootstrap P(+)",2],
-];
-document.getElementById("evidence10").innerHTML = evLabels.map(([k,label,nd])=>{
-  const v = DATA.evidence_10[k];
-  const [cls, tagTxt] = tagFor(k, v);
-  const display = (v===null||v===undefined) ? "&mdash;" : Number(v).toFixed(nd);
-  return `<div class="tile"><div class="k">${label}</div><div class="val">${display}</div><span class="tag ${cls}">${tagTxt}</span></div>`;
-}).join("");
+const e10 = DATA.evidence_10 || {};
+document.getElementById("readiness").innerHTML = [
+  readinessRow("Validation dates", e10.validation_dates, {ok:20, mid:10, nd:0}),
+  readinessRow("Effective dates",  e10.effective_validation_dates, {ok:5, mid:2, nd:1}),
+  readinessRow("Q1&minus;Q5 spread", e10.spread, {ok:0.01, mid:0.003, nd:4}),
+  readinessRow("Adj. t-stat",      e10.adj_tstat, {ok:2, mid:1, nd:2}),
+  readinessRow("Bootstrap P(+)",   e10.bootstrap_prob, {ok:0.9, mid:0.7, nd:2}),
+].join("");
 
-const e5 = DATA.evidence_5;
+const e5 = DATA.evidence_5 || {};
 document.getElementById("evidenceNote").innerHTML =
-  `5-day horizon: ${fmt(e5.validation_dates,'',0)} dates, eff. ${fmt(e5.effective_validation_dates,'',1)}, spread ${fmt(e5.spread,'',4)}, t-stat ${fmt(e5.adj_tstat,'',2)}, bootstrap ${fmt(e5.bootstrap_prob,'',2)}.`;
+  `5-day companion: ${fmt(e5.validation_dates,'',0)} dates, spread ${fmt(e5.spread,'',4)}, t-stat ${fmt(e5.adj_tstat,'',2)}.`;
 document.getElementById("maturityNote").innerHTML =
-  `${num(DATA.maturity.matured)} signals matured, ${num(DATA.maturity.maturing)} still maturing. A huge maturing pool early in accumulation is normal — not a data fault.`;
+  `${num(DATA.maturity.matured)} matured / ${num(DATA.maturity.total)} total &middot; ${DATA.maturity.rate}% maturation rate. A large awaiting pool early in accumulation is normal — not a data fault.`;
 
 // charts — guarded so one chart cannot break the whole dashboard.
 function chartError(canvas, msg){
@@ -656,20 +689,14 @@ if(typeof Chart !== 'undefined'){
 const grid={color:"rgba(255,255,255,0.06)"};
 
 
-// Maturity KPI cards (replaces the crimson matured/maturing donut).
+// Maturity metric cards (matured / awaiting / total / rate).
 document.getElementById("maturityCards").innerHTML = `
   <div class="tile"><div class="k">Matured</div><div class="val" style="color:var(--teal)">${num(DATA.maturity.matured)}</div><span class="tag t-ok">forward return known</span></div>
-  <div class="tile"><div class="k">Awaiting maturation</div><div class="val" style="color:var(--blue-soft)">${num(DATA.maturity.maturing)}</div><span class="tag t-build">horizon not yet elapsed</span></div>`;
+  <div class="tile"><div class="k">Awaiting maturation</div><div class="val" style="color:var(--blue-soft)">${num(DATA.maturity.maturing)}</div><span class="tag t-build">horizon not elapsed</span></div>
+  <div class="tile"><div class="k">Total signals</div><div class="val" style="color:var(--violet-soft)">${num(DATA.maturity.total)}</div><span class="tag t-build">10-day slice</span></div>
+  <div class="tile"><div class="k">Maturation rate</div><div class="val" style="color:var(--amber)">${DATA.maturity.rate}%</div><span class="tag t-thin">matured / total</span></div>`;
 
-safeChart("maturityBar",{
-  type:"bar",
-  data:{labels:["Signal pool"], datasets:[
-    {label:"Matured", data:[DATA.maturity.matured||0], backgroundColor:"#38BDB0", stack:"a", borderRadius:4},
-    {label:"Awaiting", data:[DATA.maturity.maturing||0], backgroundColor:"rgba(88,166,255,0.55)", stack:"a", borderRadius:4},
-  ]},
-  options:{indexAxis:"y", plugins:{legend:{position:"bottom",labels:{boxWidth:10,padding:10}}},
-    scales:{x:{stacked:true,grid:{color:"rgba(255,255,255,0.06)"}},y:{stacked:true,grid:{display:false}}}}
-});
+
 
 // Universe composition donut — uses teal/blue/violet/amber, never crimson.
 const uni = DATA.universe || {};
@@ -717,21 +744,26 @@ safeChart("quintileChart",{
     scales:{y:{grid,title:{display:true,text:"% median net return"}},x:{grid:{display:false}}}}
 });
 
-// scatter
+// scatter — minimal: no grid, no ticks, subtle threshold shading, rich tooltip.
 const band={id:"band",beforeDraw(ch){const{ctx,chartArea:a,scales:{x,y}}=ch;if(!a)return;ctx.save();
-  const rsi=x.getPixelForValue(71.5);ctx.fillStyle="rgba(242,177,60,.07)";ctx.fillRect(rsi,a.top,a.right-rsi,a.bottom-a.top);
-  const vol=y.getPixelForValue(30);ctx.fillStyle="rgba(163,113,247,.07)";ctx.fillRect(a.left,a.top,a.right-a.left,vol-a.top);
-  ctx.setLineDash([5,4]);ctx.strokeStyle="#F2B13C";ctx.beginPath();ctx.moveTo(rsi,a.top);ctx.lineTo(rsi,a.bottom);ctx.stroke();
-  ctx.strokeStyle="#A371F7";ctx.beginPath();ctx.moveTo(a.left,vol);ctx.lineTo(a.right,vol);ctx.stroke();ctx.restore();}};
+  const rsi=x.getPixelForValue(71.5);ctx.fillStyle="rgba(242,177,60,.06)";ctx.fillRect(rsi,a.top,a.right-rsi,a.bottom-a.top);
+  const vol=y.getPixelForValue(30);ctx.fillStyle="rgba(163,113,247,.05)";ctx.fillRect(a.left,a.top,a.right-a.left,vol-a.top);
+  ctx.setLineDash([4,4]);ctx.strokeStyle="rgba(242,177,60,0.55)";ctx.lineWidth=1;
+  ctx.beginPath();ctx.moveTo(rsi,a.top);ctx.lineTo(rsi,a.bottom);ctx.stroke();
+  ctx.strokeStyle="rgba(163,113,247,0.45)";ctx.beginPath();ctx.moveTo(a.left,vol);ctx.lineTo(a.right,vol);ctx.stroke();ctx.restore();}};
 safeChart("scatterChart",{
   type:"scatter",plugins:[band],
-  data:{datasets:[{label:"Top-20 candidates",data:DATA.scatter,pointRadius:7,pointHoverRadius:9,
-    backgroundColor:c=>{const d=c.raw;return (d&&(d.x>=71||d.y>=30))?"#F2B13C":"#3FB950";},
-    borderColor:"#0B0B0F",borderWidth:1.5}]},
-  options:{plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>`${c.raw.s}: RSI ${c.raw.x}, vol ${c.raw.y}%`}}},
-    scales:{x:{title:{display:true,text:"RSI(14)"},grid,min:30,max:90},
-            y:{title:{display:true,text:"20D vol (%)"},grid,min:0,suggestedMax:45}}}
+  data:{datasets:[{label:"Top-20 candidates",data:DATA.scatter,pointRadius:7,pointHoverRadius:10,
+    backgroundColor:c=>{const d=c.raw;return (d&&(d.x>=71||d.y>=30))?"#F2B13C":"#38BDB0";},
+    borderColor:"rgba(255,255,255,0.85)",borderWidth:1.2}]},
+  options:{plugins:{legend:{display:false},
+      tooltip:{backgroundColor:"rgba(14,16,26,0.94)",borderColor:"rgba(255,255,255,0.10)",borderWidth:1,
+        padding:10,titleColor:"#ECEDEE",bodyColor:"#DEE0E5",
+        callbacks:{title:c=>c[0].raw.s, label:c=>[`RSI(14): ${c.raw.x}`,`20D volatility: ${c.raw.y}%`]}}},
+    scales:{x:{min:30,max:90,grid:{display:false,drawBorder:false},ticks:{display:false},title:{display:false}},
+            y:{min:0,suggestedMax:45,grid:{display:false,drawBorder:false},ticks:{display:false},title:{display:false}}}}
 });
+
 
 // candidate cards
 const dotc={red:"d-red",amber:"d-amber",green:"d-green",dim:"d-dim"};

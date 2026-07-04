@@ -69,7 +69,18 @@ class _AppCrashBridge(QObject):
 _crash_bridge: "_AppCrashBridge | None" = None
 _early_log: list[str] = []
 
+def _write_crash_log(msg: str) -> None:
+    """Append to output/last_crash.log so run_app.bat can surface it."""
+    try:
+        log_dir = Path(__file__).resolve().parent / "output"
+        log_dir.mkdir(exist_ok=True)
+        with (log_dir / "last_crash.log").open("a", encoding="utf-8") as fh:
+            fh.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
+    except Exception:
+        pass
+
 def _log_crash(msg: str) -> None:
+    _write_crash_log(msg)
     if _crash_bridge is not None:
         try:
             _crash_bridge.line.emit(msg)
@@ -78,6 +89,7 @@ def _log_crash(msg: str) -> None:
             pass
     _early_log.append(msg)
     print(msg, file=sys.stderr)
+
 
 def _install_global_hooks() -> None:
     def _sys_hook(exc_type, exc, tb):
@@ -214,26 +226,31 @@ QTabBar::tab {
 QTabBar::tab:selected { background: rgba(216,52,95,0.18); color: #FFFFFF; }
 QTabBar::tab:hover:!selected { color: #ECEDEE; }
 
-QPlainTextEdit, QTextEdit {
-    background: rgba(10,12,20,0.85);
+QPlainTextEdit, QTextEdit, QTextBrowser {
+    background: transparent;
     border: 1px solid rgba(255,255,255,0.05);
     border-radius: 12px; padding: 10px;
     color: #D6D7DA;
+    selection-background-color: rgba(216,52,95,0.30);
 }
 QTableView {
-    background: rgba(10,12,20,0.85);
-    gridline-color: rgba(255,255,255,0.05);
-    border: 1px solid rgba(255,255,255,0.05);
-    border-radius: 12px;
-    selection-background-color: rgba(216,52,95,0.30);
+    background: transparent;
+    gridline-color: rgba(255,255,255,0.04);
+    border: none;
+    border-radius: 10px;
+    selection-background-color: rgba(216,52,95,0.28);
     selection-color: #fff;
+    alternate-background-color: rgba(255,255,255,0.025);
+    outline: 0;
 }
+QTableView::item { border: none; padding: 6px 8px; }
 QHeaderView::section {
-    background: #14161F; color: #8A92A6;
+    background: rgba(255,255,255,0.03); color: #8A92A6;
     padding: 6px 8px; border: none;
-    border-bottom: 1px solid rgba(255,255,255,0.05);
+    border-bottom: 1px solid rgba(255,255,255,0.06);
     font-weight: 600;
 }
+
 QProgressBar {
     background: #14141A; border: none; border-radius: 6px; height: 10px; text-align: center;
 }
@@ -582,7 +599,7 @@ class DQReportView(QWidget):
             self._body_v.addWidget(head)
             grid = QGridLayout(); grid.setHorizontalSpacing(8); grid.setVerticalSpacing(8)
             for i, (flag, count) in enumerate(sorted(flags.items(), key=lambda x: -x[1])):
-                tone = "teal" if flag.lower() == "complete" else ("amber" if "missing" in flag.lower() else "red")
+                tone = "teal" if flag.lower() == "complete" else ("amber" if "missing" in flag.lower() else "amber")
                 card = QFrame(); card.setObjectName("Card"); card.setProperty("accent", tone)
                 cv = QHBoxLayout(card); cv.setContentsMargins(12, 8, 12, 8)
                 cv.addWidget(_make_pill(str(count), tone))
@@ -672,9 +689,10 @@ class TradePlanView(QWidget):
             except Exception:
                 return "—"
         risk = str(r.get("Key_Risk", "") or "").strip().lower()
-        if "veto" in risk: tone = "red"
+        if "veto" in risk: tone = "amber"
         elif "overbought" in risk or "elevated" in risk: tone = "amber"
         else: tone = "teal"
+
         card = QFrame(); card.setObjectName("Card"); card.setProperty("accent", tone)
         v = QVBoxLayout(card); v.setContentsMargins(14, 12, 14, 12); v.setSpacing(6)
         top = QHBoxLayout()
@@ -693,7 +711,7 @@ class TradePlanView(QWidget):
             n = QLabel(val); n.setStyleSheet(f"color:{color};font-size:12.5px;font-weight:650;")
             grid.addWidget(l, row * 2, col); grid.addWidget(n, row * 2 + 1, col)
         _cell(0, 0, "Buy zone", f"{_num(r.get('Buy_Zone_Low'))}–{_num(r.get('Buy_Zone_High'))}")
-        _cell(0, 1, "Stop", _num(r.get('Stop_Loss')), "#FF8597")
+        _cell(0, 1, "Stop", _num(r.get('Stop_Loss')), "#F2B13C")
         _cell(0, 2, "Hold", f"{int(r.get('Hold_Days_Min',5) or 5)}–{int(r.get('Hold_Days_Max',15) or 15)}d")
         _cell(1, 0, "Target 1", _num(r.get('Target_1')), "#7FE0C6")
         _cell(1, 1, "Target 2", _num(r.get('Target_2')), "#7FE0C6")
@@ -706,7 +724,7 @@ class TradePlanView(QWidget):
             v.addWidget(rl)
         if risk and risk != "no major technical risk flagged":
             rk = QLabel(f"Risk: {r.get('Key_Risk')}"); rk.setWordWrap(True)
-            rk.setStyleSheet(f"color:{'#FF8597' if tone=='red' else '#F2B13C'};font-size:11.5px;font-weight:600;")
+            rk.setStyleSheet("color:#F2B13C;font-size:11.5px;font-weight:600;")
             v.addWidget(rk)
         return card
 
@@ -995,7 +1013,7 @@ class MainWindow(QMainWindow):
         view = getattr(self.dashboard, "view", None)
         if view is None:
             return
-        expected_ids = ("maturityCards", "universeChart", "shadowCards", "shadowBar")
+        expected_ids = ("maturityCards", "readiness", "universeChart", "shadowCards")
 
         def _after_load(ok: bool):
             if not ok:
@@ -1192,4 +1210,20 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except BaseException as exc:
+        tb = traceback.format_exc()
+        _write_crash_log(f"[startup fatal] {type(exc).__name__}: {exc}\n{tb}")
+        print(f"\n*** Startup fatal: {type(exc).__name__}: {exc}\n{tb}", file=sys.stderr)
+        try:
+            from PySide6.QtWidgets import QApplication as _QA, QMessageBox as _MB
+            _app = _QA.instance() or _QA(sys.argv)
+            _MB.critical(None, "NSE Quant Engine crashed",
+                         f"{type(exc).__name__}: {exc}\n\nDetails written to output/last_crash.log")
+        except Exception:
+            pass
+        sys.exit(1)
+
