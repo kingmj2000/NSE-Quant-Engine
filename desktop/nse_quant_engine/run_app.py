@@ -27,6 +27,7 @@ import sys
 import json
 import threading
 import traceback
+import faulthandler
 from datetime import datetime
 from pathlib import Path
 
@@ -48,16 +49,12 @@ import orchestrator
 import md_to_widgets
 
 
-try:
-    from PySide6.QtWebEngineWidgets import QWebEngineView
-    try:
-        from PySide6.QtWebEngineCore import QWebEnginePage
-    except Exception:
-        QWebEnginePage = None
-    HAS_WEBENGINE = True
-except ImportError:
-    QWebEnginePage = None
-    HAS_WEBENGINE = False
+# The in-app dashboard is native Qt. Avoid importing QtWebEngine in the desktop
+# process because local-file Chart.js reloads were the source of the Windows
+# native access-violation exit (-1073741819). The generated HTML still opens in
+# the user's external browser via Dashboard.open_browser().
+QWebEnginePage = None
+HAS_WEBENGINE = False
 
 
 # --------------------------- Global crash guards ----------------------------
@@ -68,6 +65,7 @@ class _AppCrashBridge(QObject):
 
 _crash_bridge: "_AppCrashBridge | None" = None
 _early_log: list[str] = []
+_fault_log_fh = None
 
 def _write_crash_log(msg: str) -> None:
     """Append to output/last_crash.log so run_app.bat can surface it."""
@@ -134,7 +132,15 @@ DATA = BASE / "data"
 # red veto/error     : #E5556A  (used sparingly)
 QSS = """
 * { font-family: 'Segoe UI', 'Inter', sans-serif; color: #ECEDEE; }
-QMainWindow, QWidget { background: #0A0B12; }
+QMainWindow { background: #0A0B12; }
+QWidget { background: transparent; }
+QWidget#AppRoot, QWidget#MainColumn { background: #0A0B12; }
+QScrollArea, QScrollArea > QWidget, QScrollArea > QWidget > QWidget,
+QAbstractScrollArea, QAbstractScrollArea::viewport {
+    background: transparent;
+    border: none;
+}
+QLabel { background: transparent; }
 
 QFrame#Card {
     background: rgba(22,24,34,0.62);
@@ -235,17 +241,19 @@ QPlainTextEdit, QTextEdit, QTextBrowser {
 }
 QTableView {
     background: transparent;
+    background-color: transparent;
     gridline-color: rgba(255,255,255,0.04);
     border: none;
     border-radius: 10px;
     selection-background-color: rgba(216,52,95,0.28);
     selection-color: #fff;
-    alternate-background-color: rgba(255,255,255,0.025);
+    alternate-background-color: transparent;
     outline: 0;
 }
-QTableView::item { border: none; padding: 6px 8px; }
+QTableView::item { background: transparent; border: none; padding: 6px 8px; }
+QTableView::item:alternate { background: transparent; }
 QHeaderView::section {
-    background: rgba(255,255,255,0.03); color: #8A92A6;
+    background: rgba(255,255,255,0.025); color: #8A92A6;
     padding: 6px 8px; border: none;
     border-bottom: 1px solid rgba(255,255,255,0.06);
     font-weight: 600;
@@ -353,33 +361,35 @@ else:
 
 # ----------------------------- Dashboard ------------------------------------
 class Dashboard(QWidget):
-    """Glassmorphic HTML evidence dashboard rendered by Chart.js via QWebEngineView.
+    """Stable native summary dashboard.
 
-    Renders `output/dashboard_latest.html` if it exists; otherwise shows an
-    informational placeholder. The same renderer is used for the persistent
-    last-run view and for live updates during a run.
+    The full Chart.js dashboard is still generated to output/dashboard_latest.html
+    and opened through the browser button. The in-app dashboard intentionally
+    stays native Qt because repeated local-file WebEngine refreshes after long
+    runs were causing Windows access-violation exits (-1073741819).
     """
     def __init__(self):
         super().__init__()
         self._console_callback = None
-        root = QVBoxLayout(self); root.setContentsMargins(0, 0, 0, 0); root.setSpacing(0)
+        self.view = None
+        root = QVBoxLayout(self); root.setContentsMargins(0, 0, 0, 0); root.setSpacing(12)
 
-        if HAS_WEBENGINE:
-            self.view = QWebEngineView()
-            if DashboardPage is not None:
-                self.page = DashboardPage(lambda msg: self._emit_console(msg), self.view)
-                self.view.setPage(self.page)
-            self.view.setStyleSheet("background:#0A0B12;border-radius:14px;")
-            root.addWidget(self.view, 1)
-        else:
-            self.view = None
-            note = QLabel(
-                "<div style='padding:40px;text-align:center;'>"
-                "<h2 style='color:#FF6B8F;font-weight:700'>Install <code>PySide6-WebEngine</code></h2>"
-                "<p style='color:#8A92A6'>Required for the embedded glassmorphic dashboard.<br>"
-                "Run: <code>pip install PySide6-WebEngine</code></p></div>")
-            note.setTextFormat(Qt.RichText); note.setAlignment(Qt.AlignCenter)
-            root.addWidget(note, 1)
+        intro = QFrame(); intro.setObjectName("Card"); intro.setProperty("accent", "blue")
+        iv = QVBoxLayout(intro); iv.setContentsMargins(18, 14, 18, 14); iv.setSpacing(6)
+        title = QLabel("Run Summary")
+        title.setStyleSheet("font-size:18px;font-weight:750;color:#FFFFFF;background:transparent;")
+        sub = QLabel("Stable native overview. Use Open in browser for the full interactive HTML dashboard.")
+        sub.setObjectName("Sub"); sub.setWordWrap(True)
+        iv.addWidget(title); iv.addWidget(sub)
+        root.addWidget(intro)
+
+        self.grid = QGridLayout(); self.grid.setHorizontalSpacing(10); self.grid.setVerticalSpacing(10)
+        root.addLayout(self.grid)
+
+        self.note = QLabel("No run on disk yet — click Run Full Pipeline.")
+        self.note.setObjectName("Sub"); self.note.setWordWrap(True)
+        root.addWidget(self.note)
+        root.addStretch()
 
     def set_console_callback(self, callback):
         self._console_callback = callback
@@ -397,24 +407,66 @@ class Dashboard(QWidget):
             import webbrowser; webbrowser.open(p.as_uri())
 
     def refresh(self):
-        if self.view is None:
-            return
-        p = self._html_path()
-        if p.exists():
-            # cache-bust so the view always shows the freshest HTML
-            url = QUrl.fromLocalFile(str(p))
-            url.setQuery(f"t={int(p.stat().st_mtime)}")
-            self.view.load(url)
-        else:
-            self.view.setHtml(
-                "<html><body style='background:#0A0B12;color:#8A92A6;"
-                "font-family:Segoe UI,Inter,sans-serif;padding:60px;text-align:center;'>"
-                "<h2 style='background:linear-gradient(90deg,#FF6B8F,#FFB193);"
-                "-webkit-background-clip:text;-webkit-text-fill-color:transparent;'>"
-                "No run on disk yet</h2>"
-                "<p>Click <b style='color:#FF6B8F'>▶ Run Full Pipeline</b> on the top bar. "
-                "The dashboard will render here, and will keep showing the latest result "
-                "every time you reopen the app.</p></body></html>")
+        for i in reversed(range(self.grid.count())):
+            item = self.grid.takeAt(i)
+            if item.widget():
+                item.widget().deleteLater()
+
+        def load_csv(p: Path) -> pd.DataFrame:
+            try:
+                return pd.read_csv(p) if p.exists() else pd.DataFrame()
+            except Exception:
+                return pd.DataFrame()
+
+        def load_json(p: Path) -> dict:
+            try:
+                return json.loads(p.read_text(encoding="utf-8").replace(": NaN", ": null")) if p.exists() else {}
+            except Exception:
+                return {}
+
+        status = load_json(OUT / "validation_status.json")
+        manifest = load_json(OUT / "run_manifest.json")
+        scores = load_csv(OUT / "latest_scores.csv")
+        trade = load_csv(OUT / "trade_plan_latest.csv")
+        shadow = load_csv(OUT / "latest_scores_v4_shadow.csv")
+        fwd = load_csv(OUT / "forward_return_history.csv")
+
+        matured = maturing = total = 0
+        if not fwd.empty:
+            f = fwd
+            if "Horizon_Days" in f.columns:
+                try:
+                    f10 = f[pd.to_numeric(f["Horizon_Days"], errors="coerce") == 10]
+                    if not f10.empty:
+                        f = f10
+                except Exception:
+                    pass
+            total = int(len(f))
+            if "Net_Forward_Return" in f.columns:
+                matured = int(f["Net_Forward_Return"].notna().sum())
+                maturing = int(f["Net_Forward_Return"].isna().sum())
+            else:
+                maturing = total
+        rate = f"{(matured / total * 100):.1f}%" if total else "—"
+        verdict = str(status.get("verdict") or "—")
+        cards = [
+            ("Latest scores", str(len(scores)) if not scores.empty else "—", "blue", "official scoring rows"),
+            ("Trade plan", str(len(trade)) if not trade.empty else "—", "teal", "watchlist / plan rows"),
+            ("Shadow rows", str(len(shadow)) if not shadow.empty else "—", "violet", "shadow scoring rows"),
+            ("Verdict", verdict, "green" if verdict == "Validation Positive" else "amber", str(status.get("evidence_grade") or "")),
+            ("Matured", str(matured), "teal", "10-day forward rows"),
+            ("Awaiting maturation", str(maturing), "amber", "10-day forward rows"),
+            ("Total signals", str(total) if total else "—", "blue", "10-day slice"),
+            ("Maturation rate", rate, "green" if matured else "violet", "matured / total"),
+        ]
+        for i, (title, value, tone, subtitle) in enumerate(cards):
+            self.grid.addWidget(_make_kpi_card(title, value, tone, subtitle), i // 4, i % 4)
+
+        html = self._html_path()
+        complete = manifest.get("completed_at") or "latest artifacts"
+        self.note.setText(
+            f"Last completed: {complete}. Interactive dashboard file: {html if html.exists() else 'not generated yet'}."
+        )
 
 
 # ----------------------------- Run Drawer -----------------------------------
@@ -619,7 +671,8 @@ class DQReportView(QWidget):
                             if c in quality_df.columns]
             tbl = QTableView(); tbl.setModel(_df_to_model(quality_df[preview_cols].head(400)))
             tbl.horizontalHeader().setStretchLastSection(True); tbl.verticalHeader().setVisible(False)
-            tbl.setMinimumHeight(320)
+            tbl.setAlternatingRowColors(False)
+            tbl.setMinimumHeight(420)
             self._body_v.addWidget(tbl, 1)
         self._body_v.addStretch()
 
@@ -707,8 +760,8 @@ class TradePlanView(QWidget):
 
         grid = QGridLayout(); grid.setHorizontalSpacing(8); grid.setVerticalSpacing(4)
         def _cell(row, col, label, val, color="#ECEDEE"):
-            l = QLabel(label); l.setStyleSheet("color:#6B6F76;font-size:10px;text-transform:uppercase;letter-spacing:.4px;")
-            n = QLabel(val); n.setStyleSheet(f"color:{color};font-size:12.5px;font-weight:650;")
+            l = QLabel(label); l.setStyleSheet("background:transparent;color:#6B6F76;font-size:10px;text-transform:uppercase;letter-spacing:.4px;")
+            n = QLabel(val); n.setStyleSheet(f"background:transparent;color:{color};font-size:12.5px;font-weight:650;")
             grid.addWidget(l, row * 2, col); grid.addWidget(n, row * 2 + 1, col)
         _cell(0, 0, "Buy zone", f"{_num(r.get('Buy_Zone_Low'))}–{_num(r.get('Buy_Zone_High'))}")
         _cell(0, 1, "Stop", _num(r.get('Stop_Loss')), "#F2B13C")
@@ -878,8 +931,8 @@ class CompareView(QWidget):
         self._v.addWidget(head)
         tbl = QTableView(); tbl.setModel(_df_to_model(show.head(60)))
         tbl.horizontalHeader().setStretchLastSection(True); tbl.verticalHeader().setVisible(False)
-        tbl.setMinimumHeight(320); tbl.setAlternatingRowColors(True)
-        tbl.setStyleSheet("QTableView{alternate-background-color:rgba(255,255,255,0.025);}")
+        tbl.setMinimumHeight(360); tbl.setAlternatingRowColors(False)
+        tbl.setStyleSheet("QTableView{alternate-background-color:transparent;gridline-color:transparent;}")
         self._v.addWidget(tbl, 1)
 
         # Top movers panel
@@ -918,11 +971,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"NSE Quant Engine — v{APP_VERSION}")
         self.resize(1480, 920)
 
-        central = QWidget(); self.setCentralWidget(central)
+        central = QWidget(); central.setObjectName("AppRoot"); self.setCentralWidget(central)
         outer = QHBoxLayout(central); outer.setContentsMargins(0, 0, 0, 0); outer.setSpacing(0)
 
         # ---- Left: main column (top bar + tabs) ----
-        left = QWidget()
+        left = QWidget(); left.setObjectName("MainColumn")
         col = QVBoxLayout(left); col.setContentsMargins(20, 16, 16, 12); col.setSpacing(12)
 
         # Top bar
@@ -1059,8 +1112,10 @@ class MainWindow(QMainWindow):
     # ----- live run hooks -----
     def _on_step(self, info: dict):
         self.drawer.update_step(info["name"], info["status"], info["duration_s"])
-        # live-refresh the dashboard whenever new artifacts may have landed
-        self.dashboard.refresh()
+        # Do not refresh the dashboard on every step. On Windows, repeated
+        # dashboard reloads after long runs can trigger native Qt/WebEngine
+        # access violations outside Python exception handling. The final reload
+        # happens once in _on_done.
 
     def start_run(self):
         if self.thread and self.thread.isRunning():
@@ -1088,7 +1143,10 @@ class MainWindow(QMainWindow):
         msg = f"Done in {summary['duration_s']}s — {ok} ok, {skp} skipped, {bad} errors."
         self.status.showMessage(msg)
         self.drawer.set_status("idle")
-        self.load_last_run()  # re-read manifest + refresh everything
+        try:
+            self.load_last_run()  # re-read manifest + refresh everything once
+        except Exception as e:
+            _log_crash(f"Final reload after run failed but app stayed open: {type(e).__name__}: {e}")
 
     def closeEvent(self, event):
         # Guard against Qt/WebEngine-driven close attempts while a run is live.
@@ -1100,6 +1158,9 @@ class MainWindow(QMainWindow):
             if resp != QMessageBox.Yes:
                 event.ignore(); return
         event.accept()
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
 
     # ----- persistent last-run loading -----
     def load_last_run(self):
@@ -1181,10 +1242,20 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    global _fault_log_fh
     _install_global_hooks()
+    try:
+        OUT.mkdir(parents=True, exist_ok=True)
+        fault_path = OUT / "last_crash.log"
+        _fault_log_fh = fault_path.open("a", encoding="utf-8")
+        _fault_log_fh.write(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] starting app with faulthandler enabled\n")
+        _fault_log_fh.flush()
+        faulthandler.enable(file=_fault_log_fh, all_threads=True)
+    except Exception:
+        _fault_log_fh = None
     app = QApplication(sys.argv)
     app.setStyleSheet(QSS)
-    app.setQuitOnLastWindowClosed(True)
+    app.setQuitOnLastWindowClosed(False)
     pal = app.palette()
     pal.setColor(QPalette.Window, QColor("#0A0B12"))
     pal.setColor(QPalette.Base, QColor("#0A0B12"))

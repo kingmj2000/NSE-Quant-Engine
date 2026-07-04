@@ -201,17 +201,21 @@ def _make_table_view(headers: List[str], rows: List[List[str]]) -> QTableView:
             model.setItem(r, c, item)
     view = QTableView()
     view.setModel(model)
-    view.setAlternatingRowColors(True)
+    view.setAlternatingRowColors(False)
     view.setStyleSheet(
-        "QTableView{background:transparent;border:none;gridline-color:rgba(255,255,255,0.05);"
-        "alternate-background-color:rgba(255,255,255,0.025);color:#DEE0E5;selection-background-color:rgba(216,52,95,0.25);}"
-        "QHeaderView::section{background:rgba(255,255,255,0.04);color:#8A92A6;padding:6px 8px;"
+        "QTableView{background:transparent;background-color:transparent;border:none;"
+        "gridline-color:transparent;alternate-background-color:transparent;color:#DEE0E5;"
+        "selection-background-color:rgba(216,52,95,0.25);}"
+        "QTableView::viewport{background:transparent;background-color:transparent;}"
+        "QTableView::item{background:transparent;border:none;padding:7px 8px;}"
+        "QTableView::item:alternate{background:transparent;}"
+        "QHeaderView::section{background:rgba(255,255,255,0.025);color:#8A92A6;padding:6px 8px;"
         "border:none;border-bottom:1px solid rgba(255,255,255,0.08);font-weight:600;font-size:11px;"
         "text-transform:uppercase;letter-spacing:0.5px;}"
     )
     view.verticalHeader().setVisible(False)
     view.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-    view.setMinimumHeight(min(320, max(120, 32 * (len(rows) + 1) + 20)))
+    view.setMinimumHeight(min(720, max(180, 34 * (len(rows) + 1) + 24)))
     return view
 
 
@@ -219,7 +223,7 @@ def _make_section_panel(heading: str, tone: str) -> Tuple[QFrame, QVBoxLayout]:
     panel = QFrame()
     panel.setObjectName("MdSection")
     panel.setStyleSheet(
-        f"QFrame#MdSection{{background:rgba(22,24,34,0.55);border:1px solid {_TONE_BORDER[tone]};"
+        f"QFrame#MdSection{{background:rgba(22,24,34,0.42);border:1px solid {_TONE_BORDER[tone]};"
         f"border-radius:14px;}}"
     )
     v = QVBoxLayout(panel)
@@ -272,20 +276,18 @@ def render_markdown(md_text: str, parent_layout: QVBoxLayout) -> None:
         if text_body.strip():
             html = _body_html(text_body, tone)
             if html.strip():
-                tb = QTextBrowser()
+                tb = QLabel()
+                tb.setTextFormat(Qt.RichText)
+                tb.setWordWrap(True)
                 tb.setOpenExternalLinks(True)
-                tb.setHtml(
+                tb.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
+                tb.setText(
                     f"<div style='font-family:-apple-system,Segoe UI,Inter,sans-serif;"
                     f"font-size:12.5px;color:#DEE0E5;'>{html}</div>"
                 )
                 tb.setStyleSheet(
-                    "QTextBrowser{background:transparent;border:none;color:#DEE0E5;}"
+                    "QLabel{background:transparent;border:none;color:#DEE0E5;padding:2px 0;}"
                 )
-                tb.document().setDocumentMargin(0)
-                # size to content, capped
-                doc_h = int(tb.document().size().height()) + 12
-                tb.setMinimumHeight(min(max(doc_h, 40), 480))
-                tb.setMaximumHeight(min(max(doc_h, 40), 480))
                 v.addWidget(tb)
 
         parent_layout.addWidget(panel)
