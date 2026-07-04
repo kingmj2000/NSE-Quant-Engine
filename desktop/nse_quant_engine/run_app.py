@@ -1161,6 +1161,9 @@ class MainWindow(QMainWindow):
             if resp != QMessageBox.Yes:
                 event.ignore(); return
         event.accept()
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
 
     # ----- persistent last-run loading -----
     def load_last_run(self):
