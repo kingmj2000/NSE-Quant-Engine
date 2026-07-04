@@ -677,9 +677,10 @@ class TradePlanView(QWidget):
             except Exception:
                 return "—"
         risk = str(r.get("Key_Risk", "") or "").strip().lower()
-        if "veto" in risk: tone = "red"
+        if "veto" in risk: tone = "amber"
         elif "overbought" in risk or "elevated" in risk: tone = "amber"
         else: tone = "teal"
+
         card = QFrame(); card.setObjectName("Card"); card.setProperty("accent", tone)
         v = QVBoxLayout(card); v.setContentsMargins(14, 12, 14, 12); v.setSpacing(6)
         top = QHBoxLayout()
