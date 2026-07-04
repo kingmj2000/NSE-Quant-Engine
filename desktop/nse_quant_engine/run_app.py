@@ -674,7 +674,8 @@ class DQReportView(QWidget):
                             if c in quality_df.columns]
             tbl = QTableView(); tbl.setModel(_df_to_model(quality_df[preview_cols].head(400)))
             tbl.horizontalHeader().setStretchLastSection(True); tbl.verticalHeader().setVisible(False)
-            tbl.setMinimumHeight(320)
+            tbl.setAlternatingRowColors(False)
+            tbl.setMinimumHeight(420)
             self._body_v.addWidget(tbl, 1)
         self._body_v.addStretch()
 
@@ -762,8 +763,8 @@ class TradePlanView(QWidget):
 
         grid = QGridLayout(); grid.setHorizontalSpacing(8); grid.setVerticalSpacing(4)
         def _cell(row, col, label, val, color="#ECEDEE"):
-            l = QLabel(label); l.setStyleSheet("color:#6B6F76;font-size:10px;text-transform:uppercase;letter-spacing:.4px;")
-            n = QLabel(val); n.setStyleSheet(f"color:{color};font-size:12.5px;font-weight:650;")
+            l = QLabel(label); l.setStyleSheet("background:transparent;color:#6B6F76;font-size:10px;text-transform:uppercase;letter-spacing:.4px;")
+            n = QLabel(val); n.setStyleSheet(f"background:transparent;color:{color};font-size:12.5px;font-weight:650;")
             grid.addWidget(l, row * 2, col); grid.addWidget(n, row * 2 + 1, col)
         _cell(0, 0, "Buy zone", f"{_num(r.get('Buy_Zone_Low'))}–{_num(r.get('Buy_Zone_High'))}")
         _cell(0, 1, "Stop", _num(r.get('Stop_Loss')), "#F2B13C")
