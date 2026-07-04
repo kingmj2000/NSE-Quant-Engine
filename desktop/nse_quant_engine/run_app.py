@@ -44,6 +44,8 @@ except ImportError:
 
 import pandas as pd
 import orchestrator
+import md_to_widgets
+
 
 try:
     from PySide6.QtWebEngineWidgets import QWebEngineView
