@@ -1131,6 +1131,7 @@ class MainWindow(QMainWindow):
         val_report = _safe_text(OUT / "cross_sectional_validation_report.md")
         trade_df = load_csv(OUT / "trade_plan_latest.csv")
         trade_report = _safe_text(OUT / "trade_plan_report.md")
+        cmp_json = _safe_json(OUT / "shadow_vs_official.json")
         try:
             self.tab_dq.render(dq_summary, quality_df)
         except Exception as e:
@@ -1143,6 +1144,10 @@ class MainWindow(QMainWindow):
             self.tab_trade.render(trade_df, val_status, trade_report)
         except Exception as e:
             _log_crash(f"Trade Plan tab render failed: {e}")
+        try:
+            self.tab_compare.render(cmp_df, cmp_json)
+        except Exception as e:
+            _log_crash(f"Compare tab render failed: {e}")
 
         # drawer: hydrate step list from last run so users can see what ran
         steps = manifest.get("steps") or []
