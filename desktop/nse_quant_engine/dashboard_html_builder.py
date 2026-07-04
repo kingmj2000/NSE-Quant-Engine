@@ -631,35 +631,38 @@ document.getElementById("banner").innerHTML = `
    </div>
  </div>`;
 
-// evidence tiles
-function tagFor(field, val10){
-  if (val10===null||val10===undefined) return ["t-thin","Thin"];
-  if (field==="spread")          return val10>0.01 ? ["t-ok","Strong"] : val10>0 ? ["t-build","Building"] : ["t-thin","Inverted"];
-  if (field==="validation_dates")return val10>=20 ? ["t-ok","Sufficient"] : val10>=10 ? ["t-build","Building"] : ["t-thin","Thin"];
-  if (field==="effective_validation_dates") return val10>=5 ? ["t-ok","Sufficient"] : val10>=2 ? ["t-build","Building"] : ["t-thin","Thin"];
-  if (field==="adj_tstat")       return val10>=2 ? ["t-ok","Strong"] : val10>=1 ? ["t-build","Building"] : ["t-thin","Thin"];
-  if (field==="bootstrap_prob")  return val10>=0.9 ? ["t-ok","Strong"] : val10>=0.7 ? ["t-build","Building"] : ["t-thin","Thin"];
-  return ["t-thin","Thin"];
+// Readiness meter — replaces the 5D-vs-10D evidence tile row with a
+// horizontal progress-bar visual driven by the 10-day validation stats.
+function readinessRow(label, val, cfg){
+  // cfg = {ok, mid, nd, suffix} — thresholds and display precision
+  const nd = cfg.nd ?? 2, suf = cfg.suffix ?? "";
+  const v = (val===null||val===undefined) ? null : Number(val);
+  let pct = 0, cls = "low";
+  if (v !== null){
+    pct = Math.max(2, Math.min(100, Math.round((v / cfg.ok) * 100)));
+    if (v >= cfg.ok)      cls = "ok";
+    else if (v >= cfg.mid) cls = "mid";
+    else                   cls = "low";
+  }
+  const shown = v === null ? "—" : v.toFixed(nd) + suf;
+  return `<div class="rrow"><div class="rl">${label}</div>
+    <div class="rbar ${cls}"><span style="width:${pct}%"></span></div>
+    <div class="rv">${shown}</div></div>`;
 }
-const evLabels = [
-  ["validation_dates","Validation Dates",0],
-  ["effective_validation_dates","Effective Val. Dates",1],
-  ["spread","Top&minus;Bottom Quintile",4],
-  ["adj_tstat","Adj. t-stat",2],
-  ["bootstrap_prob","Bootstrap P(+)",2],
-];
-document.getElementById("evidence10").innerHTML = evLabels.map(([k,label,nd])=>{
-  const v = DATA.evidence_10[k];
-  const [cls, tagTxt] = tagFor(k, v);
-  const display = (v===null||v===undefined) ? "&mdash;" : Number(v).toFixed(nd);
-  return `<div class="tile"><div class="k">${label}</div><div class="val">${display}</div><span class="tag ${cls}">${tagTxt}</span></div>`;
-}).join("");
+const e10 = DATA.evidence_10 || {};
+document.getElementById("readiness").innerHTML = [
+  readinessRow("Validation dates", e10.validation_dates, {ok:20, mid:10, nd:0}),
+  readinessRow("Effective dates",  e10.effective_validation_dates, {ok:5, mid:2, nd:1}),
+  readinessRow("Q1&minus;Q5 spread", e10.spread, {ok:0.01, mid:0.003, nd:4}),
+  readinessRow("Adj. t-stat",      e10.adj_tstat, {ok:2, mid:1, nd:2}),
+  readinessRow("Bootstrap P(+)",   e10.bootstrap_prob, {ok:0.9, mid:0.7, nd:2}),
+].join("");
 
-const e5 = DATA.evidence_5;
+const e5 = DATA.evidence_5 || {};
 document.getElementById("evidenceNote").innerHTML =
-  `5-day horizon: ${fmt(e5.validation_dates,'',0)} dates, eff. ${fmt(e5.effective_validation_dates,'',1)}, spread ${fmt(e5.spread,'',4)}, t-stat ${fmt(e5.adj_tstat,'',2)}, bootstrap ${fmt(e5.bootstrap_prob,'',2)}.`;
+  `5-day companion: ${fmt(e5.validation_dates,'',0)} dates, spread ${fmt(e5.spread,'',4)}, t-stat ${fmt(e5.adj_tstat,'',2)}.`;
 document.getElementById("maturityNote").innerHTML =
-  `${num(DATA.maturity.matured)} signals matured, ${num(DATA.maturity.maturing)} still maturing. A huge maturing pool early in accumulation is normal — not a data fault.`;
+  `${num(DATA.maturity.matured)} matured / ${num(DATA.maturity.total)} total &middot; ${DATA.maturity.rate}% maturation rate. A large awaiting pool early in accumulation is normal — not a data fault.`;
 
 // charts — guarded so one chart cannot break the whole dashboard.
 function chartError(canvas, msg){
@@ -686,20 +689,14 @@ if(typeof Chart !== 'undefined'){
 const grid={color:"rgba(255,255,255,0.06)"};
 
 
-// Maturity KPI cards (replaces the crimson matured/maturing donut).
+// Maturity metric cards (matured / awaiting / total / rate).
 document.getElementById("maturityCards").innerHTML = `
   <div class="tile"><div class="k">Matured</div><div class="val" style="color:var(--teal)">${num(DATA.maturity.matured)}</div><span class="tag t-ok">forward return known</span></div>
-  <div class="tile"><div class="k">Awaiting maturation</div><div class="val" style="color:var(--blue-soft)">${num(DATA.maturity.maturing)}</div><span class="tag t-build">horizon not yet elapsed</span></div>`;
+  <div class="tile"><div class="k">Awaiting maturation</div><div class="val" style="color:var(--blue-soft)">${num(DATA.maturity.maturing)}</div><span class="tag t-build">horizon not elapsed</span></div>
+  <div class="tile"><div class="k">Total signals</div><div class="val" style="color:var(--violet-soft)">${num(DATA.maturity.total)}</div><span class="tag t-build">10-day slice</span></div>
+  <div class="tile"><div class="k">Maturation rate</div><div class="val" style="color:var(--amber)">${DATA.maturity.rate}%</div><span class="tag t-thin">matured / total</span></div>`;
 
-safeChart("maturityBar",{
-  type:"bar",
-  data:{labels:["Signal pool"], datasets:[
-    {label:"Matured", data:[DATA.maturity.matured||0], backgroundColor:"#38BDB0", stack:"a", borderRadius:4},
-    {label:"Awaiting", data:[DATA.maturity.maturing||0], backgroundColor:"rgba(88,166,255,0.55)", stack:"a", borderRadius:4},
-  ]},
-  options:{indexAxis:"y", plugins:{legend:{position:"bottom",labels:{boxWidth:10,padding:10}}},
-    scales:{x:{stacked:true,grid:{color:"rgba(255,255,255,0.06)"}},y:{stacked:true,grid:{display:false}}}}
-});
+
 
 // Universe composition donut — uses teal/blue/violet/amber, never crimson.
 const uni = DATA.universe || {};
