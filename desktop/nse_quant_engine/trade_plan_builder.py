@@ -1,0 +1,622 @@
+"""
+Trade Plan Builder - Stage 3.4.1 Validation Sync Patch
+======================================================
+
+Creates practical entry / stop / target / hold-duration levels from the latest
+NSE Quant Engine output.
+
+Patch fixes:
+    1. Strictly reads the actual validation verdict from
+       cross_sectional_validation_report.md.
+    2. Does NOT accidentally read "Validation Positive" from interpretation text.
+    3. Decision_Use is WATCHLIST_ONLY unless the actual verdict is exactly
+       Validation Positive.
+    4. Always includes Model_Edge_%_Per_Day and Model_Edge_Per_Day_Pct columns.
+    5. Adds Validation_Source and Expected_Data_State fields for AI review.
+
+Reads:
+    output/latest_scores.csv
+    output/cross_sectional_validation_report.md
+    output/cross_sectional_spread_summary.csv
+    scoring_rules.csv
+
+Writes:
+    output/trade_plan_latest.csv
+    output/trade_plan_latest.xlsx
+    output/trade_plan_report.md
+
+Run after cross_sectional_validation.py:
+    python trade_plan_builder.py
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Dict
+import re
+import numpy as np
+import pandas as pd
+
+BASE_DIR = Path(__file__).resolve().parent
+OUTPUT_DIR = BASE_DIR / "output"
+SCORING_RULES_CSV = BASE_DIR / "scoring_rules.csv"
+
+LATEST_SCORES = OUTPUT_DIR / "latest_scores.csv"
+VALIDATION_REPORT = OUTPUT_DIR / "cross_sectional_validation_report.md"
+SPREAD_SUMMARY = OUTPUT_DIR / "cross_sectional_spread_summary.csv"
+
+TRADE_PLAN_CSV = OUTPUT_DIR / "trade_plan_latest.csv"
+TRADE_PLAN_XLSX = OUTPUT_DIR / "trade_plan_latest.xlsx"
+TRADE_PLAN_MD = OUTPUT_DIR / "trade_plan_report.md"
+
+DEFAULT_RULES = {
+    "Round_Trip_Cost": 0.0030,
+    "Stock_Round_Trip_Cost": 0.0035,
+    "ETF_Round_Trip_Cost": 0.0025,
+    "ETF_MidLiquidity_Round_Trip_Cost": 0.0050,
+    "ETF_LowLiquidity_Round_Trip_Cost": 0.0100,
+    "ETF_MidLiquidity_Value": 100000000.0,
+    "ETF_LowLiquidity_Value": 20000000.0,
+    "CrossVal_Horizon": 10,
+}
+
+VERDICTS = [
+    "Validation Positive",
+    "Validation Negative",
+    "No Proven Edge Yet",
+    "Insufficient Independent History",
+    "Insufficient Statistical Evidence",
+    "Insufficient Breadth",
+    "Insufficient History",
+]
+
+OUTPUT_COLUMNS = [
+    "Plan_Date",
+    "Validation_Verdict",
+    "Evidence_Grade",
+    "Validation_Source",
+    "Expected_Data_State",
+    "Decision_Use",
+    "Plan_Label",
+    "Trade_Status",
+    "Rank",
+    "Opportunity_Rank",
+    "Universe",
+    "Universe_Group",
+    "Opportunity_Type",
+    "Symbol",
+    "Raw_Symbol",
+    "Name",
+    "Category",
+    "Bucket",
+    "Final_Score",
+    "Confidence_Adjusted_Score",
+    "Confidence_Score",
+    "Opportunity_Score",
+    "Risk_Score",
+    "Liquidity_Score",
+    "ETF_Quality_Score",
+    "Absolute_Momentum_Pass",
+    "Price",
+    "ATR_14",
+    "RSI_14",
+    "Current_Drawdown_60D",
+    "Volatility_20D",
+    "Avg_Traded_Value_20D",
+    "Buy_Zone_Low",
+    "Buy_Zone_High",
+    "Reference_Entry",
+    "Stop_Loss",
+    "Target_1",
+    "Target_2",
+    "Stop_Loss_%",
+    "Gross_Target_1_%",
+    "Gross_Target_2_%",
+    "Round_Trip_Cost_%",
+    "Net_Target_1_%",
+    "Net_Target_2_%",
+    "Risk_Reward_Target_1",
+    "Risk_Reward_Target_2",
+    "Hold_Days_Min",
+    "Hold_Days_Max",
+    "Net_Target_1_%_Per_Day_MinHold",
+    "Net_Target_1_%_Per_Day_MaxHold",
+    "Net_Target_2_%_Per_Day_MinHold",
+    "Net_Target_2_%_Per_Day_MaxHold",
+    "Model_Edge_%_Per_Day",
+    "Model_Edge_Per_Day_Pct",
+    "Entry_Note",
+    "Reason",
+    "Key_Risk",
+    "Risk_Flag",
+]
+
+
+def load_rules() -> Dict[str, float]:
+    rules = DEFAULT_RULES.copy()
+    if not SCORING_RULES_CSV.exists():
+        return rules
+
+    df = pd.read_csv(SCORING_RULES_CSV)
+    if "Parameter" not in df.columns or "Value" not in df.columns:
+        return rules
+
+    for _, row in df.iterrows():
+        key = str(row.get("Parameter", "")).strip()
+        if not key:
+            continue
+        try:
+            rules[key] = float(row.get("Value"))
+        except Exception:
+            pass
+
+    return rules
+
+
+def extract_validation_section(text: str) -> str:
+    if not text:
+        return ""
+
+    match = re.search(
+        r"##\s*Validation Verdict\s*(.*?)(?:\n##\s+|\Z)",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if match:
+        return match.group(1)
+
+    # fallback: only inspect beginning of file, not interpretation rules
+    return text[:1200]
+
+
+def strict_extract_verdict(text: str) -> str:
+    section = extract_validation_section(text)
+
+    # In our report, the first bold verdict line is authoritative.
+    bolds = re.findall(r"\*\*(.*?)\*\*", section)
+    for raw in bolds:
+        value = raw.strip()
+        for verdict in VERDICTS:
+            if value.lower() == verdict.lower():
+                return verdict
+
+    # Fallback: scan only the validation section, never the whole document.
+    for verdict in VERDICTS:
+        if re.search(rf"\b{re.escape(verdict)}\b", section[:1000], flags=re.IGNORECASE):
+            return verdict
+
+    return "Insufficient History"
+
+
+def strict_extract_grade(text: str) -> str:
+    section = extract_validation_section(text)
+
+    match = re.search(r"Evidence grade:\s*\*\*(.*?)\*\*", section, flags=re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+
+    match = re.search(r"Evidence\s+Grade\s*:\s*([A-Za-z /-]+)", section, flags=re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+
+    return "Insufficient Evidence"
+
+
+def parse_validation_report() -> tuple[str, str, str]:
+    # PREFER structured validation_status.json (no markdown scraping).
+    try:
+        from core import validation_status as _vs
+        status_path = OUTPUT_DIR / "validation_status.json"
+        if status_path.exists():
+            data = _vs.read_status(status_path)
+            return data.get("verdict", "Insufficient History"), data.get("evidence_grade", "Insufficient Evidence"), "validation_status.json"
+    except Exception as _e:
+        print(f"validation_status.json read skipped: {_e}")
+
+    if not VALIDATION_REPORT.exists():
+        return "Insufficient History", "Insufficient Evidence", "cross_sectional_validation_report.md missing"
+
+    text = VALIDATION_REPORT.read_text(encoding="utf-8", errors="ignore")
+    verdict = strict_extract_verdict(text)
+    grade = strict_extract_grade(text)
+
+    return verdict, grade, "cross_sectional_validation_report.md"
+
+
+def expected_data_state(verdict: str) -> str:
+    if verdict == "Insufficient History":
+        return "Expected early-run state: forward-return windows have not matured yet"
+    if verdict == "Insufficient Independent History":
+        return "Expected early-run state: not enough independent matured signal dates"
+    if verdict == "Insufficient Statistical Evidence":
+        return "Validation has some data but not enough statistical evidence"
+    if verdict == "Insufficient Breadth":
+        return "Validation has too few instruments per matured date"
+    if verdict == "No Proven Edge Yet":
+        return "Validation matured but no proven edge after costs"
+    if verdict == "Validation Negative":
+        return "Validation matured and score relationship appears negative"
+    if verdict == "Validation Positive":
+        return "Validation matured and score relationship passed evidence gates"
+    return "Unknown validation state"
+
+
+def load_model_edge_per_day(rules: Dict[str, float], verdict: str) -> float:
+    """
+    Returns model-level historical top-minus-bottom edge per day in percent.
+    Only populated when validation is positive. Otherwise NaN.
+    """
+    if verdict != "Validation Positive":
+        return np.nan
+
+    if not SPREAD_SUMMARY.exists():
+        return np.nan
+
+    try:
+        df = pd.read_csv(SPREAD_SUMMARY)
+    except Exception:
+        return np.nan
+
+    if df.empty or "Horizon_Days" not in df.columns or "Avg_TopMinusBottom_Quintile" not in df.columns:
+        return np.nan
+
+    horizon = int(rules.get("CrossVal_Horizon", 10))
+    row = df[pd.to_numeric(df["Horizon_Days"], errors="coerce").eq(horizon)]
+    if row.empty:
+        return np.nan
+
+    spread = pd.to_numeric(row.iloc[0]["Avg_TopMinusBottom_Quintile"], errors="coerce")
+    if pd.isna(spread):
+        return np.nan
+
+    return (float(spread) / horizon) * 100.0
+
+
+def cost_for_row(row: pd.Series, rules: Dict[str, float]) -> tuple[float, str]:
+    universe = str(row.get("Universe", "")).lower()
+
+    if universe == "etf":
+        base = rules.get("ETF_Round_Trip_Cost", rules["Round_Trip_Cost"])
+        traded_value = pd.to_numeric(row.get("Avg_Traded_Value_20D", np.nan), errors="coerce")
+
+        if pd.isna(traded_value):
+            return max(base, rules.get("ETF_MidLiquidity_Round_Trip_Cost", 0.0050)), "ETF cost: missing traded value"
+
+        if traded_value < rules.get("ETF_LowLiquidity_Value", 20000000.0):
+            return max(base, rules.get("ETF_LowLiquidity_Round_Trip_Cost", 0.0100)), "ETF low-liquidity cost"
+
+        if traded_value < rules.get("ETF_MidLiquidity_Value", 100000000.0):
+            return max(base, rules.get("ETF_MidLiquidity_Round_Trip_Cost", 0.0050)), "ETF mid-liquidity cost"
+
+        return base, "ETF high-liquidity cost"
+
+    if universe == "stock":
+        return rules.get("Stock_Round_Trip_Cost", rules["Round_Trip_Cost"]), "Stock cost"
+
+    return rules["Round_Trip_Cost"], "Default cost"
+
+
+def parse_hold_days(value: str, momentum_score: float) -> tuple[int, int]:
+    text = str(value)
+    nums = re.findall(r"\d+", text)
+    if len(nums) >= 2:
+        return int(nums[0]), int(nums[1])
+    if len(nums) == 1:
+        n = int(nums[0])
+        return n, n
+    if pd.notna(momentum_score) and momentum_score >= 80:
+        return 5, 15
+    return 10, 30
+
+
+def atr_value(row: pd.Series) -> tuple[float, str]:
+    price = pd.to_numeric(row.get("Price", np.nan), errors="coerce")
+    atr = pd.to_numeric(row.get("ATR_14", np.nan), errors="coerce")
+
+    if pd.notna(price) and pd.notna(atr) and atr > 0:
+        return float(atr), "ATR-based"
+
+    vol = pd.to_numeric(row.get("Volatility_20D", np.nan), errors="coerce")
+    if pd.notna(price) and pd.notna(vol) and vol > 0:
+        daily_vol = float(vol) / np.sqrt(252)
+        fallback_atr = price * max(0.015, min(daily_vol, 0.05))
+        return float(fallback_atr), "ATR missing; volatility fallback"
+
+    if pd.notna(price):
+        return float(price) * 0.02, "ATR missing; 2 pct price fallback"
+
+    return np.nan, "No price/ATR available"
+
+
+def build_buy_zone(price: float, atr: float, rsi: float, amp: bool) -> tuple[float, float, str]:
+    if pd.isna(price) or pd.isna(atr) or atr <= 0:
+        return np.nan, np.nan, "No buy zone; missing price/ATR"
+
+    if not amp:
+        low = price - 1.00 * atr
+        high = price - 0.50 * atr
+        return max(0, low), max(0, high), "Failed momentum; only monitor deep pullback"
+
+    if pd.notna(rsi) and rsi >= 75:
+        low = price - 1.00 * atr
+        high = price - 0.50 * atr
+        return max(0, low), max(0, high), "Overbought; wait for deeper pullback"
+
+    if pd.notna(rsi) and rsi >= 70:
+        low = price - 0.75 * atr
+        high = price - 0.25 * atr
+        return max(0, low), max(0, high), "RSI elevated; pullback entry preferred"
+
+    low = price - 0.25 * atr
+    high = price + 0.10 * atr
+    return max(0, low), max(0, high), "Near-current entry zone"
+
+
+def truthy(value) -> bool:
+    return str(value).strip().lower() in ["true", "1", "yes", "y"]
+
+
+def trade_status(row: pd.Series, verdict: str) -> str:
+    eligible = str(row.get("Opportunity_Eligible", "Yes")).lower() == "yes"
+    amp = truthy(row.get("Absolute_Momentum_Pass", False))
+    risk_flag = str(row.get("Risk_Flag", "")).strip()
+    key_risk = str(row.get("Key_Risk", "")).strip()
+    rsi = pd.to_numeric(row.get("RSI_14", np.nan), errors="coerce")
+
+    if not eligible:
+        return "Avoid for now - not opportunity eligible"
+    if not amp:
+        return "Avoid for now - failed absolute momentum"
+    if pd.notna(rsi) and rsi >= 75:
+        return "Watch only - overbought"
+
+    risk_text = f"{risk_flag} {key_risk}".lower()
+    serious_risks = ["high drawdown", "high volatility", "illiquid", "low liquidity", "nav premium", "quality data incomplete", "elevated volatility"]
+
+    if any(x in risk_text for x in serious_risks):
+        return "Watch only - risk flag present"
+
+    if verdict != "Validation Positive":
+        return "Watch only - validation not positive"
+
+    return "Review - evidence gated"
+
+
+def make_trade_plan(latest: pd.DataFrame, rules: Dict[str, float], verdict: str, grade: str, validation_source: str) -> pd.DataFrame:
+    df = latest.copy()
+    plan_date = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")
+    model_edge = load_model_edge_per_day(rules, verdict)
+    state = expected_data_state(verdict)
+
+    numeric_cols = [
+        "Price", "ATR_14", "RSI_14", "Current_Drawdown_60D", "Volatility_20D",
+        "Avg_Traded_Value_20D", "Momentum_Score", "Final_Score", "Confidence_Adjusted_Score",
+        "Confidence_Score", "Opportunity_Score", "Risk_Score", "Liquidity_Score",
+        "ETF_Quality_Score", "Rank", "Opportunity_Rank"
+    ]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    rows = []
+
+    for _, row in df.iterrows():
+        price = pd.to_numeric(row.get("Price", np.nan), errors="coerce")
+        if pd.isna(price) or price <= 0:
+            continue
+
+        atr, atr_note = atr_value(row)
+        rsi = pd.to_numeric(row.get("RSI_14", np.nan), errors="coerce")
+        amp = truthy(row.get("Absolute_Momentum_Pass", False))
+        buy_low, buy_high, entry_note = build_buy_zone(price, atr, rsi, amp)
+
+        reference_entry = (buy_low + buy_high) / 2 if pd.notna(buy_low) and pd.notna(buy_high) else price
+
+        stop = reference_entry - 1.5 * atr if pd.notna(atr) else np.nan
+        target_1 = reference_entry + 1.5 * atr if pd.notna(atr) else np.nan
+        target_2 = reference_entry + 2.5 * atr if pd.notna(atr) else np.nan
+        stop = max(0, stop) if pd.notna(stop) else np.nan
+
+        gross_t1 = (target_1 / reference_entry - 1) * 100 if reference_entry and pd.notna(target_1) else np.nan
+        gross_t2 = (target_2 / reference_entry - 1) * 100 if reference_entry and pd.notna(target_2) else np.nan
+        stop_pct = (stop / reference_entry - 1) * 100 if reference_entry and pd.notna(stop) else np.nan
+
+        cost, cost_note = cost_for_row(row, rules)
+        cost_pct = cost * 100
+        net_t1 = gross_t1 - cost_pct if pd.notna(gross_t1) else np.nan
+        net_t2 = gross_t2 - cost_pct if pd.notna(gross_t2) else np.nan
+
+        risk_amount = reference_entry - stop if pd.notna(stop) else np.nan
+        rr1 = (target_1 - reference_entry) / risk_amount if pd.notna(risk_amount) and risk_amount > 0 else np.nan
+        rr2 = (target_2 - reference_entry) / risk_amount if pd.notna(risk_amount) and risk_amount > 0 else np.nan
+
+        hold_min, hold_max = parse_hold_days(row.get("Suggested_Hold_Days", ""), row.get("Momentum_Score", np.nan))
+
+        def per_day(value: float, days: int) -> float:
+            if pd.isna(value) or not days:
+                return np.nan
+            return value / days
+
+        if verdict == "Validation Positive":
+            decision_use = "REVIEW_WITH_RISK_CONTROLS"
+            plan_label = "Evidence-gated mechanical plan"
+        else:
+            decision_use = "WATCHLIST_ONLY"
+            plan_label = "Mechanical reference levels - validation not positive"
+
+        rows.append({
+            "Plan_Date": plan_date,
+            "Validation_Verdict": verdict,
+            "Evidence_Grade": grade,
+            "Validation_Source": validation_source,
+            "Expected_Data_State": state,
+            "Decision_Use": decision_use,
+            "Plan_Label": plan_label,
+            "Trade_Status": trade_status(row, verdict),
+            "Rank": row.get("Rank", np.nan),
+            "Opportunity_Rank": row.get("Opportunity_Rank", np.nan),
+            "Universe": row.get("Universe", ""),
+            "Universe_Group": row.get("Universe_Group", ""),
+            "Opportunity_Type": row.get("Opportunity_Type", ""),
+            "Symbol": row.get("Symbol", ""),
+            "Raw_Symbol": row.get("Raw_Symbol", ""),
+            "Name": row.get("Name", ""),
+            "Category": row.get("Category", ""),
+            "Bucket": row.get("Bucket", ""),
+            "Final_Score": row.get("Final_Score", np.nan),
+            "Confidence_Adjusted_Score": row.get("Confidence_Adjusted_Score", np.nan),
+            "Confidence_Score": row.get("Confidence_Score", np.nan),
+            "Opportunity_Score": row.get("Opportunity_Score", np.nan),
+            "Risk_Score": row.get("Risk_Score", np.nan),
+            "Liquidity_Score": row.get("Liquidity_Score", np.nan),
+            "ETF_Quality_Score": row.get("ETF_Quality_Score", np.nan),
+            "Absolute_Momentum_Pass": amp,
+            "Price": price,
+            "ATR_14": atr,
+            "RSI_14": rsi,
+            "Current_Drawdown_60D": row.get("Current_Drawdown_60D", np.nan),
+            "Volatility_20D": row.get("Volatility_20D", np.nan),
+            "Avg_Traded_Value_20D": row.get("Avg_Traded_Value_20D", np.nan),
+            "Buy_Zone_Low": buy_low,
+            "Buy_Zone_High": buy_high,
+            "Reference_Entry": reference_entry,
+            "Stop_Loss": stop,
+            "Target_1": target_1,
+            "Target_2": target_2,
+            "Stop_Loss_%": stop_pct,
+            "Gross_Target_1_%": gross_t1,
+            "Gross_Target_2_%": gross_t2,
+            "Round_Trip_Cost_%": cost_pct,
+            "Net_Target_1_%": net_t1,
+            "Net_Target_2_%": net_t2,
+            "Risk_Reward_Target_1": rr1,
+            "Risk_Reward_Target_2": rr2,
+            "Hold_Days_Min": hold_min,
+            "Hold_Days_Max": hold_max,
+            "Net_Target_1_%_Per_Day_MinHold": per_day(net_t1, hold_min),
+            "Net_Target_1_%_Per_Day_MaxHold": per_day(net_t1, hold_max),
+            "Net_Target_2_%_Per_Day_MinHold": per_day(net_t2, hold_min),
+            "Net_Target_2_%_Per_Day_MaxHold": per_day(net_t2, hold_max),
+            "Model_Edge_%_Per_Day": model_edge,
+            "Model_Edge_Per_Day_Pct": model_edge,
+            "Entry_Note": f"{entry_note}; {atr_note}; {cost_note}",
+            "Reason": row.get("Reason", ""),
+            "Key_Risk": row.get("Key_Risk", ""),
+            "Risk_Flag": row.get("Risk_Flag", ""),
+        })
+
+    out = pd.DataFrame(rows)
+    for col in OUTPUT_COLUMNS:
+        if col not in out.columns:
+            out[col] = np.nan
+
+    out = out[OUTPUT_COLUMNS].copy()
+
+    sort_cols = [c for c in ["Confidence_Adjusted_Score", "Final_Score"] if c in out.columns]
+    if sort_cols:
+        out = out.sort_values(sort_cols, ascending=False)
+
+    return out
+
+
+def md_table(df: pd.DataFrame, cols: list[str], n: int = 10) -> str:
+    if df.empty:
+        return "_No rows._"
+    temp = df[cols].head(n).copy()
+    for col in temp.columns:
+        if pd.api.types.is_numeric_dtype(temp[col]):
+            temp[col] = temp[col].round(4)
+    return temp.to_markdown(index=False)
+
+
+def write_outputs(plan: pd.DataFrame, verdict: str, grade: str) -> None:
+    plan.to_csv(TRADE_PLAN_CSV, index=False)
+
+    top_review = plan[
+        ~plan["Trade_Status"].astype(str).str.contains("Avoid", case=False, na=False)
+    ].sort_values(["Confidence_Adjusted_Score", "Final_Score"], ascending=False).head(25)
+
+    avoid_wait = plan[
+        plan["Trade_Status"].astype(str).str.contains("Avoid|Watch only", case=False, na=False)
+    ].sort_values(["Confidence_Adjusted_Score", "Final_Score"], ascending=False).head(100)
+
+    with pd.ExcelWriter(TRADE_PLAN_XLSX, engine="openpyxl") as writer:
+        plan.to_excel(writer, sheet_name="All Trade Plans", index=False)
+        top_review.to_excel(writer, sheet_name="Top Review Plans", index=False)
+        avoid_wait.to_excel(writer, sheet_name="Avoid or Wait", index=False)
+        pd.DataFrame([{
+            "Validation_Verdict": verdict,
+            "Evidence_Grade": grade,
+            "Decision_Use": "REVIEW_WITH_RISK_CONTROLS" if verdict == "Validation Positive" else "WATCHLIST_ONLY",
+            "Model_Edge_Filled": verdict == "Validation Positive",
+        }]).to_excel(writer, sheet_name="Validation", index=False)
+
+    cols = [
+        "Trade_Status", "Symbol", "Name", "Price", "Buy_Zone_Low", "Buy_Zone_High",
+        "Stop_Loss", "Target_1", "Target_2", "Net_Target_1_%",
+        "Net_Target_2_%", "Hold_Days_Min", "Hold_Days_Max",
+        "Net_Target_1_%_Per_Day_MaxHold", "Net_Target_2_%_Per_Day_MaxHold",
+        "Model_Edge_%_Per_Day", "Entry_Note", "Key_Risk"
+    ]
+
+    lines = []
+    lines.append("# Trade Plan Report")
+    lines.append("")
+    lines.append(f"Generated: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}")
+    lines.append("")
+    lines.append(f"Validation verdict: **{verdict}**")
+    lines.append("")
+    lines.append(f"Evidence grade: **{grade}**")
+    lines.append("")
+    lines.append("These are mechanical reference levels. They are not guaranteed profit predictions.")
+    lines.append("")
+
+    if verdict == "Validation Positive":
+        lines.append("Current use: **REVIEW WITH RISK CONTROLS** because validation is positive.")
+    else:
+        lines.append("Current use: **WATCHLIST ONLY** because validation is not positive.")
+    lines.append("")
+
+    lines.append("## Top Review Plans")
+    lines.append(md_table(top_review, cols, n=10))
+    lines.append("")
+    lines.append("## Avoid / Wait")
+    lines.append(md_table(avoid_wait, cols, n=10))
+    lines.append("")
+    lines.append("## Column meaning")
+    lines.append("- Buy_Zone_Low / Buy_Zone_High: mechanical entry range based on ATR and RSI.")
+    lines.append("- Target_1 / Target_2: ATR-based reference targets.")
+    lines.append("- Net_Target_%: target return after estimated round-trip transaction cost.")
+    lines.append("- Net_Target_%_Per_Day_MaxHold: conservative target-return-per-day using the longer hold duration.")
+    lines.append("- Model_Edge_%_Per_Day: only filled when validation is positive; this is model-level historical edge, not candidate-specific certainty.")
+    lines.append("- If validation is not positive, all trade levels are watchlist-only reference levels.")
+
+    TRADE_PLAN_MD.write_text("\n".join(lines), encoding="utf-8")
+
+
+def main() -> None:
+    print("Trade Plan Builder - Stage 3.4.1 Validation Sync Patch")
+    print("======================================================")
+
+    if not LATEST_SCORES.exists():
+        raise FileNotFoundError("output/latest_scores.csv not found. Run nse_quant_engine.py first.")
+
+    rules = load_rules()
+    verdict, grade, source = parse_validation_report()
+
+    latest = pd.read_csv(LATEST_SCORES)
+    plan = make_trade_plan(latest, rules, verdict, grade, source)
+    write_outputs(plan, verdict, grade)
+
+    print(f"Saved: {TRADE_PLAN_CSV}")
+    print(f"Saved: {TRADE_PLAN_XLSX}")
+    print(f"Saved: {TRADE_PLAN_MD}")
+    print(f"Validation verdict: {verdict}")
+    print(f"Evidence grade: {grade}")
+
+    if verdict != "Validation Positive":
+        print("Use mode: WATCHLIST ONLY. Trade levels are mechanical reference levels, not validated action signals.")
+
+
+if __name__ == "__main__":
+    main()
