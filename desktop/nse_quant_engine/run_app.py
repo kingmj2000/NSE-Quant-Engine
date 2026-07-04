@@ -936,7 +936,7 @@ class MainWindow(QMainWindow):
         self.dashboard = Dashboard()
         self.tab_scores = self._make_table_tab()
         self.tab_shadow = self._make_table_tab()
-        self.tab_compare = self._make_table_tab()
+        self.tab_compare = CompareView()
         self.tab_dq = DQReportView()
         self.tab_validation = ValidationView()
         self.tab_trade = TradePlanView()
