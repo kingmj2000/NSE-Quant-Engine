@@ -699,7 +699,7 @@ class TradePlanView(QWidget):
             n = QLabel(val); n.setStyleSheet(f"color:{color};font-size:12.5px;font-weight:650;")
             grid.addWidget(l, row * 2, col); grid.addWidget(n, row * 2 + 1, col)
         _cell(0, 0, "Buy zone", f"{_num(r.get('Buy_Zone_Low'))}–{_num(r.get('Buy_Zone_High'))}")
-        _cell(0, 1, "Stop", _num(r.get('Stop_Loss')), "#FF8597")
+        _cell(0, 1, "Stop", _num(r.get('Stop_Loss')), "#F2B13C")
         _cell(0, 2, "Hold", f"{int(r.get('Hold_Days_Min',5) or 5)}–{int(r.get('Hold_Days_Max',15) or 15)}d")
         _cell(1, 0, "Target 1", _num(r.get('Target_1')), "#7FE0C6")
         _cell(1, 1, "Target 2", _num(r.get('Target_2')), "#7FE0C6")
