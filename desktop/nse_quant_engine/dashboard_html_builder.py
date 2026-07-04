@@ -744,21 +744,26 @@ safeChart("quintileChart",{
     scales:{y:{grid,title:{display:true,text:"% median net return"}},x:{grid:{display:false}}}}
 });
 
-// scatter
+// scatter — minimal: no grid, no ticks, subtle threshold shading, rich tooltip.
 const band={id:"band",beforeDraw(ch){const{ctx,chartArea:a,scales:{x,y}}=ch;if(!a)return;ctx.save();
-  const rsi=x.getPixelForValue(71.5);ctx.fillStyle="rgba(242,177,60,.07)";ctx.fillRect(rsi,a.top,a.right-rsi,a.bottom-a.top);
-  const vol=y.getPixelForValue(30);ctx.fillStyle="rgba(163,113,247,.07)";ctx.fillRect(a.left,a.top,a.right-a.left,vol-a.top);
-  ctx.setLineDash([5,4]);ctx.strokeStyle="#F2B13C";ctx.beginPath();ctx.moveTo(rsi,a.top);ctx.lineTo(rsi,a.bottom);ctx.stroke();
-  ctx.strokeStyle="#A371F7";ctx.beginPath();ctx.moveTo(a.left,vol);ctx.lineTo(a.right,vol);ctx.stroke();ctx.restore();}};
+  const rsi=x.getPixelForValue(71.5);ctx.fillStyle="rgba(242,177,60,.06)";ctx.fillRect(rsi,a.top,a.right-rsi,a.bottom-a.top);
+  const vol=y.getPixelForValue(30);ctx.fillStyle="rgba(163,113,247,.05)";ctx.fillRect(a.left,a.top,a.right-a.left,vol-a.top);
+  ctx.setLineDash([4,4]);ctx.strokeStyle="rgba(242,177,60,0.55)";ctx.lineWidth=1;
+  ctx.beginPath();ctx.moveTo(rsi,a.top);ctx.lineTo(rsi,a.bottom);ctx.stroke();
+  ctx.strokeStyle="rgba(163,113,247,0.45)";ctx.beginPath();ctx.moveTo(a.left,vol);ctx.lineTo(a.right,vol);ctx.stroke();ctx.restore();}};
 safeChart("scatterChart",{
   type:"scatter",plugins:[band],
-  data:{datasets:[{label:"Top-20 candidates",data:DATA.scatter,pointRadius:7,pointHoverRadius:9,
-    backgroundColor:c=>{const d=c.raw;return (d&&(d.x>=71||d.y>=30))?"#F2B13C":"#3FB950";},
-    borderColor:"#0B0B0F",borderWidth:1.5}]},
-  options:{plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>`${c.raw.s}: RSI ${c.raw.x}, vol ${c.raw.y}%`}}},
-    scales:{x:{title:{display:true,text:"RSI(14)"},grid,min:30,max:90},
-            y:{title:{display:true,text:"20D vol (%)"},grid,min:0,suggestedMax:45}}}
+  data:{datasets:[{label:"Top-20 candidates",data:DATA.scatter,pointRadius:7,pointHoverRadius:10,
+    backgroundColor:c=>{const d=c.raw;return (d&&(d.x>=71||d.y>=30))?"#F2B13C":"#38BDB0";},
+    borderColor:"rgba(255,255,255,0.85)",borderWidth:1.2}]},
+  options:{plugins:{legend:{display:false},
+      tooltip:{backgroundColor:"rgba(14,16,26,0.94)",borderColor:"rgba(255,255,255,0.10)",borderWidth:1,
+        padding:10,titleColor:"#ECEDEE",bodyColor:"#DEE0E5",
+        callbacks:{title:c=>c[0].raw.s, label:c=>[`RSI(14): ${c.raw.x}`,`20D volatility: ${c.raw.y}%`]}}},
+    scales:{x:{min:30,max:90,grid:{display:false,drawBorder:false},ticks:{display:false},title:{display:false}},
+            y:{min:0,suggestedMax:45,grid:{display:false,drawBorder:false},ticks:{display:false},title:{display:false}}}}
 });
+
 
 // candidate cards
 const dotc={red:"d-red",amber:"d-amber",green:"d-green",dim:"d-dim"};
