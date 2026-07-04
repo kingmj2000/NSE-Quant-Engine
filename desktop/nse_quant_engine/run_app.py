@@ -587,7 +587,7 @@ class DQReportView(QWidget):
             self._body_v.addWidget(head)
             grid = QGridLayout(); grid.setHorizontalSpacing(8); grid.setVerticalSpacing(8)
             for i, (flag, count) in enumerate(sorted(flags.items(), key=lambda x: -x[1])):
-                tone = "teal" if flag.lower() == "complete" else ("amber" if "missing" in flag.lower() else "red")
+                tone = "teal" if flag.lower() == "complete" else ("amber" if "missing" in flag.lower() else "amber")
                 card = QFrame(); card.setObjectName("Card"); card.setProperty("accent", tone)
                 cv = QHBoxLayout(card); cv.setContentsMargins(12, 8, 12, 8)
                 cv.addWidget(_make_pill(str(count), tone))
