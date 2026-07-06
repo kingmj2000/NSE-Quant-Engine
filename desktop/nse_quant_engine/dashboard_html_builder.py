@@ -485,7 +485,7 @@ h2{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:1.4px;
 .pill b{color:var(--txt)}
 
 .grid{display:grid;gap:14px} .twocol{grid-template-columns:1fr 1fr}
-@media(max-width:900px){.twocol{grid-template-columns:1fr}}
+@media(max-width:640px){.twocol{grid-template-columns:1fr}}
 
 .evid{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-top:8px}
 @media(max-width:760px){.evid{grid-template-columns:repeat(2,1fr)}}
