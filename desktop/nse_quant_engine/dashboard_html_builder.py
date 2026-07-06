@@ -80,6 +80,10 @@ def _veto_symbol(sym: str) -> bool:
     return base in GOVERNANCE_VETO
 
 
+def _norm_sym(sym: str) -> str:
+    return str(sym or "").replace(".NS", "").upper().strip()
+
+
 # ---------------------------------------------------------------- payload ----
 def _payload() -> dict:
     val = _safe_read_json(OUT / "validation_status.json")
@@ -172,18 +176,29 @@ def _payload() -> dict:
     evidence_10 = _evidence(10)
     evidence_5 = _evidence(5)
 
-    # --- quintile chart (5D + 10D medians) ---
-    quintile = {"5": [], "10": []}
+    # --- quintile chart (dynamic highest usable horizon) ---
+    quintile: dict[str, list] = {}
+    quintile_horizon = None
     if not bucket.empty and "Bucket_Type" in bucket.columns:
         bq = bucket[bucket["Bucket_Type"] == "Score_Quintile"].copy()
-        for h in (5, 10):
-            sub = bq[bq["Horizon_Days"] == h]
-            ordered = []
-            for label in ("Q5_Lowest", "Q4", "Q3", "Q2", "Q1_Highest"):
-                row = sub[sub["Bucket"] == label]
-                ordered.append(_num(row["Median_Net_Return"].iloc[0] * 100, 3)
-                               if not row.empty else None)
-            quintile[str(h)] = ordered
+        if "Horizon_Days" in bq.columns and "Median_Net_Return" in bq.columns:
+            bq["_h"] = pd.to_numeric(bq["Horizon_Days"], errors="coerce")
+            horizons = sorted([int(h) for h in bq["_h"].dropna().unique()])
+            for h in horizons:
+                sub = bq[bq["_h"] == h]
+                ordered = []
+                for label in ("Q5_Lowest", "Q4", "Q3", "Q2", "Q1_Highest"):
+                    row = sub[sub["Bucket"] == label]
+                    val = None
+                    if not row.empty:
+                        raw = pd.to_numeric(row["Median_Net_Return"], errors="coerce").dropna()
+                        if not raw.empty:
+                            val = _num(raw.iloc[0] * 100, 3)
+                    ordered.append(val)
+                quintile[str(h)] = ordered
+            usable = [h for h in horizons if any(v is not None for v in quintile.get(str(h), []))]
+            if usable:
+                quintile_horizon = max(usable)
 
     # --- shadow chip ---
     overlap = shadow_summary.get("top20_overlap_count")
@@ -216,7 +231,17 @@ def _payload() -> dict:
         "warnings": shadow_warnings,
     }
 
-    # --- candidate cards (top 5 post-veto) ---
+    shadow_top5_symbols: set[str] = set()
+    shadow_unique_top5 = []
+    if not shadow_scores.empty and "Symbol" in shadow_scores.columns:
+        sh_clean = shadow_scores[~shadow_scores["Symbol"].apply(_veto_symbol)].copy()
+        score_col = "Final_Score" if "Final_Score" in sh_clean.columns else "Opportunity_Score" if "Opportunity_Score" in sh_clean.columns else None
+        if score_col:
+            sh_clean = sh_clean.sort_values(score_col, ascending=False)
+        shadow_top5 = sh_clean.head(5)
+        shadow_top5_symbols = {_norm_sym(s) for s in shadow_top5["Symbol"].tolist()}
+
+    # --- candidate cards (official top 5 post-veto) ---
     cards = []
     if not tp.empty:
         tp_clean = tp[~tp["Symbol"].apply(_veto_symbol)].copy()
@@ -259,7 +284,25 @@ def _payload() -> dict:
                 "edge": _num(r.get("Model_Edge_%_Per_Day"), 3),
                 "label": "Watch only" if decision_use == "WATCHLIST ONLY" else "Live candidate",
                 "clean": (rsi is not None and rsi < 70 and (vol or 0) < 30),
+                "in_shadow_top5": _norm_sym(r.get("Symbol")) in shadow_top5_symbols,
                 "flags": flags,
+            })
+
+    official_top5_symbols = {_norm_sym(c.get("sym")) for c in cards}
+    if not shadow_scores.empty and "Symbol" in shadow_scores.columns:
+        sh_clean = shadow_scores[~shadow_scores["Symbol"].apply(_veto_symbol)].copy()
+        score_col = "Final_Score" if "Final_Score" in sh_clean.columns else "Opportunity_Score" if "Opportunity_Score" in sh_clean.columns else None
+        if score_col:
+            sh_clean = sh_clean.sort_values(score_col, ascending=False)
+        for _, r in sh_clean.head(5).iterrows():
+            if _norm_sym(r.get("Symbol")) in official_top5_symbols:
+                continue
+            shadow_unique_top5.append({
+                "sym": r.get("Symbol"),
+                "nm": r.get("Name") or r.get("Company") or "",
+                "score": _num(r.get(score_col), 2) if score_col else None,
+                "bucket": r.get("Bucket") or r.get("Opportunity_Bucket") or r.get("Opportunity_Type") or "Shadow Top 5",
+                "risk": r.get("Key_Risk") or r.get("Reason") or "Unique to shadow Top 5",
             })
 
     # --- RSI / vol scatter ---
@@ -352,9 +395,11 @@ def _payload() -> dict:
         "evidence_10": evidence_10,
         "evidence_5": evidence_5,
         "quintile": quintile,
+        "quintile_horizon": quintile_horizon,
         "shadow": shadow,
         "universe": universe_counts,
         "cards": cards,
+        "shadow_unique_top5": shadow_unique_top5,
         "scatter": scatter,
         "avoid": avoid,
         "shadow_only": shadow_only,
