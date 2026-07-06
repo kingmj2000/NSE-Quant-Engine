@@ -304,6 +304,7 @@ class RunnerThread(QThread):
                 cmd.append("--skip-fetch")
             env = os.environ.copy()
             env["PYTHONUNBUFFERED"] = "1"
+            env["PYTHONIOENCODING"] = "utf-8"
             self.bridge.line.emit("Launching isolated pipeline process: " + " ".join(cmd))
             proc = subprocess.Popen(
                 cmd,
