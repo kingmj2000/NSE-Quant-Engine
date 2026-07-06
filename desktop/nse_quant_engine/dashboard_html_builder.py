@@ -524,6 +524,7 @@ h2{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:1.4px;
 .card .px{text-align:right} .card .px .lbl{font-size:10px;color:var(--dim)} .card .px .p{font-size:16px;font-weight:700}
 .lblchip{font-size:10px;font-weight:700;padding:3px 9px;border-radius:6px;background:var(--amber-bg);color:var(--amber);white-space:nowrap}
 .lblchip.review{background:var(--teal-bg);color:var(--teal)}
+.lblchip.shadow{background:var(--blue-bg);color:var(--blue-soft);border:1px solid rgba(88,166,255,.22)}
 .levels{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-top:11px}
 .lv{background:rgba(255,255,255,0.03);border:1px solid var(--line);border-radius:8px;padding:7px 9px}
 .lv .l{font-size:9.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.4px}
@@ -590,28 +591,35 @@ canvas{margin-top:4px}
   </div>
 </div>
 
-<h2>Universe composition</h2>
-<div class="glass g-blue panel">
-  <canvas id="universeChart" height="110"></canvas>
+<div class="grid twocol">
+  <div>
+    <h2>Universe composition</h2>
+    <div class="glass g-blue panel">
+      <canvas id="universeChart" height="126"></canvas>
+    </div>
+  </div>
+  <div>
+    <h2>Shadow vs Official &mdash; ranking overlap</h2>
+    <div class="glass g-blue panel">
+      <div class="evid" id="shadowCards" style="grid-template-columns:repeat(2,1fr);margin-bottom:10px"></div>
+      <canvas id="shadowBar" height="86"></canvas>
+      <div class="sub" id="shadowWarnings" style="margin-top:8px"></div>
+    </div>
+  </div>
 </div>
 
-
-<h2>Shadow vs Official &mdash; ranking overlap</h2>
-<div class="glass g-blue panel">
-  <div class="evid" id="shadowCards" style="grid-template-columns:repeat(4,1fr);margin-bottom:10px"></div>
-  <canvas id="shadowBar" height="70"></canvas>
-  <div class="sub" id="shadowWarnings" style="margin-top:8px"></div>
-</div>
-
-<h2>Quintile median net return &mdash; 10-day (medians, not means)</h2>
+<h2 id="quintileTitle">Quintile median net return</h2>
 <div class="glass panel">
   <canvas id="quintileChart" height="118"></canvas>
-  <div class="sub" style="margin-top:10px">Read on <b>medians</b>: at low effective sample sizes any quintile inversion is <b>noise, not model failure</b>. Means are intentionally discarded — outlier records inflate them.</div>
+  <div id="quintileEmpty" class="chart-error" style="display:none">No usable quintile median-return data is available yet. The chart will appear automatically once a forward-return horizon matures.</div>
+  <div class="sub" id="quintileNote" style="margin-top:10px">Read on <b>medians</b>: at low effective sample sizes any quintile inversion is <b>noise, not model failure</b>. Means are intentionally discarded — outlier records inflate them.</div>
 </div>
 
 
 <h2>Top 5 watchlist candidates &mdash; post-governance veto</h2>
 <div class="cards" id="cards"></div>
+<h2 id="shadowUniqueTitle">Shadow Top 5 unique candidates</h2>
+<div class="cards" id="shadowUniqueCards"></div>
 <div class="caption">
   <b>Target-per-day</b> = best case <b>IF</b> the target is hit within the hold window; ignores the stop and hit rate — mechanical ceiling, not expected return.
   <b>Model edge/day</b> = measured expected edge after costs — blank ("&mdash;") until validation is positive. Adani group names are categorically vetoed before any scoring or watchlist inclusion.
@@ -778,16 +786,28 @@ document.getElementById("shadowWarnings").innerHTML =
   (sh.warnings && sh.warnings.length) ? "Shadow neutralizations: " + sh.warnings.map(w=>`<span class="pill">${w}</span>`).join(" ")
                                       : "";
 
-const q10 = DATA.quintile["10"];
-safeChart("quintileChart",{
-  type:"bar",
-  data:{labels:["Q5 Lowest","Q4","Q3","Q2","Q1 Highest"],
-    datasets:[{label:"Median net return 10D (%)",data:q10,
-      backgroundColor:q10.map(v => v===null ? "rgba(255,255,255,0.08)" : v>=0.5 ? "#3FB950" : v>=0 ? "#38BDB0" : "#F2B13C"),
-      borderRadius:6,barPercentage:.72}]},
-  options:{plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>(c.parsed.y??'—')+"% median"}}},
-    scales:{y:{grid,title:{display:true,text:"% median net return"}},x:{grid:{display:false}}}}
-});
+const qh = DATA.quintile_horizon;
+const qvals = qh ? (DATA.quintile[String(qh)] || []) : [];
+document.getElementById("quintileTitle").innerHTML = qh
+  ? `Quintile median net return &mdash; ${qh}-day (medians, not means)`
+  : `Quintile median net return &mdash; awaiting matured horizon`;
+document.getElementById("quintileNote").innerHTML = qh
+  ? `Current usable horizon: <b>${qh} days</b>. Read on <b>medians</b>: at low effective sample sizes any quintile inversion is <b>noise, not model failure</b>. Means are intentionally discarded — outlier records inflate them.`
+  : `No matured quintile horizon is available yet.`;
+if(!qvals.length || qvals.every(v => v===null || v===undefined)){
+  document.getElementById("quintileChart").style.display = "none";
+  document.getElementById("quintileEmpty").style.display = "block";
+}else{
+  safeChart("quintileChart",{
+    type:"bar",
+    data:{labels:["Q5 Lowest","Q4","Q3","Q2","Q1 Highest"],
+      datasets:[{label:`Median net return ${qh}D (%)`,data:qvals,
+        backgroundColor:qvals.map(v => v===null ? "rgba(255,255,255,0.08)" : v>=0.5 ? "#3FB950" : v>=0 ? "#38BDB0" : "#F2B13C"),
+        borderRadius:6,barPercentage:.72}]},
+    options:{plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>(c.parsed.y??'—')+"% median"}}},
+      scales:{y:{grid,title:{display:true,text:"% median net return"}},x:{grid:{display:false}}}}
+  });
+}
 
 // scatter — minimal: no grid, no ticks, subtle threshold shading, rich tooltip.
 const band={id:"band",beforeDraw(ch){const{ctx,chartArea:a,scales:{x,y}}=ch;if(!a)return;ctx.save();
@@ -805,8 +825,8 @@ safeChart("scatterChart",{
       tooltip:{backgroundColor:"rgba(14,16,26,0.94)",borderColor:"rgba(255,255,255,0.10)",borderWidth:1,
         padding:10,titleColor:"#ECEDEE",bodyColor:"#DEE0E5",
         callbacks:{title:c=>c[0].raw.s, label:c=>[`RSI(14): ${c.raw.x}`,`20D volatility: ${c.raw.y}%`]}}},
-    scales:{x:{min:30,max:90,grid:{display:false,drawBorder:false},ticks:{display:false},title:{display:false}},
-            y:{min:0,suggestedMax:45,grid:{display:false,drawBorder:false},ticks:{display:false},title:{display:false}}}}
+    scales:{x:{min:30,max:90,grid:{display:false,drawBorder:false},ticks:{display:false},title:{display:true,text:"RSI(14)",color:"#8A92A6",font:{size:11,weight:"600"}}},
+            y:{min:0,suggestedMax:45,grid:{display:false,drawBorder:false},ticks:{display:false},title:{display:true,text:"20-day volatility (%)",color:"#8A92A6",font:{size:11,weight:"600"}}}}}
 });
 
 
@@ -819,6 +839,7 @@ document.getElementById("cards").innerHTML = (DATA.cards||[]).map(c=>`
      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
        <div class="px"><div class="lbl">Price</div><div class="p">&#8377;${num(c.px)}</div></div>
        <span class="lblchip ${c.clean?'review':''}">${c.label}</span>
+        ${c.in_shadow_top5 ? '<span class="lblchip shadow">Also in shadow Top 5</span>' : ''}
      </div>
    </div>
    <div class="levels">
@@ -836,6 +857,22 @@ document.getElementById("cards").innerHTML = (DATA.cards||[]).map(c=>`
    </div>
    <div class="flags">${(c.flags||[]).map(f=>`<div class="flag"><span class="fdot ${dotc[f[0]]||'d-dim'}"></span><b>${f[1]}:</b> ${f[2]}</div>`).join('')}</div>
  </div>`).join("") || `<div class="glass panel"><div class="sub">No trade-plan output yet — run the pipeline.</div></div>`;
+
+const shadowUnique = DATA.shadow_unique_top5 || [];
+document.getElementById("shadowUniqueTitle").style.display = shadowUnique.length ? "block" : "none";
+document.getElementById("shadowUniqueCards").style.display = shadowUnique.length ? "grid" : "none";
+document.getElementById("shadowUniqueCards").innerHTML = shadowUnique.map(c=>`
+ <div class="card warn">
+   <div class="top">
+     <div><div class="sym">${c.sym}</div><div class="nm">${c.nm||''}</div></div>
+     <span class="lblchip shadow">Shadow only</span>
+   </div>
+   <div class="levels" style="grid-template-columns:repeat(2,1fr)">
+     <div class="lv"><div class="l">Shadow score</div><div class="n">${c.score==null?'&mdash;':num(c.score)}</div></div>
+     <div class="lv"><div class="l">Bucket</div><div class="n">${c.bucket||'Shadow Top 5'}</div></div>
+   </div>
+   <div class="flags"><div class="flag"><span class="fdot d-amber"></span><b>Shadow:</b> ${c.risk||'Unique to shadow Top 5'}</div></div>
+ </div>`).join("");
 
 // avoid
 const rcls={veto:"rc-veto",rsi:"rc-rsi",vol:"rc-vol",etf:"rc-etf"};
