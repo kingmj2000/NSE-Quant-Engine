@@ -1103,7 +1103,7 @@ class MainWindow(QMainWindow):
 
         # Wire up
         self.btn_run.clicked.connect(self.start_run)
-        self.btn_reload.clicked.connect(self.load_last_run)
+        self.btn_reload.clicked.connect(lambda: self.load_last_run(refresh_tabs=True))
         self.btn_browser.clicked.connect(self.dashboard.open_browser)
         self.btn_drawer.clicked.connect(self.drawer.toggle)
         QShortcut(QKeySequence("F9"), self, activated=self.drawer.toggle)
@@ -1200,20 +1200,30 @@ class MainWindow(QMainWindow):
         self.drawer.reset_steps([s.name for s in steps])
         if not self.drawer.is_open():
             self.drawer.set_open(True)
-        self.thread = RunnerThread(steps, self.bridge)
+        self.thread = RunnerThread(
+            steps,
+            self.bridge,
+            include_shadow=self.cb_shadow.isChecked(),
+            include_fetch=self.cb_fetch.isChecked(),
+        )
         self.thread.done.connect(self._on_done)
         self.thread.start()
 
     def _on_done(self, summary: dict):
         self.btn_run.setEnabled(True)
-        ok = sum(1 for s in summary["steps"] if s["status"] == "ok")
-        bad = sum(1 for s in summary["steps"] if s["status"] == "error")
-        skp = sum(1 for s in summary["steps"] if s["status"] == "skipped")
-        msg = f"Done in {summary['duration_s']}s — {ok} ok, {skp} skipped, {bad} errors."
+        steps = summary.get("steps", []) or []
+        ok = sum(1 for s in steps if s.get("status") == "ok")
+        bad = sum(1 for s in steps if s.get("status") == "error")
+        skp = sum(1 for s in steps if s.get("status") == "skipped")
+        msg = f"Done in {summary.get('duration_s', 0)}s — {ok} ok, {skp} skipped, {bad} errors."
         self.status.showMessage(msg)
         self.drawer.set_status("idle")
         try:
-            self.load_last_run()  # re-read manifest + refresh everything once
+            # First refresh only lightweight header/dashboard state. Heavy report
+            # tabs are delayed so completion of a long child run cannot trigger a
+            # native Qt teardown during the done callback.
+            self.load_last_run(refresh_tabs=False)
+            QTimer.singleShot(900, lambda: self.load_last_run(refresh_tabs=True))
         except Exception as e:
             _log_crash(f"Final reload after run failed but app stayed open: {type(e).__name__}: {e}")
 
@@ -1232,7 +1242,7 @@ class MainWindow(QMainWindow):
             app.quit()
 
     # ----- persistent last-run loading -----
-    def load_last_run(self):
+    def load_last_run(self, refresh_tabs: bool = True):
         """Read output/run_manifest.json (if present) and rehydrate the UI."""
         manifest_path = OUT / "run_manifest.json"
         manifest = {}
@@ -1249,6 +1259,13 @@ class MainWindow(QMainWindow):
             self.lbl_lastrun.setText(f"last run: {_human_age(finished)} · champion: {champ}")
         else:
             self.lbl_lastrun.setText("no runs yet — click ▶ Run Full Pipeline")
+
+        if not refresh_tabs:
+            try:
+                self.dashboard.refresh()
+            except Exception as e:
+                _log_crash(f"Dashboard refresh failed: {e}")
+            return
 
         # tabs (CSV / text)
         def load_csv(p: Path):
@@ -1307,7 +1324,10 @@ class MainWindow(QMainWindow):
             self.drawer.set_status(f"last run · {finished or ''}")
 
         # dashboard (HTML)
-        self.dashboard.refresh()
+        try:
+            self.dashboard.refresh()
+        except Exception as e:
+            _log_crash(f"Dashboard refresh failed: {e}")
 
 
 def main():
