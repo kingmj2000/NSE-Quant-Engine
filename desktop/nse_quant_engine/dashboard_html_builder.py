@@ -189,12 +189,12 @@ def _payload() -> dict:
                 ordered = []
                 for label in ("Q5_Lowest", "Q4", "Q3", "Q2", "Q1_Highest"):
                     row = sub[sub["Bucket"] == label]
-                    val = None
+                    q_val = None
                     if not row.empty:
                         raw = pd.to_numeric(row["Median_Net_Return"], errors="coerce").dropna()
                         if not raw.empty:
-                            val = _num(raw.iloc[0] * 100, 3)
-                    ordered.append(val)
+                            q_val = _num(raw.iloc[0] * 100, 3)
+                    ordered.append(q_val)
                 quintile[str(h)] = ordered
             usable = [h for h in horizons if any(v is not None for v in quintile.get(str(h), []))]
             if usable:
@@ -485,7 +485,7 @@ h2{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:1.4px;
 .pill b{color:var(--txt)}
 
 .grid{display:grid;gap:14px} .twocol{grid-template-columns:1fr 1fr}
-@media(max-width:900px){.twocol{grid-template-columns:1fr}}
+@media(max-width:640px){.twocol{grid-template-columns:1fr}}
 
 .evid{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-top:8px}
 @media(max-width:760px){.evid{grid-template-columns:repeat(2,1fr)}}
@@ -794,7 +794,7 @@ document.getElementById("quintileTitle").innerHTML = qh
 document.getElementById("quintileNote").innerHTML = qh
   ? `Current usable horizon: <b>${qh} days</b>. Read on <b>medians</b>: at low effective sample sizes any quintile inversion is <b>noise, not model failure</b>. Means are intentionally discarded — outlier records inflate them.`
   : `No matured quintile horizon is available yet.`;
-if(!qvals.length || qvals.every(v => v===null || v===undefined)){
+if(!qvals.length || qvals.every(v => v===null||v===undefined||Math.abs(Number(v))<1e-3)){
   document.getElementById("quintileChart").style.display = "none";
   document.getElementById("quintileEmpty").style.display = "block";
 }else{
