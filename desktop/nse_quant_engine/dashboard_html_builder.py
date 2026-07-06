@@ -189,12 +189,12 @@ def _payload() -> dict:
                 ordered = []
                 for label in ("Q5_Lowest", "Q4", "Q3", "Q2", "Q1_Highest"):
                     row = sub[sub["Bucket"] == label]
-                    val = None
+                    q_val = None
                     if not row.empty:
                         raw = pd.to_numeric(row["Median_Net_Return"], errors="coerce").dropna()
                         if not raw.empty:
-                            val = _num(raw.iloc[0] * 100, 3)
-                    ordered.append(val)
+                            q_val = _num(raw.iloc[0] * 100, 3)
+                    ordered.append(q_val)
                 quintile[str(h)] = ordered
             usable = [h for h in horizons if any(v is not None for v in quintile.get(str(h), []))]
             if usable:
