@@ -794,7 +794,7 @@ document.getElementById("quintileTitle").innerHTML = qh
 document.getElementById("quintileNote").innerHTML = qh
   ? `Current usable horizon: <b>${qh} days</b>. Read on <b>medians</b>: at low effective sample sizes any quintile inversion is <b>noise, not model failure</b>. Means are intentionally discarded — outlier records inflate them.`
   : `No matured quintile horizon is available yet.`;
-if(!qvals.length || qvals.every(v => v===null || v===undefined)){
+if(!qvals.length || qvals.every(v => v===null||v===undefined||Math.abs(Number(v))<1e-3)){
   document.getElementById("quintileChart").style.display = "none";
   document.getElementById("quintileEmpty").style.display = "block";
 }else{
