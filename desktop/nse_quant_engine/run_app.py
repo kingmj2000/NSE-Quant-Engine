@@ -28,11 +28,14 @@ import json
 import threading
 import traceback
 import faulthandler
+import os
+import re
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
 try:
-    from PySide6.QtCore import Qt, Signal, QObject, QThread, QUrl, QPropertyAnimation, QEasingCurve, qInstallMessageHandler, QtMsgType
+    from PySide6.QtCore import Qt, Signal, QObject, QThread, QUrl, QPropertyAnimation, QEasingCurve, qInstallMessageHandler, QtMsgType, QTimer
     from PySide6.QtGui import QFont, QStandardItemModel, QStandardItem, QColor, QPalette, QShortcut, QKeySequence
     from PySide6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QPushButton, QVBoxLayout, QHBoxLayout,
@@ -284,21 +287,80 @@ class LogBridge(QObject):
 class RunnerThread(QThread):
     done = Signal(dict)
 
-    def __init__(self, steps, bridge: LogBridge):
+    def __init__(self, steps, bridge: LogBridge, include_shadow: bool = True, include_fetch: bool = True):
         super().__init__()
         self.steps = steps
         self.bridge = bridge
+        self.include_shadow = include_shadow
+        self.include_fetch = include_fetch
 
     def run(self):
+        summary = None
         try:
-            def _step_cb(s):
-                self.bridge.step.emit({"name": s.name, "status": s.status,
-                                       "duration_s": s.duration_s, "error": s.error})
-            summary = orchestrator.run_all(
-                self.steps,
-                on_log=lambda m: self.bridge.line.emit(m),
-                on_step=_step_cb,
+            cmd = [sys.executable, str(BASE / "orchestrator.py"), "--all"]
+            if not self.include_shadow:
+                cmd.append("--no-shadow")
+            if not self.include_fetch:
+                cmd.append("--skip-fetch")
+            env = os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
+            self.bridge.line.emit("Launching isolated pipeline process: " + " ".join(cmd))
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(BASE),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+                env=env,
             )
+            current_step = ""
+            step_re = re.compile(r"^→\s+(.+?)\s*$")
+            done_re = re.compile(r"done in\s+([0-9.]+)s\s+\[(\w+)\]")
+            if proc.stdout is not None:
+                for raw in proc.stdout:
+                    line = raw.rstrip("\r\n")
+                    print(line, flush=True)
+                    self.bridge.line.emit(line)
+                    m_step = step_re.match(line.strip())
+                    if m_step:
+                        current_step = m_step.group(1)
+                        continue
+                    m_done = done_re.search(line)
+                    if m_done and current_step:
+                        self.bridge.step.emit({
+                            "name": current_step,
+                            "status": m_done.group(2),
+                            "duration_s": float(m_done.group(1)),
+                            "error": "",
+                        })
+            rc = proc.wait()
+            manifest_path = OUT / "run_manifest.json"
+            if manifest_path.exists():
+                try:
+                    summary = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    if "finished" not in summary and summary.get("completed_at"):
+                        summary["finished"] = summary.get("completed_at")
+                    if "duration_s" not in summary:
+                        summary["duration_s"] = 0
+                except Exception:
+                    summary = None
+            if rc != 0:
+                crash_code = rc in (-1073741819, 3221225477)
+                err = "native access violation in isolated pipeline process" if crash_code else f"pipeline process exited with code {rc}"
+                self.bridge.line.emit(f"CHILD PIPELINE FAILED — {err}. Desktop app kept open.")
+                _write_crash_log(f"[child-process] {err}")
+                if summary is None:
+                    summary = {
+                        "started": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "finished": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "duration_s": 0,
+                        "steps": [{"name": "isolated pipeline", "status": "error", "duration_s": 0, "error": err}],
+                    }
+                else:
+                    summary.setdefault("steps", []).append({"name": "isolated pipeline", "status": "error", "duration_s": 0, "error": err})
         except BaseException as exc:
             tb = traceback.format_exc()
             self.bridge.line.emit(f"FATAL runner error kept app open: {type(exc).__name__}: {exc}")
@@ -308,6 +370,13 @@ class RunnerThread(QThread):
                 "finished": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "duration_s": 0,
                 "steps": [{"name": "runner", "status": "error", "duration_s": 0, "error": f"{type(exc).__name__}: {exc}"}],
+            }
+        if summary is None:
+            summary = {
+                "started": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "finished": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "duration_s": 0,
+                "steps": [{"name": "runner", "status": "error", "duration_s": 0, "error": "no summary returned"}],
             }
         self.done.emit(summary)
 
