@@ -1,33 +1,37 @@
 ## Plan
 
-1. **Stop the native auto-close crash**
-   - Treat exit code `-1073741819` as a native Qt/WebEngine access violation, not a normal Python exception.
-   - Stop auto-refreshing the embedded WebEngine dashboard during and immediately after pipeline steps.
-   - Replace the default in-app dashboard view with a stable native Qt summary when running inside the desktop app, while keeping `output/dashboard_latest.html` available through **Open in browser** for the full Chart.js dashboard.
-   - Enable Python fault logging at startup so native crashes write usable details to `output/last_crash.log` when Windows permits it.
-   - Set `QApplication.setQuitOnLastWindowClosed(False)` and add explicit quit handling so transient WebEngine/page destruction cannot close the whole app.
+1. **Stop the post-pipeline auto-crash**
+   - Replace the current in-process `runpy` pipeline execution inside the Qt app with an isolated child Python process.
+   - Stream the child process output back into both the Activity drawer and the terminal, so you still see the full run log.
+   - If the pipeline process crashes with `-1073741819`, keep the desktop UI open and show the crash as a failed child run instead of letting the whole app close.
+   - Keep writing/reading `output/run_manifest.json` exactly as today so last-run loading remains compatible.
 
-2. **Make the pipeline finish without closing the app**
-   - After `dashboard_html_builder` completes, keep the main window open, reload only the native tabs, and show a completion status.
-   - Add defensive guards around final reload/render calls so a bad report/dashboard artifact logs to Activity instead of terminating the app.
+2. **Avoid the unsafe immediate full re-render after a run**
+   - After the child pipeline completes, do not immediately rebuild every heavy tab in the same completion callback.
+   - Update the run status, last-run pill, and native dashboard summary safely first.
+   - Schedule a delayed safe refresh, with each tab guarded independently, so one report/table render cannot terminate the app.
 
-3. **Remove dark row/rectangle artifacts across cards**
-   - Fix the global QSS root rule so it does **not** paint every child `QWidget` dark.
-   - Make card holders, scroll-area contents, table viewports, labels, and markdown report widgets transparent by default.
-   - Remove the striped/opaque row fills in `QTableView`, markdown tables, and Trade Plan card value grids.
-   - Keep only subtle borders and accent colors, not black bands behind every line.
+3. **Dashboard layout updates**
+   - Place **Universe composition** and **Shadow vs Official** side-by-side in one responsive two-column section on desktop, stacking only on narrow screens.
+   - Keep the visuals compact so both panels fit naturally together.
 
-4. **Increase report content height**
-   - Change markdown report rendering so text panels expand to content instead of being capped around one visible line.
-   - For Validation and Trade Plan reports, render sections as full-height panels inside the scroll area with larger minimum heights.
-   - Ensure report tables get enough height for multiple rows and use the parent tab scroll, not tiny nested scrollbars.
+4. **Dynamic quintile horizon**
+   - Stop hardcoding “10-day” in the quintile section.
+   - Detect the available horizon from `score_bucket_performance.csv` / validation artifacts and choose the highest horizon with usable median-return data.
+   - Update the chart title, dataset label, subtitle, and displayed values dynamically, so it can show 5-day now and automatically move to 10/21-day when those outputs mature.
+   - Add a clear empty-state message if no usable median data exists.
 
-5. **Files to update**
-   - `desktop/nse_quant_engine/run_app.py`
-   - `desktop/nse_quant_engine/md_to_widgets.py`
-   - `desktop/nse_quant_engine/run_app.bat` if needed for improved native-crash logging
+5. **Official + shadow Top 5 candidates**
+   - Show the normal/official Top 5 candidate cards as the primary section.
+   - Mark any official Top 5 card that also appears in the shadow Top 5 with a visible “Also in shadow Top 5” marker.
+   - Add a new section below showing only shadow Top 5 names that are unique to shadow, if any.
 
-6. **Validation**
-   - Syntax-check changed Python files.
-   - Confirm the app can complete a run and remain open.
-   - Confirm Validation and Trade Plan cards no longer show black row bands and reports show multiple lines/sections at usable height.
+6. **Timing Filter Map labels**
+   - Keep the clean no-grid/no-tick scatter style.
+   - Add explicit axis labels: X = `RSI(14)` and Y = `20-day volatility (%)`.
+   - Keep hover tooltips showing symbol, RSI, and volatility.
+
+7. **Validation**
+   - Syntax-check the changed Python files.
+   - Verify the run path no longer calls the pipeline in-process.
+   - Verify the generated dashboard HTML contains the side-by-side section, dynamic horizon labels, official/shadow Top 5 sections, and timing-axis labels.
