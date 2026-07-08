@@ -118,6 +118,22 @@ def build_evidence_json(output_dir: Path, top5: pd.DataFrame) -> dict:
         except Exception:
             portfolio_val = {}
 
+    regime_tilt = {}
+    rt = output_dir / "regime_tilt_report.json"
+    if rt.exists():
+        try:
+            regime_tilt = json.loads(rt.read_text(encoding="utf-8"))
+        except Exception:
+            regime_tilt = {}
+
+    rebalance = {}
+    rb = output_dir / "rebalance_diff.json"
+    if rb.exists():
+        try:
+            rebalance = json.loads(rb.read_text(encoding="utf-8"))
+        except Exception:
+            rebalance = {}
+
     picks = []
     for _, r in top5.iterrows():
         sym = str(r.get("Symbol", ""))
