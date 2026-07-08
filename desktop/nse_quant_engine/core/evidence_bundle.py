@@ -155,7 +155,7 @@ def build_manifest(output_dir: Path, included: list[str],
                    config_snapshot: Optional[dict]) -> dict:
     return {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
-        "engine_version": "insight-engine v4 + steps 1-9",
+        "engine_version": "insight-engine v4 + steps 1-13",
         "included_files": included,
         "missing_files": [f for f in _CANDIDATE_FILES if f not in included],
         "config_snapshot": config_snapshot or {},
