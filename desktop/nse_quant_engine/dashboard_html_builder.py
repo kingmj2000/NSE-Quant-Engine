@@ -101,6 +101,11 @@ def _payload() -> dict:
         etfq = _safe_read_csv(DATA / "etf_quality_latest.csv")
     top5_bench_df = _safe_read_csv(OUT / "top5_benchmark_stats.csv")
     top5_corr_df = _safe_read_csv(OUT / "top5_corr_matrix.csv")
+    top5_horizon_df = _safe_read_csv(OUT / "top5_horizon.csv")
+    top5_sent_df = _safe_read_csv(OUT / "top5_sentiment.csv")
+    macro_ctx = _safe_read_json(OUT / "macro_context.json")
+    alpha_ic_df = _safe_read_csv(OUT / "alpha_zoo_ic_report.csv")
+    alpha_survivors = _safe_read_json(OUT / "alpha_zoo_survivors.json")
 
     # --- verdict / banner ---
     verdict = (val.get("verdict") or "Insufficient History")
@@ -304,6 +309,47 @@ def _payload() -> dict:
                     "beta": _num(row.get("BetaVsBenchmark_63D"), 2),
                 }
 
+    # attach horizon-optimizer recommendation per card
+    if not top5_horizon_df.empty and "Symbol" in top5_horizon_df.columns:
+        hmap = {str(row["Symbol"]): row for _, row in top5_horizon_df.iterrows()}
+        for c in cards:
+            row = hmap.get(str(c["sym"]))
+            if row is None:
+                continue
+            try:
+                curve = row.get("Exp_Ret_Curve")
+                if isinstance(curve, str):
+                    import ast as _ast
+                    curve = _ast.literal_eval(curve) if curve.strip().startswith("[") else None
+                hor = row.get("Horizons")
+                if isinstance(hor, str):
+                    import ast as _ast
+                    hor = _ast.literal_eval(hor) if hor.strip().startswith("[") else None
+            except Exception:
+                curve, hor = None, None
+            c["horizon"] = {
+                "rec_days": _num(row.get("Rec_Horizon_Days"), 0),
+                "exp_ret": _num(row.get("Exp_Ret_%"), 2),
+                "down_vol": _num(row.get("Downside_Vol_%"), 2),
+                "sharpe": _num(row.get("Sharpe_like"), 2),
+                "grid": hor if isinstance(hor, list) else None,
+                "curve": curve if isinstance(curve, list) else None,
+            }
+
+    # attach sentiment chip per card
+    if not top5_sent_df.empty and "Symbol" in top5_sent_df.columns:
+        smap = {str(row["Symbol"]): row for _, row in top5_sent_df.iterrows()}
+        for c in cards:
+            row = smap.get(str(c["sym"]))
+            if row is None:
+                continue
+            c["sent"] = {
+                "n": int(row.get("Headlines_7D") or 0),
+                "pos": _num((row.get("PosPct") or 0) * 100, 0),
+                "neg": _num((row.get("NegPct") or 0) * 100, 0),
+                "net": _num(row.get("Net_Sent"), 2),
+            }
+
     # correlation matrix payload for the top-5 (or fewer)
     corr_payload = None
     if not top5_corr_df.empty:
@@ -418,6 +464,41 @@ def _payload() -> dict:
     except Exception:
         universe_counts = {}
 
+    # ── alpha-zoo survivors + IC snapshot (step 5) ──
+    zoo_payload = None
+    try:
+        surv = (alpha_survivors or {}).get("survivors") or []
+        if surv:
+            zoo_payload = {
+                "survivors": surv[:10],
+                "count": len(surv),
+                "min_ic": alpha_survivors.get("threshold_ic"),
+                "min_tstat": alpha_survivors.get("threshold_tstat"),
+                "min_for_tilt": alpha_survivors.get("min_for_tilt"),
+            }
+        elif not alpha_ic_df.empty:
+            zoo_payload = {"survivors": [], "count": 0,
+                            "top_by_ic": alpha_ic_df.sort_values("mean_IC", ascending=False,
+                                                                 key=lambda s: s.abs())
+                                                 .head(6)
+                                                 .to_dict(orient="records")}
+    except Exception:
+        zoo_payload = None
+
+    # ── macro context (step 4) ──
+    macro_payload = None
+    try:
+        if macro_ctx:
+            macro_payload = {
+                "regime": macro_ctx.get("regime") or "neutral",
+                "vix": _num(macro_ctx.get("vix_level"), 2),
+                "vix_pct": _num(macro_ctx.get("vix_pctile_252d"), 1),
+                "nifty_trend": _num(macro_ctx.get("nifty_50d_trend"), 2),
+                "above_50dma": macro_ctx.get("nifty_above_50dma"),
+            }
+    except Exception:
+        macro_payload = None
+
     return {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "date": date_str,
@@ -444,6 +525,8 @@ def _payload() -> dict:
         "dq": dq_notes,
         "excel": excel,
         "corr_matrix": corr_payload,
+        "macro": macro_payload,
+        "alpha_zoo": zoo_payload,
     }
 
 
@@ -616,6 +699,13 @@ canvas{margin-top:4px}
 
 <div class="banner" id="banner"></div>
 
+<div id="marketCtxWrap" style="display:none">
+  <h2>Market context</h2>
+  <div class="glass panel" id="marketCtxPanel">
+    <div id="marketCtx" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px"></div>
+  </div>
+</div>
+
 <h2>Signal maturation &amp; validation readiness</h2>
 <div class="grid twocol">
   <div class="glass g-teal panel">
@@ -665,6 +755,14 @@ canvas{margin-top:4px}
     <div id="corrAvg" class="lblchip"></div>
   </div>
   <div id="corrTable"></div>
+</div>
+
+<div id="alphaZooWrap" style="display:none">
+  <h2>Alpha Zoo &mdash; surviving signals</h2>
+  <div class="glass panel">
+    <div class="sub" id="alphaZooCaption" style="margin-bottom:10px"></div>
+    <div id="alphaZooBody"></div>
+  </div>
 </div>
 
 <h2 id="shadowUniqueTitle">Shadow Top 5 unique candidates</h2>
@@ -910,6 +1008,13 @@ document.getElementById("cards").innerHTML = (DATA.cards||[]).map(c=>`
       <div class="pd"><div class="l">TE 63D</div><div class="n">${c.bench.te63==null?'&mdash;':fmt(c.bench.te63*100,'%',2)}</div></div>
       <div class="pd"><div class="l">β vs Nifty</div><div class="n">${fmt(c.bench.beta,'',2)}</div></div>
     </div>` : ''}
+    ${c.horizon && c.horizon.rec_days ? `<div class="perday" style="margin-top:6px;border-top:1px dashed var(--line);padding-top:8px">
+      <div class="pd"><div class="l">Rec hold</div><div class="n">≈${c.horizon.rec_days}d</div></div>
+      <div class="pd"><div class="l">Exp return</div><div class="n">${fmt(c.horizon.exp_ret,'%',2)}</div></div>
+      <div class="pd"><div class="l">Downside vol</div><div class="n">${fmt(c.horizon.down_vol,'%',2)}</div></div>
+      <div class="pd"><div class="l">Sharpe-like</div><div class="n">${fmt(c.horizon.sharpe,'',2)}</div></div>
+    </div>${c.horizon.curve ? `<div class="sub" style="margin-top:4px;font-size:11px">Curve %: ${c.horizon.grid.map((h,i)=>`${h}d=${c.horizon.curve[i]==null?'—':c.horizon.curve[i]}`).join(' · ')}</div>` : ''}` : ''}
+    ${c.sent ? `<div class="sub" style="margin-top:6px;font-size:11.5px">📰 ${c.sent.n} headlines · 🟢 ${c.sent.pos}% / 🔴 ${c.sent.neg}% · net=${fmt(c.sent.net,'',2)}</div>` : ''}
     <div class="flags">${(c.flags||[]).map(f=>`<div class="flag"><span class="fdot ${dotc[f[0]]||'d-dim'}"></span><b>${f[1]}:</b> ${f[2]}</div>`).join('')}</div>
  </div>`).join("") || `<div class="glass panel"><div class="sub">No trade-plan output yet — run the pipeline.</div></div>`;
 
@@ -996,6 +1101,54 @@ document.getElementById("dqNote").innerHTML = `
 
 // excel summary
 document.getElementById("excel").textContent = DATA.excel;
+
+// ── Market context strip (step 4) ──
+(function renderMacro(){
+  const m = DATA.macro;
+  if(!m) return;
+  const wrap = document.getElementById("marketCtxWrap");
+  const body = document.getElementById("marketCtx");
+  const regimeColor = m.regime==="risk-on" ? "#3FB950" : (m.regime==="risk-off" ? "#F2B13C" : "#8A92A6");
+  body.innerHTML = `
+    <div class="glass panel"><div class="sub">Regime</div><div style="font-size:20px;font-weight:600;color:${regimeColor}">${(m.regime||'neutral').toUpperCase()}</div></div>
+    <div class="glass panel"><div class="sub">India VIX</div><div style="font-size:20px;font-weight:600">${fmt(m.vix,'',2)}</div><div class="sub">${m.vix_pct==null?'':`${m.vix_pct}% percentile (252d)`}</div></div>
+    <div class="glass panel"><div class="sub">Nifty 50D trend</div><div style="font-size:20px;font-weight:600">${fmt(m.nifty_trend,'%',2)}</div><div class="sub">${m.above_50dma===true?'Above 50-DMA':(m.above_50dma===false?'Below 50-DMA':'—')}</div></div>
+    <div class="glass panel"><div class="sub">Read</div><div class="sub" style="margin-top:6px">Sentiment veto and horizon optimizer act only on the top-5 candidates; this strip is the whole-market backdrop.</div></div>`;
+  wrap.style.display="block";
+})();
+
+// ── Alpha-Zoo survivors tile (step 5) ──
+(function renderAlphaZoo(){
+  const z = DATA.alpha_zoo;
+  if(!z) return;
+  const wrap = document.getElementById("alphaZooWrap");
+  const cap = document.getElementById("alphaZooCaption");
+  const body = document.getElementById("alphaZooBody");
+  if(z.survivors && z.survivors.length){
+    cap.innerHTML = `<b>${z.count}</b> signal${z.count===1?'':'s'} independently predicted 5–21 day moves over the last ~12 months (IC≥${z.min_ic}, |t|≥${z.min_tstat}). Blend into scoring gated on ≥${z.min_for_tilt} survivors.`;
+    let html = '<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr>'
+      + ['Alpha','Horizon (d)','Mean IC','t-stat','Hit rate'].map(h=>`<th style="padding:6px 8px;text-align:left;color:var(--muted);border-bottom:1px solid var(--line);font-weight:500">${h}</th>`).join('')
+      + '</tr></thead><tbody>';
+    z.survivors.forEach(s=>{
+      html += `<tr><td style="padding:6px 8px">${s.alpha}</td><td style="padding:6px 8px">${s.horizon}</td><td style="padding:6px 8px">${(s.mean_IC>0?'+':'')+s.mean_IC.toFixed(3)}</td><td style="padding:6px 8px">${(s.t_stat==null?'—':s.t_stat.toFixed(2))}</td><td style="padding:6px 8px">${s.hit_rate==null?'—':(s.hit_rate*100).toFixed(0)+'%'}</td></tr>`;
+    });
+    html += '</tbody></table>';
+    body.innerHTML = html;
+  } else if(z.top_by_ic && z.top_by_ic.length){
+    cap.innerHTML = `No alpha cleared IC/t-stat thresholds yet — showing top 6 by |mean IC| for review. Scoring blend stays disabled.`;
+    let html = '<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr>'
+      + ['Alpha','Horizon (d)','Mean IC','t-stat'].map(h=>`<th style="padding:6px 8px;text-align:left;color:var(--muted);border-bottom:1px solid var(--line);font-weight:500">${h}</th>`).join('')
+      + '</tr></thead><tbody>';
+    z.top_by_ic.forEach(s=>{
+      html += `<tr><td style="padding:6px 8px">${s.alpha}</td><td style="padding:6px 8px">${s.horizon}</td><td style="padding:6px 8px">${Number(s.mean_IC||0).toFixed(3)}</td><td style="padding:6px 8px">${s.t_stat==null?'—':Number(s.t_stat).toFixed(2)}</td></tr>`;
+    });
+    html += '</tbody></table>';
+    body.innerHTML = html;
+  } else {
+    return;
+  }
+  wrap.style.display="block";
+})();
 </script>
 </body></html>
 """

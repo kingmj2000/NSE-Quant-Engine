@@ -8,7 +8,10 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core import regime, sector_context, etf_microstructure as micro, data_quality as dq, alpha_zoo, portfolio_selection as psel
+from core import (regime, sector_context, etf_microstructure as micro,
+                  data_quality as dq, alpha_zoo, portfolio_selection as psel,
+                  horizon_optimizer as hopt, sentiment_overlay as sent,
+                  alpha_evaluator as ae)
 
 def _ok(n): print(f"  PASS: {n}")
 
@@ -187,6 +190,76 @@ def test_benchmark_stats_math():
     # TE must be non-negative
     assert (stats["TrackingError_63D"] >= 0).all()
     _ok(f"benchmark_stats produced {stats.shape} with all-finite values")
+
+
+def test_horizon_optimizer_upward_drift():
+    dates = pd.bdate_range("2023-01-01", periods=400)
+    rng = np.random.default_rng(3)
+    px = 100 * np.cumprod(1 + rng.normal(0.0009, 0.010, len(dates)))
+    df = pd.DataFrame([{"Date": d, "Symbol": "UP", "Close": p} for d, p in zip(dates, px)])
+    rec = hopt.optimal_horizon(df, "UP")
+    assert rec["Rec_Horizon_Days"] in hopt.DEFAULT_HORIZONS
+    assert rec["Exp_Ret_%"] > 0
+    _ok(f"horizon optimizer upward drift: h={rec['Rec_Horizon_Days']} exp={rec['Exp_Ret_%']:.2f}%")
+
+
+def test_horizon_optimizer_short_history():
+    dates = pd.bdate_range("2024-01-01", periods=5)
+    df = pd.DataFrame([{"Date": d, "Symbol": "SHORT", "Close": 100.0} for d in dates])
+    rec = hopt.optimal_horizon(df, "SHORT")
+    assert pd.isna(rec["Rec_Horizon_Days"])
+    _ok("horizon optimizer handles short history safely")
+
+
+def test_horizon_no_lookahead_source():
+    import inspect, re
+    src = inspect.getsource(hopt)
+    assert not re.search(r"\.shift\(\s*-\s*\d", src), "found forward .shift(-N) in horizon_optimizer"
+    _ok("horizon optimizer lookahead guard")
+
+
+def test_sentiment_polarity_bounds():
+    lex = sent.load_lexicon()
+    assert lex, "lexicon empty — csv missing?"
+    p_pos = sent.polarity("Company beats guidance and surges to new high", lex)
+    p_neg = sent.polarity("Company plunges after fraud lawsuit and downgrade", lex)
+    p_neu = sent.polarity("Company held annual meeting", lex)
+    assert -1.0 <= p_pos <= 1.0 and -1.0 <= p_neg <= 1.0
+    assert p_pos > 0 and p_neg < 0 and abs(p_neu) < 0.2
+    _ok(f"sentiment polarity: +={p_pos:.2f}  -={p_neg:.2f}  neu={p_neu:.2f}")
+
+
+def test_sentiment_veto_triggers():
+    news = pd.DataFrame([
+        {"Symbol": "BAD", "Headline": "plunges after fraud probe", "Date": pd.Timestamp.now()},
+        {"Symbol": "BAD", "Headline": "downgrade cuts guidance",  "Date": pd.Timestamp.now()},
+        {"Symbol": "BAD", "Headline": "lawsuit weighs on outlook","Date": pd.Timestamp.now()},
+        {"Symbol": "GOOD","Headline": "beats and surges to new high","Date": pd.Timestamp.now()},
+    ])
+    s_df = sent.score_headlines(news)
+    vetoed = sent.sentiment_veto(s_df, min_headlines=3, neg_pct_veto=0.60)
+    assert "BAD" in vetoed and "GOOD" not in vetoed
+    _ok(f"sentiment veto: {sorted(vetoed)}")
+
+
+def test_alpha_evaluator_smoke():
+    dates = pd.bdate_range("2023-01-01", periods=320)
+    rng = np.random.default_rng(9)
+    rows = []
+    for s in ["A", "B", "C", "D", "E", "F"]:
+        drift = rng.normal(0.0004, 0.0002)
+        px = 100 * np.cumprod(1 + rng.normal(drift, 0.011, len(dates)))
+        for d, p in zip(dates, px):
+            rows.append({"Date": d, "Symbol": s, "Open": p, "High": p*1.01,
+                         "Low": p*0.99, "Close": p, "Volume": 100000})
+    df = pd.DataFrame(rows)
+    ic = ae.evaluate_alphas(df, horizons=(5, 10), eval_days=120, folds=3, max_dates=6)
+    assert not ic.empty
+    for col in ["alpha", "horizon", "mean_IC", "t_stat", "hit_rate"]:
+        assert col in ic.columns
+    surv = ae.promote_alphas(ic, min_ic=0.03, min_tstat=2.0)
+    assert isinstance(surv, list)
+    _ok(f"alpha_evaluator: {len(ic)} rows, {len(surv)} survivors on synthetic panel")
 
 
 if __name__ == "__main__":

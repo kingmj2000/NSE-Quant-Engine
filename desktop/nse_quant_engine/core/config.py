@@ -107,3 +107,34 @@ CORR_AWARE_TOP5    = os.environ.get("CORR_AWARE_TOP5", "1") not in ("0", "false"
 CORR_AWARE_POOL_N  = _i("CORR_AWARE_POOL_N", 25)
 CORR_AWARE_ALPHA   = _f("CORR_AWARE_ALPHA", 0.65)   # score vs diversification tradeoff
 CORR_WINDOW_DAYS   = _i("CORR_WINDOW_DAYS", 60)
+
+# ── Safe-mode kill switch (steps 3-5) ───────────────────────────────────────
+# One env var to disable ALL new post-pipeline enrichment in a single shot,
+# e.g. INSIGHT_SAFE_MODE=1 when debugging.
+_SAFE_MODE         = os.environ.get("INSIGHT_SAFE_MODE", "0") in ("1", "true", "True")
+
+# ── Step 3: Hold-Horizon Optimizer ──────────────────────────────────────────
+HORIZON_OPTIMIZER_ON = (not _SAFE_MODE) and (
+    os.environ.get("HORIZON_OPTIMIZER_ON", "1") not in ("0", "false", "False"))
+HORIZON_GRID       = [3, 5, 10, 21, 42, 63]
+HORIZON_HIST_DAYS  = _i("HORIZON_HIST_DAYS", 250)
+HORIZON_RISK_CAP_PCT = _f("HORIZON_RISK_CAP_PCT", 6.0)
+
+# ── Step 4: Sentiment / macro overlay ───────────────────────────────────────
+SENTIMENT_OVERLAY_ON = (not _SAFE_MODE) and (
+    os.environ.get("SENTIMENT_OVERLAY_ON", "1") not in ("0", "false", "False"))
+SENTIMENT_VETO_ON    = (not _SAFE_MODE) and (
+    os.environ.get("SENTIMENT_VETO_ON", "1") not in ("0", "false", "False"))
+SENT_LOOKBACK_DAYS = _i("SENT_LOOKBACK_DAYS", 7)
+SENT_NEG_VETO_PCT  = _f("SENT_NEG_VETO_PCT", 0.60)
+SENT_MIN_HEADLINES = _i("SENT_MIN_HEADLINES", 3)
+
+# ── Step 5: Alpha-Zoo evaluation + gated tilt ───────────────────────────────
+ALPHA_ZOO_ON       = (not _SAFE_MODE) and (
+    os.environ.get("ALPHA_ZOO_ON", "1") not in ("0", "false", "False"))
+ALPHA_ZOO_WEIGHT   = _f("ALPHA_ZOO_WEIGHT", 0.10)
+ALPHA_IC_MIN       = _f("ALPHA_IC_MIN", 0.03)
+ALPHA_TSTAT_MIN    = _f("ALPHA_TSTAT_MIN", 2.0)
+ALPHA_EVAL_DAYS    = _i("ALPHA_EVAL_DAYS", 250)
+ALPHA_EVAL_FOLDS   = _i("ALPHA_EVAL_FOLDS", 4)
+ALPHA_MIN_SURVIVORS_FOR_TILT = _i("ALPHA_MIN_SURVIVORS_FOR_TILT", 3)
