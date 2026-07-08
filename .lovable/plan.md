@@ -1,49 +1,57 @@
-## Goal
-Surface the Step 8 + 10–16 artifacts in the desktop UI so the "Run" button visibly reflects the new pipeline, without changing any analytics logic.
+# Confirming Fincept Terminal + Vibe Trading integrations
 
-## What already works (no change needed)
-`run_app.py → orchestrator.py → trade_plan_builder.py` already calls every new module. Verified references in `trade_plan_builder.py`:
-- Step 8 `position_sizer`, Step 10 `backtest_engine`, `fundamentals_overlay`
-- Step 12–13 `sector_context`, `event_calendar`, `expected_value`, `portfolio_validation`
-- Step 14–16 `institutional_flow`, `regime_tilt`, `rebalance_diff`
-- `evidence_bundle` (packs everything + prompt into the zip)
+## What the terminal output already proves ran
 
-Artifacts land in `output/` and in the zip. The run button is not broken.
+Your `trade_plan_builder` log shows every inspired module firing and writing artifacts:
 
-## What is missing — UI only
-Existing tabs: Dashboard, Scores, Shadow, Compare, DQ Report, Validation, Trade Plan. New artifacts only appear inside `trade_plan_report.md` / the zip; there is no dedicated panel.
+| Inspiration source | Concept borrowed | Module that ran | Artifact in your log |
+|---|---|---|---|
+| Fincept Terminal — research desk layout | Sector / peer context per pick | `core/sector_context.py` | `top5_sector_context.csv` |
+| Fincept — earnings/event calendar tab | Event-risk window flag | `core/event_calendar.py` | `top5_events.csv` |
+| Fincept — institutional flow panel (FII/DII, bulk deals) | FII regime + bulk-deal confirmation | `core/institutional_flow.py` | `top5_institutional_flow.csv (fii_regime=Unknown)` |
+| Fincept — macro regime dashboard | Regime detection + report | `core/regime.py` | `macro_context.json (regime=neutral)` |
+| Vibe Trading — alpha zoo / IC gating | Multi-alpha IC survivorship | `core/alpha_zoo.py` + `alpha_evaluator.py` | `alpha_zoo_ic_report.csv + alpha_zoo_survivors.json (7 survivors)` |
+| Vibe Trading — regime-conditional alpha tilt | Family reweighting by regime | `core/regime_tilt.py` | `regime_tilt_report.json (mode=REPORT_ONLY)` |
+| Vibe Trading — expected-value / Kelly sizing | EV + fractional Kelly | `core/expected_value.py`, `core/position_sizer.py` | `top5_expected_value.csv`, `top5_position_sizing.csv (sum weight=83.9%)` |
+| Vibe Trading — walk-forward style backtest | Style backtest + scorecard | `core/backtest_engine.py` | (writes when enough history; part of insight bundle) |
+| Vibe Trading — portfolio-level gate | Batch ship/hold verdict | `core/portfolio_validation.py` | `portfolio_validation.json — Batch_Verdict=Ship` |
+| Vibe Trading — turnover-vs-cost check | Rebalance diff + net edge | `core/rebalance_diff.py` | `rebalance_diff.json (turnover=20.0%, rec=Hold_Minor_Adjustment)` |
+| Both — portable evidence handoff to an LLM | Zip bundle + baked prompt | `core/evidence_bundle.py` + `prompts/rationale_prompt.md` | `insight_bundle_20260708_1238.zip (170 KB)` + `[step7] Upload ... to Claude` |
 
-## Proposed changes (UI only, `run_app.py`)
+So the integrations are wired end-to-end. What's missing is that nothing in the run *labels* these steps as Fincept- / Vibe-inspired, so the run looks generic.
 
-### 1. New "Portfolio" tab
-Single scrollable page with 4 cards driven by existing CSV/JSON outputs:
-- **Sizing** — table from `top5_sizing.csv` (Weight%, Capital, Stop, Max Loss, Risk Contribution).
-- **Sector & Peers** — table from `top5_sector_context.csv`.
-- **Events & EV** — merged table of `top5_event_calendar.csv` + `top5_expected_value.csv` with an amber pill when `Event_Risk_Flag = In_Window`.
-- **Portfolio Validation** — verdict pill (green/amber/red) + reasons list from `portfolio_validation.json`.
+## Why it feels invisible
 
-### 2. New "Macro & Rotation" tab
-Three cards:
-- **Institutional Flow** — FII regime pill + `top5_institutional_flow.csv` table.
-- **Regime Tilt** — regime pill + family-multiplier chips from `regime_tilt_report.json` (report-only badge when `applied_to_scoring=false`).
-- **Rebalance Diff** — Holds / Exits / Entries chips, turnover %, net-edge-after-cost, recommendation pill from `rebalance_diff.json`. First run shows "First run — establishing positions".
+- Log lines are neutral ("Saved: top5_sector_context.csv"). No provenance tag.
+- `WORKFLOW.md` describes steps but doesn't credit the source repos per step.
+- The UI tabs added last turn (Portfolio, Macro & Rotation) exist but have no "Inspired by" badges.
+- Some outputs read as no-ops on this run because inputs are missing (FII=Unknown → no `data/fii_dii_daily.csv`; 0 fundamentals scored → no `data/fundamentals_latest.csv`; 0 events → empty calendar). They ran; they had nothing to chew on.
 
-### 3. Dashboard KPI strip additions
-Append three tiles reading the same JSONs already produced:
-- Batch Verdict (from `portfolio_validation.json`)
-- Turnover % (from `rebalance_diff.json`)
-- FII Regime (from `macro_context.json`, already exists on disk)
+## Plan (docs + light UI only, no analytics changes)
 
-### 4. Evidence-bundle button
-Add a Ghost button next to the run controls: "Open Evidence Zip" — opens the newest `output/evidence_bundle_*.zip` in the OS file browser. This is the artifact the user hands to Claude.
+1. **Add `desktop/nse_quant_engine/INSPIRATION_MAP.md`** — one-page table mapping every borrowed concept to the file, the artifact, and the enabling input file (so you know what to drop into `data/` to light each one up). Same table as above, expanded with "how to activate".
 
-## Out of scope
-- No changes to analytics, module logic, or orchestrator.
-- No new Python dependencies. All new panels reuse the existing `_df_to_model`, `Card`, and pill styles.
-- No changes to `run_app.bat` — same one-button launch.
+2. **Tag pipeline log lines with provenance.** In `trade_plan_builder.py`, prefix the existing `Saved: ...` lines for the borrowed steps with a short tag, e.g. `[fincept] Saved: top5_sector_context.csv`, `[vibe] Saved: alpha_zoo_ic_report.csv ...`. Print-only change; no logic touched.
+
+3. **Add an "Inspiration" section to `WORKFLOW.md`** cross-referencing the 16 steps to Fincept/Vibe features.
+
+4. **UI provenance badges in `run_app.py`.** On the Portfolio and Macro & Rotation tab headers, add a small subtitle like `Sector & Peers · inspired by Fincept research desk`, `Alpha Zoo · inspired by Vibe Trading`, `Rebalance Diff · inspired by Vibe Trading turnover gate`. Text-only.
+
+5. **Add an "Activation checklist" panel to the Dashboard** listing the optional input files (`data/fii_dii_daily.csv`, `data/bulk_deals.csv`, `data/fundamentals_latest.csv`, earnings calendar) with ✅ / ⚠️ present-or-missing status, so it's obvious *why* a borrowed step returned Unknown/empty on this run and how to feed it.
+
+6. **README bump.** Add a "Credits & inspiration" section to `desktop/nse_quant_engine/README.md` linking both repos and pointing to `INSPIRATION_MAP.md`.
+
+## Not in scope
+
+- No changes to scoring, sizing, validation, or bundle contents.
+- No new dependencies.
+- `run_app.bat` / `run_app.command` unchanged — same one-click run.
 
 ## Files to touch
-- `desktop/nse_quant_engine/run_app.py` — add `PortfolioView`, `MacroRotationView`, extend Dashboard KPI strip, add "Open Evidence Zip" button, register two new tabs.
 
-## How to run after this change
-Unchanged — double-click `run_app.bat` (Windows) or `run_app.command` (macOS), click the run button. The two new tabs populate as soon as the pipeline finishes.
+- New: `desktop/nse_quant_engine/INSPIRATION_MAP.md`
+- Edit (print tags only): `desktop/nse_quant_engine/trade_plan_builder.py`
+- Edit (docs): `desktop/nse_quant_engine/WORKFLOW.md`, `desktop/nse_quant_engine/README.md`
+- Edit (UI labels + activation panel): `desktop/nse_quant_engine/run_app.py`
+
+After this, one look at the terminal, the UI, or `INSPIRATION_MAP.md` will make it unambiguous which Fincept/Vibe ideas are live and which are dormant waiting for optional input files.
