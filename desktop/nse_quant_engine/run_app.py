@@ -1560,6 +1560,25 @@ class MainWindow(QMainWindow):
         except Exception as e:
             _log_crash(f"Compare tab render failed: {e}")
 
+        # New tabs: Portfolio + Macro & Rotation (Steps 8, 10–16)
+        sizing_df   = load_csv(OUT / "top5_sizing.csv")
+        sector_df   = load_csv(OUT / "top5_sector_context.csv")
+        events_df   = load_csv(OUT / "top5_event_calendar.csv")
+        ev_df       = load_csv(OUT / "top5_expected_value.csv")
+        inst_df     = load_csv(OUT / "top5_institutional_flow.csv")
+        pv_json     = _safe_json(OUT / "portfolio_validation.json")
+        macro_json  = _safe_json(OUT / "macro_context.json")
+        tilt_json   = _safe_json(OUT / "regime_tilt_report.json")
+        rebal_json  = _safe_json(OUT / "rebalance_diff.json")
+        try:
+            self.tab_portfolio.render(sizing_df, sector_df, events_df, ev_df, pv_json)
+        except Exception as e:
+            _log_crash(f"Portfolio tab render failed: {e}")
+        try:
+            self.tab_macro.render(inst_df, macro_json, tilt_json, rebal_json)
+        except Exception as e:
+            _log_crash(f"Macro tab render failed: {e}")
+
         # drawer: hydrate step list from last run so users can see what ran
         steps = manifest.get("steps") or []
         if steps and not (self.thread and self.thread.isRunning()):
