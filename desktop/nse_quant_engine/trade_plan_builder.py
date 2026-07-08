@@ -886,7 +886,74 @@ def _emit_fundamentals_sizing_backtest_bundle(plan: pd.DataFrame) -> None:
         except Exception as e:
             print(f"[step9] backtest skipped: {e}")
 
-    # ── Step 7: Evidence bundle (must be last) ──
+    # ── Step 10: Sector & Peer Context ──
+    fund_df_cached = pd.DataFrame()
+    if FUND_CACHE_CSV.exists():
+        try:
+            fund_df_cached = pd.read_csv(FUND_CACHE_CSV)
+        except Exception:
+            fund_df_cached = pd.DataFrame()
+    if getattr(C, "SECTOR_CONTEXT_ON", True) and not top5.empty:
+        try:
+            from core import sector_context as sc
+            sec = sc.enrich(top5[["Symbol"]], prices, fund_df_cached)
+            if not sec.empty:
+                sec.to_csv(TOP5_SECTOR_CSV, index=False)
+                print(f"Saved: {TOP5_SECTOR_CSV.name}")
+        except Exception as e:
+            print(f"[step10] sector context skipped: {e}")
+
+    # ── Step 11: Event & Catalyst Calendar ──
+    if getattr(C, "EVENT_CALENDAR_ON", True) and not top5.empty:
+        try:
+            from core import event_calendar as ec
+            hz_df = pd.read_csv(TOP5_HORIZON_CSV) if TOP5_HORIZON_CSV.exists() else None
+            ev_df = ec.build(top5[["Symbol"]], hz_df, fund_df_cached)
+            if not ev_df.empty:
+                ev_df.to_csv(TOP5_EVENTS_CSV, index=False)
+                n_in = int((ev_df["Event_Risk_Flag"] == "In_Window").sum())
+                print(f"Saved: {TOP5_EVENTS_CSV.name} ({n_in} in-window)")
+        except Exception as e:
+            print(f"[step11] event calendar skipped: {e}")
+
+    # ── Step 12: Expected-Value / Kelly-Lite cross-check (report-only) ──
+    if getattr(C, "EV_REPORT_ON", True) and not top5.empty:
+        try:
+            from core import expected_value as ev
+            bt_sc = pd.read_csv(BACKTEST_CSV) if BACKTEST_CSV.exists() else None
+            hz_df = pd.read_csv(TOP5_HORIZON_CSV) if TOP5_HORIZON_CSV.exists() else None
+            sz_df = pd.read_csv(TOP5_SIZING_CSV) if TOP5_SIZING_CSV.exists() else None
+            evr = ev.top5_ev_report(
+                top5[["Symbol"]], bt_sc, hz_df, sz_df,
+                kelly_cap_of_weight=float(getattr(C, "KELLY_CAP_OF_WEIGHT", 0.25)),
+            )
+            if not evr.empty:
+                evr.to_csv(TOP5_EV_CSV, index=False)
+                print(f"Saved: {TOP5_EV_CSV.name}")
+        except Exception as e:
+            print(f"[step12] EV report skipped: {e}")
+
+    # ── Step 13: Portfolio-Level Validation Gate ──
+    if getattr(C, "PORTFOLIO_VALIDATION_ON", True):
+        try:
+            from core import portfolio_validation as pv
+            report = pv.validate_batch(OUTPUT_DIR, thresholds={
+                "max_avg_abs_corr":       float(getattr(C, "PV_MAX_AVG_ABS_CORR", 0.70)),
+                "max_portfolio_loss_pct_nav": float(getattr(C, "PV_MAX_PORTFOLIO_LOSS_PCT", 3.0)),
+                "max_single_sector_pct":  float(getattr(C, "PV_MAX_SINGLE_SECTOR_PCT", 60.0)),
+                "min_backtest_hit_rate":  float(getattr(C, "PV_MIN_BACKTEST_HIT_RATE", 0.50)),
+                "min_alpha_survivors":    int(getattr(C, "PV_MIN_ALPHA_SURVIVORS", 2)),
+            })
+            pv.write_report(OUTPUT_DIR, report)
+            print(f"Saved: {PORTFOLIO_VAL_JSON.name} — Batch_Verdict={report['verdict']}")
+            if report["reasons"]:
+                print(f"[step13] reasons: {'; '.join(report['reasons'])}")
+            if report["caveats"]:
+                print(f"[step13] caveats: {'; '.join(report['caveats'])}")
+        except Exception as e:
+            print(f"[step13] portfolio validation skipped: {e}")
+
+
     if getattr(C, "EVIDENCE_BUNDLE_ON", True):
         try:
             from core import evidence_bundle as eb
