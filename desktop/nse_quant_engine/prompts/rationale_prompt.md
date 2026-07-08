@@ -70,6 +70,7 @@ symbol, in the same order as `evidence.json`). No prose outside the JSON.
       "sector_context": "<= 1 sentence citing Sector_RS_63D_% + Peer_Median_3M_Return_% from top5_sector_context.csv>",
       "event_risk": "<= 1 sentence citing Event_Risk_Flag + Days_To_Earnings from top5_events.csv>",
       "ev_sanity_check": "<= 1 sentence citing EV_% and EV_Sizing_Agree from top5_expected_value.csv>",
+      "institutional_flow": "<= 1 sentence citing Institutional_Confirmation + Bulk_Deal_Flag + FII_Regime from top5_institutional_flow.csv>",
       "risks": ["risk 1 with the field it comes from", "risk 2"],
       "invalidation": "<= 1 sentence: what would falsify the thesis, tied to Stop_Loss / sentiment veto / regime flip>",
       "contradictions": ["signal-A says X but signal-B says Y", "..."],
@@ -81,7 +82,9 @@ symbol, in the same order as `evidence.json`). No prose outside the JSON.
     "batch_verdict": "<copy portfolio_validation.verdict verbatim, add <= 1 sentence citing top reasons/caveats>",
     "concentration_check": "<= 1 sentence citing avg |corr| from top5_corr_matrix and top_sector_weight_% from portfolio_validation>",
     "aggregate_risk_check": "<= 1 sentence citing sum of Max_Loss_%_of_NAV from top5_position_sizing>",
-    "backtest_context": "<= 1 sentence citing hit rate / Sharpe from backtest_scorecard>"
+    "backtest_context": "<= 1 sentence citing hit rate / Sharpe from backtest_scorecard>",
+    "regime_tilt_agreement": "<= 1 sentence citing regime_tilt_report.regime and whether picks align with the family multipliers>",
+    "rotate_vs_hold": "<= 1 sentence citing rebalance_diff.recommendation, estimated_turnover_% and net_edge_after_cost_%>"
   },
   "flags_for_human_review": ["symbol: reason", "..."]
 }
