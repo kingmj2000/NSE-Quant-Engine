@@ -190,3 +190,19 @@ PV_MAX_PORTFOLIO_LOSS_PCT    = _f("PV_MAX_PORTFOLIO_LOSS_PCT", 3.0)
 PV_MAX_SINGLE_SECTOR_PCT     = _f("PV_MAX_SINGLE_SECTOR_PCT", 60.0)
 PV_MIN_BACKTEST_HIT_RATE     = _f("PV_MIN_BACKTEST_HIT_RATE", 0.50)
 PV_MIN_ALPHA_SURVIVORS       = _i("PV_MIN_ALPHA_SURVIVORS", 2)
+
+# ── Step 14: Institutional Flow Overlay ─────────────────────────────────────
+INSTITUTIONAL_FLOW_ON    = (not _SAFE_MODE) and (
+    os.environ.get("INSTITUTIONAL_FLOW_ON", "1") not in ("0", "false", "False"))
+FII_LOOKBACK_DAYS        = _i("FII_LOOKBACK_DAYS", 5)
+BULK_DEALS_LOOKBACK_DAYS = _i("BULK_DEALS_LOOKBACK_DAYS", 30)
+
+# ── Step 15: Regime-conditional alpha tilt (report-only default) ────────────
+REGIME_TILT_ON     = (not _SAFE_MODE) and (
+    os.environ.get("REGIME_TILT_ON", "1") not in ("0", "false", "False"))
+REGIME_TILT_APPLY  = os.environ.get("REGIME_TILT_APPLY", "0") in ("1", "true", "True")
+
+# ── Step 16: Rebalance diff / turnover report ───────────────────────────────
+REBALANCE_DIFF_ON       = (not _SAFE_MODE) and (
+    os.environ.get("REBALANCE_DIFF_ON", "1") not in ("0", "false", "False"))
+REBAL_ROUND_TRIP_COST_PCT = _f("REBAL_ROUND_TRIP_COST_PCT", 0.35)
