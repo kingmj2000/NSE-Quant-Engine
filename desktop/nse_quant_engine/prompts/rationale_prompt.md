@@ -37,6 +37,10 @@ engine already did that; you are being asked to *pressure-test and explain*.
 | `top5_corr_matrix.csv` | Pairwise correlations across the 5 picks (Step 2). |
 | `top5_fundamentals.csv` | Quality z-score + valuation flag (Step 6). |
 | `top5_position_sizing.csv` | Risk-parity weights + capital + max-loss (Step 8). |
+| `top5_sector_context.csv` | Sector membership, sector RS, nearest peers (Step 10). |
+| `top5_events.csv` | Earnings / ex-div dates + Event_Risk_Flag vs hold horizon (Step 11). |
+| `top5_expected_value.csv` | Per-pick EV_% + Kelly-lite sanity check vs sizing (Step 12). |
+| `portfolio_validation.json` | Batch_Verdict (Ship / Ship_With_Caveats / Downgrade_To_Watch) + reasons (Step 13). |
 | `alpha_zoo_ic_report.csv` | Walk-forward IC per (alpha, horizon) — Step 5. |
 | `alpha_zoo_survivors.json` | Which independent alphas cleared IC + t-stat. |
 | `macro_context.json` | Regime + India VIX + Nifty vs 50-DMA (Step 4). |
