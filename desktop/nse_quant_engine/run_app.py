@@ -1349,6 +1349,7 @@ class MainWindow(QMainWindow):
         self.btn_run.clicked.connect(self.start_run)
         self.btn_reload.clicked.connect(lambda: self.load_last_run(refresh_tabs=True))
         self.btn_browser.clicked.connect(self.dashboard.open_browser)
+        self.btn_evidence.clicked.connect(self._reveal_evidence_zip)
         self.btn_drawer.clicked.connect(self.drawer.toggle)
         QShortcut(QKeySequence("F9"), self, activated=self.drawer.toggle)
         QShortcut(QKeySequence("Ctrl+R"), self, activated=self.load_last_run)
