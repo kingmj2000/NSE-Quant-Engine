@@ -445,9 +445,6 @@ def _payload() -> dict:
         "excel": excel,
         "corr_matrix": corr_payload,
     }
-        "dq": dq_notes,
-        "excel": excel,
-    }
 
 
 # ---------------------------------------------------------------- template ----
