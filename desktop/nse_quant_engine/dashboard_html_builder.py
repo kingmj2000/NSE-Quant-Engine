@@ -904,8 +904,53 @@ document.getElementById("cards").innerHTML = (DATA.cards||[]).map(c=>`
      <div class="pd"><div class="l">T2 %/day</div><div class="n">${fmt(c.pd2,'',3)}</div></div>
      <div class="pd edge"><div class="l">Model edge/day</div><div class="n">${c.edge==null?'&mdash;':fmt(c.edge,'',3)}</div></div>
    </div>
-   <div class="flags">${(c.flags||[]).map(f=>`<div class="flag"><span class="fdot ${dotc[f[0]]||'d-dim'}"></span><b>${f[1]}:</b> ${f[2]}</div>`).join('')}</div>
+    ${c.bench ? `<div class="perday" style="margin-top:6px;border-top:1px dashed var(--line);padding-top:8px">
+      <div class="pd"><div class="l">Excess 21D</div><div class="n">${c.bench.ex21==null?'&mdash;':fmt(c.bench.ex21*100,'%',2)}</div></div>
+      <div class="pd"><div class="l">IR 63D</div><div class="n">${fmt(c.bench.ir63,'',2)}</div></div>
+      <div class="pd"><div class="l">TE 63D</div><div class="n">${c.bench.te63==null?'&mdash;':fmt(c.bench.te63*100,'%',2)}</div></div>
+      <div class="pd"><div class="l">β vs Nifty</div><div class="n">${fmt(c.bench.beta,'',2)}</div></div>
+    </div>` : ''}
+    <div class="flags">${(c.flags||[]).map(f=>`<div class="flag"><span class="fdot ${dotc[f[0]]||'d-dim'}"></span><b>${f[1]}:</b> ${f[2]}</div>`).join('')}</div>
  </div>`).join("") || `<div class="glass panel"><div class="sub">No trade-plan output yet — run the pipeline.</div></div>`;
+
+// Correlation matrix tile
+(function renderCorr(){
+  const cm = DATA.corr_matrix;
+  const panel = document.getElementById("corrPanel");
+  const title = document.getElementById("corrTitle");
+  if(!cm || !cm.labels || cm.labels.length<2){
+    if(title) title.style.display="none";
+    return;
+  }
+  panel.style.display="block";
+  const badge = document.getElementById("corrAvg");
+  if(badge && cm.avg_abs!=null){
+    const v = cm.avg_abs;
+    const cls = v<0.35 ? "review" : (v<0.6 ? "" : "shadow");
+    badge.className = "lblchip " + cls;
+    badge.textContent = "avg |corr| = " + v.toFixed(2);
+  }
+  const cellBg = v => {
+    const a = Math.min(Math.abs(v), 1);
+    // green (low) → amber → red (high)
+    const hue = 130 - a*130; // 130=green, 0=red
+    return `hsla(${hue.toFixed(0)},70%,45%,${(0.15+a*0.55).toFixed(2)})`;
+  };
+  let html = '<table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead><tr><th></th>';
+  cm.labels.forEach(l => { html += `<th style="padding:4px 6px;color:var(--muted);font-weight:500">${l}</th>`; });
+  html += '</tr></thead><tbody>';
+  cm.values.forEach((row,i) => {
+    html += `<tr><th style="padding:4px 6px;color:var(--muted);text-align:right;font-weight:500">${cm.labels[i]}</th>`;
+    row.forEach((v,j) => {
+      const bg = i===j ? "transparent" : cellBg(v);
+      const txt = i===j ? "&mdash;" : Number(v).toFixed(2);
+      html += `<td style="padding:6px 8px;text-align:center;background:${bg};border:1px solid var(--line)">${txt}</td>`;
+    });
+    html += '</tr>';
+  });
+  html += '</tbody></table>';
+  document.getElementById("corrTable").innerHTML = html;
+})();
 
 const shadowUnique = DATA.shadow_unique_top5 || [];
 document.getElementById("shadowUniqueTitle").style.display = shadowUnique.length ? "block" : "none";
