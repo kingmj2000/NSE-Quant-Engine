@@ -757,6 +757,14 @@ canvas{margin-top:4px}
   <div id="corrTable"></div>
 </div>
 
+<div id="alphaZooWrap" style="display:none">
+  <h2>Alpha Zoo &mdash; surviving signals</h2>
+  <div class="glass panel">
+    <div class="sub" id="alphaZooCaption" style="margin-bottom:10px"></div>
+    <div id="alphaZooBody"></div>
+  </div>
+</div>
+
 <h2 id="shadowUniqueTitle">Shadow Top 5 unique candidates</h2>
 <div class="cards" id="shadowUniqueCards"></div>
 <div class="caption">
