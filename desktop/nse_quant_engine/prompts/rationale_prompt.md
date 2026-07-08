@@ -41,6 +41,9 @@ engine already did that; you are being asked to *pressure-test and explain*.
 | `top5_events.csv` | Earnings / ex-div dates + Event_Risk_Flag vs hold horizon (Step 11). |
 | `top5_expected_value.csv` | Per-pick EV_% + Kelly-lite sanity check vs sizing (Step 12). |
 | `portfolio_validation.json` | Batch_Verdict (Ship / Ship_With_Caveats / Downgrade_To_Watch) + reasons (Step 13). |
+| `top5_institutional_flow.csv` | Bulk-deal flag + FII regime + Institutional_Confirmation per pick (Step 14). |
+| `regime_tilt_report.json` | Regime-conditional alpha multipliers (Step 15, report-only unless mode=APPLIED). |
+| `rebalance_diff.json` | Holds / exits / entries vs prior top-5 + turnover + net_edge_after_cost (Step 16). |
 | `alpha_zoo_ic_report.csv` | Walk-forward IC per (alpha, horizon) — Step 5. |
 | `alpha_zoo_survivors.json` | Which independent alphas cleared IC + t-stat. |
 | `macro_context.json` | Regime + India VIX + Nifty vs 50-DMA (Step 4). |
