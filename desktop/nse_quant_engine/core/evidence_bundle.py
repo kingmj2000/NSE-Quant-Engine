@@ -92,6 +92,7 @@ def build_evidence_json(output_dir: Path, top5: pd.DataFrame) -> dict:
     sector = _read("top5_sector_context.csv")
     events = _read("top5_events.csv")
     ev_report = _read("top5_expected_value.csv")
+    instflow = _read("top5_institutional_flow.csv")
 
     macro = {}
     mp = output_dir / "macro_context.json"
