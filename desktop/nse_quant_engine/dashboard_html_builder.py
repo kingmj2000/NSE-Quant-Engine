@@ -443,6 +443,10 @@ def _payload() -> dict:
         "shadow_only": shadow_only,
         "dq": dq_notes,
         "excel": excel,
+        "corr_matrix": corr_payload,
+    }
+        "dq": dq_notes,
+        "excel": excel,
     }
 
 
