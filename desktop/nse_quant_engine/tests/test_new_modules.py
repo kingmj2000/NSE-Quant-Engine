@@ -8,7 +8,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core import regime, sector_context, etf_microstructure as micro, data_quality as dq, alpha_zoo
+from core import regime, sector_context, etf_microstructure as micro, data_quality as dq, alpha_zoo, portfolio_selection as psel
 
 def _ok(n): print(f"  PASS: {n}")
 
@@ -131,6 +131,62 @@ def test_alpha_zoo_compute_shape():
     assert z["Zoo_Score"].notna().all()
     assert (z["Zoo_Score"].between(0, 100)).all()
     _ok(f"alpha_zoo compute: {len(alpha_zoo.ALPHAS)} alphas, coverage min={z['Zoo_Coverage'].min():.2f}")
+
+
+def _synthetic_prices(seed=1):
+    """5 highly-correlated 'IT' names + 5 independent names + Nifty."""
+    dates = pd.bdate_range("2024-01-01", periods=120)
+    rng = np.random.default_rng(seed)
+    common = rng.normal(0.0005, 0.010, len(dates))
+    rows = []
+    for i in range(5):  # correlated cluster
+        px = 100 * np.cumprod(1 + common + rng.normal(0, 0.002, len(dates)))
+        for d, p in zip(dates, px):
+            rows.append({"Date": d, "Symbol": f"IT{i}", "Close": p, "Volume": 1000})
+    for i in range(5):  # independent
+        px = 100 * np.cumprod(1 + rng.normal(0.0004, 0.012, len(dates)))
+        for d, p in zip(dates, px):
+            rows.append({"Date": d, "Symbol": f"IND{i}", "Close": p, "Volume": 1000})
+    bench = 100 * np.cumprod(1 + rng.normal(0.0003, 0.009, len(dates)))
+    for d, p in zip(dates, bench):
+        rows.append({"Date": d, "Symbol": "^NSEI", "Close": p, "Volume": 0})
+    return pd.DataFrame(rows)
+
+
+def test_portfolio_diversification_picks_uncorrelated():
+    prices = _synthetic_prices()
+    syms = [f"IT{i}" for i in range(5)] + [f"IND{i}" for i in range(5)]
+    cand = pd.DataFrame({"Symbol": syms,
+                         "Final_Score": [95,94,93,92,91,88,86,84,82,80]})
+    corr = psel.pairwise_corr(prices, syms, window=60)
+    assert not corr.empty and corr.shape == (10, 10)
+    # correlated cluster must have avg |corr| >> independent
+    it_syms = [s for s in corr.index if s.startswith("IT")]
+    ind_syms = [s for s in corr.index if s.startswith("IND")]
+    it_avg = corr.loc[it_syms, it_syms].abs().values.mean()
+    ind_pair = corr.loc[ind_syms, ind_syms].abs()
+    import numpy as _np
+    a = ind_pair.values.copy(); _np.fill_diagonal(a, _np.nan)
+    ind_avg = _np.nanmean(a)
+    assert it_avg > ind_avg, (it_avg, ind_avg)
+
+    picked = psel.diversified_top_n(cand, corr, n=5, alpha=0.55)
+    assert len(picked) == 5
+    n_ind = sum(1 for s in picked if s.startswith("IND"))
+    assert n_ind >= 2, f"diversifier should include >=2 independent names, got {picked}"
+    _ok(f"portfolio diversifier picked {picked} (n_ind={n_ind})")
+
+
+def test_benchmark_stats_math():
+    prices = _synthetic_prices(seed=2)
+    stats = psel.benchmark_stats(prices, ["IT0", "IND0"], benchmark="^NSEI")
+    assert list(stats["Symbol"]) == ["IT0", "IND0"]
+    for col in ["Excess_21D", "InformationRatio_63D", "TrackingError_63D", "BetaVsBenchmark_63D"]:
+        assert col in stats.columns
+        assert stats[col].notna().all(), (col, stats)
+    # TE must be non-negative
+    assert (stats["TrackingError_63D"] >= 0).all()
+    _ok(f"benchmark_stats produced {stats.shape} with all-finite values")
 
 
 if __name__ == "__main__":

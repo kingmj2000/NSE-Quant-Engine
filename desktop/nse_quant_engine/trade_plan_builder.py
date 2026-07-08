@@ -48,6 +48,9 @@ SPREAD_SUMMARY = OUTPUT_DIR / "cross_sectional_spread_summary.csv"
 TRADE_PLAN_CSV = OUTPUT_DIR / "trade_plan_latest.csv"
 TRADE_PLAN_XLSX = OUTPUT_DIR / "trade_plan_latest.xlsx"
 TRADE_PLAN_MD = OUTPUT_DIR / "trade_plan_report.md"
+TOP5_CORR_CSV = OUTPUT_DIR / "top5_corr_matrix.csv"
+TOP5_BENCH_CSV = OUTPUT_DIR / "top5_benchmark_stats.csv"
+RAW_PRICES = BASE_DIR / "data" / "raw_prices_latest.csv"
 
 DEFAULT_RULES = {
     "Round_Trip_Cost": 0.0030,
@@ -594,6 +597,58 @@ def write_outputs(plan: pd.DataFrame, verdict: str, grade: str) -> None:
     TRADE_PLAN_MD.write_text("\n".join(lines), encoding="utf-8")
 
 
+def _emit_corr_and_benchmark(plan: pd.DataFrame) -> None:
+    """Step-2 add-on: reorder top-5 by diversification + emit corr matrix and
+    per-candidate benchmark stats. Guarded — any failure is silent so the
+    core pipeline can't regress on this feature."""
+    try:
+        from core import config as C
+        from core import portfolio_selection as psel
+    except Exception:
+        return
+    if plan is None or plan.empty or not RAW_PRICES.exists():
+        return
+    try:
+        prices = pd.read_csv(RAW_PRICES)
+    except Exception:
+        return
+
+    try:
+        reviewable = plan[
+            ~plan["Trade_Status"].astype(str).str.contains("Avoid", case=False, na=False)
+        ].copy()
+        if reviewable.empty:
+            return
+        sort_cols = [c for c in ["Confidence_Adjusted_Score", "Final_Score"] if c in reviewable.columns]
+        if sort_cols:
+            reviewable = reviewable.sort_values(sort_cols, ascending=False)
+        pool_n = int(getattr(C, "CORR_AWARE_POOL_N", 25))
+        pool = reviewable.head(pool_n)
+        pool_syms = pool["Symbol"].astype(str).tolist()
+
+        corr = psel.pairwise_corr(prices, pool_syms,
+                                  window=int(getattr(C, "CORR_WINDOW_DAYS", 60)))
+        if not corr.empty:
+            if getattr(C, "CORR_AWARE_TOP5", True):
+                top5 = psel.diversified_top_n(
+                    pool, corr, n=5,
+                    alpha=float(getattr(C, "CORR_AWARE_ALPHA", 0.65)),
+                    score_col="Final_Score" if "Final_Score" in pool.columns else "Confidence_Adjusted_Score",
+                )
+            else:
+                top5 = pool_syms[:5]
+            top5 = [s for s in top5 if s in corr.index][:5]
+            sub_corr = corr.loc[top5, top5] if top5 else corr
+            sub_corr.to_csv(TOP5_CORR_CSV, index=True)
+
+            bench = psel.benchmark_stats(prices, top5)
+            bench.to_csv(TOP5_BENCH_CSV, index=False)
+            print(f"Saved: {TOP5_CORR_CSV.name} (avg|corr|={psel.avg_abs_offdiag(sub_corr):.2f})")
+            print(f"Saved: {TOP5_BENCH_CSV.name}")
+    except Exception as e:
+        print(f"[step2] corr/benchmark stage skipped: {e}")
+
+
 def main() -> None:
     print("Trade Plan Builder - Stage 3.4.1 Validation Sync Patch")
     print("======================================================")
@@ -607,6 +662,7 @@ def main() -> None:
     latest = pd.read_csv(LATEST_SCORES)
     plan = make_trade_plan(latest, rules, verdict, grade, source)
     write_outputs(plan, verdict, grade)
+    _emit_corr_and_benchmark(plan)
 
     print(f"Saved: {TRADE_PLAN_CSV}")
     print(f"Saved: {TRADE_PLAN_XLSX}")

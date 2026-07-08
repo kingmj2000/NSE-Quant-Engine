@@ -99,6 +99,8 @@ def _payload() -> dict:
     etfq = _safe_read_csv(OUT / "etf_quality_latest.csv")
     if etfq.empty:
         etfq = _safe_read_csv(DATA / "etf_quality_latest.csv")
+    top5_bench_df = _safe_read_csv(OUT / "top5_benchmark_stats.csv")
+    top5_corr_df = _safe_read_csv(OUT / "top5_corr_matrix.csv")
 
     # --- verdict / banner ---
     verdict = (val.get("verdict") or "Insufficient History")
@@ -285,8 +287,44 @@ def _payload() -> dict:
                 "label": "Watch only" if decision_use == "WATCHLIST ONLY" else "Live candidate",
                 "clean": (rsi is not None and rsi < 70 and (vol or 0) < 30),
                 "in_shadow_top5": _norm_sym(r.get("Symbol")) in shadow_top5_symbols,
+                "bench": None,
                 "flags": flags,
             })
+
+    # attach benchmark stats to each card by symbol
+    if not top5_bench_df.empty and "Symbol" in top5_bench_df.columns:
+        bmap = {str(row["Symbol"]): row for _, row in top5_bench_df.iterrows()}
+        for c in cards:
+            row = bmap.get(str(c["sym"]))
+            if row is not None:
+                c["bench"] = {
+                    "ex21": _num(row.get("Excess_21D"), 4),
+                    "ir63": _num(row.get("InformationRatio_63D"), 2),
+                    "te63": _num(row.get("TrackingError_63D"), 3),
+                    "beta": _num(row.get("BetaVsBenchmark_63D"), 2),
+                }
+
+    # correlation matrix payload for the top-5 (or fewer)
+    corr_payload = None
+    if not top5_corr_df.empty:
+        try:
+            first_col = top5_corr_df.columns[0]
+            cdf = top5_corr_df.set_index(first_col)
+            cdf.index = cdf.index.astype(str)
+            cdf.columns = cdf.columns.astype(str)
+            common = [s for s in cdf.index if s in cdf.columns]
+            if len(common) >= 2:
+                cdf = cdf.loc[common, common]
+                vals = cdf.round(2).values.tolist()
+                labels = [s.replace(".NS", "") for s in common]
+                # avg |off-diagonal|
+                import numpy as _np
+                arr = cdf.abs().values.astype(float).copy()
+                _np.fill_diagonal(arr, _np.nan)
+                avg_abs = float(_np.nanmean(arr)) if arr.size else None
+                corr_payload = {"labels": labels, "values": vals, "avg_abs": avg_abs}
+        except Exception:
+            corr_payload = None
 
     official_top5_symbols = {_norm_sym(c.get("sym")) for c in cards}
     if not shadow_scores.empty and "Symbol" in shadow_scores.columns:
@@ -405,6 +443,7 @@ def _payload() -> dict:
         "shadow_only": shadow_only,
         "dq": dq_notes,
         "excel": excel,
+        "corr_matrix": corr_payload,
     }
 
 
@@ -618,6 +657,16 @@ canvas{margin-top:4px}
 
 <h2>Top 5 watchlist candidates &mdash; post-governance veto</h2>
 <div class="cards" id="cards"></div>
+
+<h2 id="corrTitle">Top-5 correlation &mdash; diversification check</h2>
+<div class="glass panel" id="corrPanel" style="display:none">
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
+    <div class="sub">60-session daily-return correlation across the picked top-5. Lower off-diagonal magnitude = more diversified basket.</div>
+    <div id="corrAvg" class="lblchip"></div>
+  </div>
+  <div id="corrTable"></div>
+</div>
+
 <h2 id="shadowUniqueTitle">Shadow Top 5 unique candidates</h2>
 <div class="cards" id="shadowUniqueCards"></div>
 <div class="caption">
@@ -855,8 +904,53 @@ document.getElementById("cards").innerHTML = (DATA.cards||[]).map(c=>`
      <div class="pd"><div class="l">T2 %/day</div><div class="n">${fmt(c.pd2,'',3)}</div></div>
      <div class="pd edge"><div class="l">Model edge/day</div><div class="n">${c.edge==null?'&mdash;':fmt(c.edge,'',3)}</div></div>
    </div>
-   <div class="flags">${(c.flags||[]).map(f=>`<div class="flag"><span class="fdot ${dotc[f[0]]||'d-dim'}"></span><b>${f[1]}:</b> ${f[2]}</div>`).join('')}</div>
+    ${c.bench ? `<div class="perday" style="margin-top:6px;border-top:1px dashed var(--line);padding-top:8px">
+      <div class="pd"><div class="l">Excess 21D</div><div class="n">${c.bench.ex21==null?'&mdash;':fmt(c.bench.ex21*100,'%',2)}</div></div>
+      <div class="pd"><div class="l">IR 63D</div><div class="n">${fmt(c.bench.ir63,'',2)}</div></div>
+      <div class="pd"><div class="l">TE 63D</div><div class="n">${c.bench.te63==null?'&mdash;':fmt(c.bench.te63*100,'%',2)}</div></div>
+      <div class="pd"><div class="l">β vs Nifty</div><div class="n">${fmt(c.bench.beta,'',2)}</div></div>
+    </div>` : ''}
+    <div class="flags">${(c.flags||[]).map(f=>`<div class="flag"><span class="fdot ${dotc[f[0]]||'d-dim'}"></span><b>${f[1]}:</b> ${f[2]}</div>`).join('')}</div>
  </div>`).join("") || `<div class="glass panel"><div class="sub">No trade-plan output yet — run the pipeline.</div></div>`;
+
+// Correlation matrix tile
+(function renderCorr(){
+  const cm = DATA.corr_matrix;
+  const panel = document.getElementById("corrPanel");
+  const title = document.getElementById("corrTitle");
+  if(!cm || !cm.labels || cm.labels.length<2){
+    if(title) title.style.display="none";
+    return;
+  }
+  panel.style.display="block";
+  const badge = document.getElementById("corrAvg");
+  if(badge && cm.avg_abs!=null){
+    const v = cm.avg_abs;
+    const cls = v<0.35 ? "review" : (v<0.6 ? "" : "shadow");
+    badge.className = "lblchip " + cls;
+    badge.textContent = "avg |corr| = " + v.toFixed(2);
+  }
+  const cellBg = v => {
+    const a = Math.min(Math.abs(v), 1);
+    // green (low) → amber → red (high)
+    const hue = 130 - a*130; // 130=green, 0=red
+    return `hsla(${hue.toFixed(0)},70%,45%,${(0.15+a*0.55).toFixed(2)})`;
+  };
+  let html = '<table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead><tr><th></th>';
+  cm.labels.forEach(l => { html += `<th style="padding:4px 6px;color:var(--muted);font-weight:500">${l}</th>`; });
+  html += '</tr></thead><tbody>';
+  cm.values.forEach((row,i) => {
+    html += `<tr><th style="padding:4px 6px;color:var(--muted);text-align:right;font-weight:500">${cm.labels[i]}</th>`;
+    row.forEach((v,j) => {
+      const bg = i===j ? "transparent" : cellBg(v);
+      const txt = i===j ? "&mdash;" : Number(v).toFixed(2);
+      html += `<td style="padding:6px 8px;text-align:center;background:${bg};border:1px solid var(--line)">${txt}</td>`;
+    });
+    html += '</tr>';
+  });
+  html += '</tbody></table>';
+  document.getElementById("corrTable").innerHTML = html;
+})();
 
 const shadowUnique = DATA.shadow_unique_top5 || [];
 document.getElementById("shadowUniqueTitle").style.display = shadowUnique.length ? "block" : "none";
