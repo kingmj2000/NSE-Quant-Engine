@@ -29,6 +29,9 @@ _CANDIDATE_FILES = [
     "top5_events.csv",
     "top5_expected_value.csv",
     "portfolio_validation.json",
+    "top5_institutional_flow.csv",
+    "regime_tilt_report.json",
+    "rebalance_diff.json",
     "alpha_zoo_ic_report.csv",
     "alpha_zoo_survivors.json",
     "macro_context.json",
@@ -89,6 +92,7 @@ def build_evidence_json(output_dir: Path, top5: pd.DataFrame) -> dict:
     sector = _read("top5_sector_context.csv")
     events = _read("top5_events.csv")
     ev_report = _read("top5_expected_value.csv")
+    instflow = _read("top5_institutional_flow.csv")
 
     macro = {}
     mp = output_dir / "macro_context.json"
@@ -113,6 +117,22 @@ def build_evidence_json(output_dir: Path, top5: pd.DataFrame) -> dict:
             portfolio_val = json.loads(pv.read_text(encoding="utf-8"))
         except Exception:
             portfolio_val = {}
+
+    regime_tilt = {}
+    rt = output_dir / "regime_tilt_report.json"
+    if rt.exists():
+        try:
+            regime_tilt = json.loads(rt.read_text(encoding="utf-8"))
+        except Exception:
+            regime_tilt = {}
+
+    rebalance = {}
+    rb = output_dir / "rebalance_diff.json"
+    if rb.exists():
+        try:
+            rebalance = json.loads(rb.read_text(encoding="utf-8"))
+        except Exception:
+            rebalance = {}
 
     picks = []
     for _, r in top5.iterrows():
@@ -139,6 +159,7 @@ def build_evidence_json(output_dir: Path, top5: pd.DataFrame) -> dict:
             "sector_context": _row_lookup(sector, sym),
             "event_calendar": _row_lookup(events, sym),
             "expected_value": _row_lookup(ev_report, sym),
+            "institutional_flow": _row_lookup(instflow, sym),
             "key_risk": r.get("Key_Risk"),
         })
 
@@ -147,6 +168,8 @@ def build_evidence_json(output_dir: Path, top5: pd.DataFrame) -> dict:
         "macro_context": macro,
         "alpha_zoo_survivors": survivors,
         "portfolio_validation": portfolio_val,
+        "regime_tilt": regime_tilt,
+        "rebalance_diff": rebalance,
         "picks": picks,
     }
 
@@ -155,7 +178,7 @@ def build_manifest(output_dir: Path, included: list[str],
                    config_snapshot: Optional[dict]) -> dict:
     return {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
-        "engine_version": "insight-engine v4 + steps 1-13",
+        "engine_version": "insight-engine v4 + steps 1-16",
         "included_files": included,
         "missing_files": [f for f in _CANDIDATE_FILES if f not in included],
         "config_snapshot": config_snapshot or {},

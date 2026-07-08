@@ -1,135 +1,79 @@
-# NSE Quant Engine Stage 3.3 Final Evidence Pack - Workflow
+# NSE Insight Engine — Workflow (Steps 1–16)
 
-## Purpose
+End-to-end pipeline for identifying top short-hold investment opportunities from
+the NSE Stock & ETF universe, with a portable evidence pack for an external
+AI analyst (Claude / any LLM) — no runtime AI, no cloud, no API keys.
 
-This is a personal screening and validation system for:
+## Run
 
-- Nifty 50
-- Nifty Next 50
-- NSE-listed ETFs
+- **Windows:** `run_app.bat` (interactive menu) or `run_full_workflow.bat`
+- **Mac/Linux:** `./run_app.command`
+- **Manual:** `python run_app.py`
 
-It is designed to narrow the universe into review candidates and then test whether the scoring method has actually shown evidence of working after costs. It does not guarantee low-risk high-return trades, because that is not how markets work, despite humanity's ongoing attempts to negotiate with probability.
+Everything below runs in one pass. Kill-switch: `INSIGHT_SAFE_MODE=1` disables
+Steps 3–16 in one shot; Steps 1–2 always run.
 
-## Full weekly workflow
+## Pipeline
 
-```bat
-python universe_builder.py
-python etf_quality_builder.py
-python nse_quant_engine.py
-python validation_builder.py
-python cross_sectional_validation.py
-python news_market_builder.py
+| # | Step | Module | Output |
+|---|---|---|---|
+| 1 | Universe & prices | `universe_builder.py`, `core/price_cache.py` | `config.csv`, `data/raw_prices_latest.csv` |
+| 2 | Scoring + correlation-aware top-5 | `nse_quant_engine.py`, `core/portfolio_selection.py` | `latest_scores.csv`, `top5_corr_matrix.csv`, `top5_benchmark_stats.csv` |
+| 3 | Hold-horizon optimizer | `core/horizon_optimizer.py` | `top5_horizon.csv` |
+| 4 | Sentiment + macro regime | `core/sentiment_overlay.py`, `core/regime.py` | `top5_sentiment.csv`, `macro_context.json` |
+| 5 | Alpha zoo IC evaluation | `core/alpha_evaluator.py` | `alpha_zoo_ic_report.csv`, `alpha_zoo_survivors.json` |
+| 6 | Fundamentals & quality overlay | `core/fundamentals_overlay.py` | `top5_fundamentals.csv` |
+| 7 | Evidence bundle (AI handoff) | `core/evidence_bundle.py` | `insight_bundle_<ts>.zip` |
+| 8 | Risk-parity position sizing | `core/position_sizer.py` | `top5_position_sizing.csv` |
+| 9 | Walk-forward backtest | `core/backtest_engine.py` | `backtest_scorecard.csv`, `backtest_equity_curve.csv` |
+| 10 | Sector & peer context | `core/sector_context.py` | `top5_sector_context.csv` |
+| 11 | Event & catalyst calendar | `core/event_calendar.py` | `top5_events.csv` |
+| 12 | Expected value / Kelly cross-check | `core/expected_value.py` | `top5_expected_value.csv` |
+| 13 | Portfolio-level validation gate | `core/portfolio_validation.py` | `portfolio_validation.json` |
+| 14 | Institutional flow overlay | `core/institutional_flow.py` | `top5_institutional_flow.csv` |
+| 15 | Regime-conditional alpha tilt | `core/regime_tilt.py` | `regime_tilt_report.json` |
+| 16 | Rebalance / turnover diff | `core/rebalance_diff.py` | `rebalance_diff.json` |
+
+All outputs land in `output/`. Steps 7–16 are automatically packaged into the
+zip bundle for the LLM handoff.
+
+## AI handoff (offline)
+
+The script never calls an LLM. Instead, at the end of every run it produces:
+
+```
+output/insight_bundle_<YYYYMMDD_HHMM>.zip
+  ├── top5.csv, top5_*.csv           (all per-pick evidence)
+  ├── evidence.json                  (aggregated, LLM-friendly)
+  ├── portfolio_validation.json
+  ├── regime_tilt_report.json
+  ├── rebalance_diff.json
+  ├── run_manifest.json              (timestamp, config, engine version)
+  └── README_for_AI.md               (system prompt — see prompts/rationale_prompt.md)
 ```
 
-Or run:
+Upload the zip to Claude (or any LLM) and use `README_for_AI.md` as the system
+prompt. The model returns strict JSON with per-pick thesis, risks, event risk,
+institutional-flow confirmation, EV sanity check, batch verdict, and a
+rotate-vs-hold recommendation. No dependency on any hosted AI at runtime.
 
-```bat
-run_full_workflow.bat
-```
+## Optional local data files
 
-## Daily workflow
+Drop these into `data/` to activate Step 14 (institutional flow):
+- `fii_dii_daily.csv` — columns: `Date, FII_Net_INR_Cr, DII_Net_INR_Cr`
+- `bulk_deals.csv`   — columns: `Date, Symbol, Client, Buy_Sell, Qty, Price`
 
-Once `config.csv` and ETF quality files already exist:
+Both are optional; missing files → `Institutional_Confirmation=Unknown`, pipeline
+unchanged.
 
-```bat
-python nse_quant_engine.py
-python validation_builder.py
-python cross_sectional_validation.py
-python news_market_builder.py
-```
+## Kill switches (env vars)
 
-## Main outputs
+| Env var | Default | Effect |
+|---|---|---|
+| `INSIGHT_SAFE_MODE` | 0 | 1 disables Steps 3–16 |
+| `QUALITY_WEIGHT` | 0.0 | Fundamentals report-only unless raised |
+| `REGIME_TILT_APPLY` | 0 | 1 applies regime tilt to scoring (default report-only) |
+| `KELLY_OVERRIDE` | 0 | 1 uses Kelly cap over risk-parity weights |
+| `BACKTEST_STALE_DAYS` | 7 | Skips backtest if last one is younger |
 
-```text
-output/latest_scores.xlsx
-output/latest_scores_validated.xlsx
-output/weekly_report.md
-output/cross_sectional_validation_report.md
-output/news_market_context.md
-output/score_history.csv
-output/signal_history.csv
-output/forward_return_history.csv
-output/forward_return_missing_signals.csv
-output/score_bucket_performance.csv
-output/cross_sectional_spread_by_date.csv
-output/cross_sectional_spread_summary.csv
-```
-
-## Review order
-
-1. `output/cross_sectional_validation_report.md`
-2. `output/latest_scores_validated.xlsx`
-3. `output/news_market_context.md`
-4. `output/forward_return_missing_signals.csv`
-5. `output/score_bucket_performance.csv`
-
-## Validation verdict logic
-
-For `Validation Positive`, the selected horizon must pass:
-
-```text
-Validation_Dates >= CrossVal_Min_Dates
-Effective_Validation_Dates >= CrossVal_Min_Effective_Dates
-Avg_Obs_All >= CrossVal_Min_Obs
-Avg_TopMinusBottom_Quintile >= CrossVal_Min_Spread
-Hit_Rate_TopBeatsBottom >= CrossVal_Min_HitRate
-Adjusted_TStat_TopMinusBottom >= CrossVal_Min_TStat
-Bootstrap_Prob_Positive >= CrossVal_Min_Bootstrap_Prob
-```
-
-Defaults are stored in `scoring_rules.csv`.
-
-## Early-run behavior
-
-At first, expect:
-
-```text
-Insufficient History
-```
-
-That is correct. The system needs enough completed 5D/10D/21D forward windows before the validation can mean anything.
-
-## AI review workflow
-
-Upload these to Claude Project or ChatGPT:
-
-```text
-output/latest_scores_validated.xlsx
-output/cross_sectional_validation_report.md
-output/news_market_context.md
-output/weekly_report.md
-output/score_history.csv
-output/signal_history.csv
-output/forward_return_history.csv
-output/forward_return_missing_signals.csv
-```
-
-Use `report_agent_prompt.md`.
-
-The AI should not compute new scores. It should:
-
-- Check validation verdict first
-- Review top candidates
-- Check whether news contradicts the quant result
-- Downgrade candidates with weak validation, weak ETF quality, liquidity risks, or negative news
-- Produce a final personal review shortlist
-
-## Practical rule
-
-If validation says:
-
-```text
-Insufficient History
-No Proven Edge Yet
-Validation Negative
-```
-
-then treat the output as a watchlist only.
-
-If validation says:
-
-```text
-Validation Positive
-```
-
-then still review candidate-level risk, news, liquidity, and ETF quality before doing anything with real money.
+See `core/config.py` for the full list.

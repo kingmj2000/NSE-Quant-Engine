@@ -41,6 +41,9 @@ engine already did that; you are being asked to *pressure-test and explain*.
 | `top5_events.csv` | Earnings / ex-div dates + Event_Risk_Flag vs hold horizon (Step 11). |
 | `top5_expected_value.csv` | Per-pick EV_% + Kelly-lite sanity check vs sizing (Step 12). |
 | `portfolio_validation.json` | Batch_Verdict (Ship / Ship_With_Caveats / Downgrade_To_Watch) + reasons (Step 13). |
+| `top5_institutional_flow.csv` | Bulk-deal flag + FII regime + Institutional_Confirmation per pick (Step 14). |
+| `regime_tilt_report.json` | Regime-conditional alpha multipliers (Step 15, report-only unless mode=APPLIED). |
+| `rebalance_diff.json` | Holds / exits / entries vs prior top-5 + turnover + net_edge_after_cost (Step 16). |
 | `alpha_zoo_ic_report.csv` | Walk-forward IC per (alpha, horizon) — Step 5. |
 | `alpha_zoo_survivors.json` | Which independent alphas cleared IC + t-stat. |
 | `macro_context.json` | Regime + India VIX + Nifty vs 50-DMA (Step 4). |
@@ -67,6 +70,7 @@ symbol, in the same order as `evidence.json`). No prose outside the JSON.
       "sector_context": "<= 1 sentence citing Sector_RS_63D_% + Peer_Median_3M_Return_% from top5_sector_context.csv>",
       "event_risk": "<= 1 sentence citing Event_Risk_Flag + Days_To_Earnings from top5_events.csv>",
       "ev_sanity_check": "<= 1 sentence citing EV_% and EV_Sizing_Agree from top5_expected_value.csv>",
+      "institutional_flow": "<= 1 sentence citing Institutional_Confirmation + Bulk_Deal_Flag + FII_Regime from top5_institutional_flow.csv>",
       "risks": ["risk 1 with the field it comes from", "risk 2"],
       "invalidation": "<= 1 sentence: what would falsify the thesis, tied to Stop_Loss / sentiment veto / regime flip>",
       "contradictions": ["signal-A says X but signal-B says Y", "..."],
@@ -78,7 +82,9 @@ symbol, in the same order as `evidence.json`). No prose outside the JSON.
     "batch_verdict": "<copy portfolio_validation.verdict verbatim, add <= 1 sentence citing top reasons/caveats>",
     "concentration_check": "<= 1 sentence citing avg |corr| from top5_corr_matrix and top_sector_weight_% from portfolio_validation>",
     "aggregate_risk_check": "<= 1 sentence citing sum of Max_Loss_%_of_NAV from top5_position_sizing>",
-    "backtest_context": "<= 1 sentence citing hit rate / Sharpe from backtest_scorecard>"
+    "backtest_context": "<= 1 sentence citing hit rate / Sharpe from backtest_scorecard>",
+    "regime_tilt_agreement": "<= 1 sentence citing regime_tilt_report.regime and whether picks align with the family multipliers>",
+    "rotate_vs_hold": "<= 1 sentence citing rebalance_diff.recommendation, estimated_turnover_% and net_edge_after_cost_%>"
   },
   "flags_for_human_review": ["symbol: reason", "..."]
 }
