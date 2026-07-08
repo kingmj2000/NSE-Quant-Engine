@@ -99,3 +99,11 @@ EV_MIN_OBS = _i("EV_MIN_OBS", 50)
 
 # ── Forward-return horizons ─────────────────────────────────────────────────
 HORIZONS = (5, 10, 21)
+
+# ── Correlation-aware top-5 (step 2) ────────────────────────────────────────
+# Feature-flagged: any exception during selection silently falls back to
+# score-only ranking so the pipeline can never regress on this change.
+CORR_AWARE_TOP5    = os.environ.get("CORR_AWARE_TOP5", "1") not in ("0", "false", "False")
+CORR_AWARE_POOL_N  = _i("CORR_AWARE_POOL_N", 25)
+CORR_AWARE_ALPHA   = _f("CORR_AWARE_ALPHA", 0.65)   # score vs diversification tradeoff
+CORR_WINDOW_DAYS   = _i("CORR_WINDOW_DAYS", 60)
