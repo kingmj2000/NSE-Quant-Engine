@@ -42,21 +42,23 @@ def map_symbol_to_sector_index(sector: str | None, override_map: dict | None = N
 
 
 def sector_rs_multiplier(sec_ret: float, mkt_ret: float,
-                         boost: float = 1.05, hair: float = 0.95) -> float:
-    """1.05 if sector beats market by ≥3pp, 0.95 if it lags by ≥3pp, else 1.0."""
+                         boost: float = 1.05, hair: float = 0.95,
+                         boost_thresh: float = 0.10,
+                         hair_thresh: float = -0.03) -> float:
+    """boost if sector beats market by ≥10pp, hair if it lags by ≥3pp."""
     try:
         d = float(sec_ret) - float(mkt_ret)
     except Exception:
         return 1.0
-    if d >= 0.03:
+    if d >= boost_thresh:
         return boost
-    if d <= -0.03:
+    if d <= hair_thresh:
         return hair
     return 1.0
 
 
 def combined_rs(stock_mult: float, sector_mult: float,
-                w_stock: float = 0.7, w_sector: float = 0.3) -> float:
+                w_stock: float = 0.5, w_sector: float = 0.5) -> float:
     try:
         return round(w_stock * float(stock_mult) + w_sector * float(sector_mult), 4)
     except Exception:
