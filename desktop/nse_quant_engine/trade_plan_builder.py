@@ -57,6 +57,12 @@ ALPHA_IC_CSV = OUTPUT_DIR / "alpha_zoo_ic_report.csv"
 ALPHA_SURVIVORS_JSON = OUTPUT_DIR / "alpha_zoo_survivors.json"
 NEWS_LATEST_CSV = OUTPUT_DIR / "news_market_latest.csv"
 RAW_PRICES = BASE_DIR / "data" / "raw_prices_latest.csv"
+TOP5_FUND_CSV = OUTPUT_DIR / "top5_fundamentals.csv"
+TOP5_SIZING_CSV = OUTPUT_DIR / "top5_position_sizing.csv"
+BACKTEST_CSV = OUTPUT_DIR / "backtest_scorecard.csv"
+BACKTEST_CURVE_CSV = OUTPUT_DIR / "backtest_equity_curve.csv"
+FUND_CACHE_CSV = OUTPUT_DIR / "fundamentals_cache.csv"
+PROMPTS_DIR = BASE_DIR / "prompts"
 
 DEFAULT_RULES = {
     "Round_Trip_Cost": 0.0030,
