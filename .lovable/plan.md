@@ -1,58 +1,49 @@
-# Final Roadmap — Steps 14–16 + docs refresh
+## Goal
+Surface the Step 8 + 10–16 artifacts in the desktop UI so the "Run" button visibly reflects the new pipeline, without changing any analytics logic.
 
-Steps 1–13 are shipped. Comparing the current engine against the two reference repos one more time, three genuinely PM-relevant gaps remain — all local, all offline, no new pip deps, no runtime AI. Everything else in Fincept / Vibe Trading is either a terminal-UI feature, a duplicate of what we already have, or an LLM/agent behaviour the external Claude handoff already covers.
+## What already works (no change needed)
+`run_app.py → orchestrator.py → trade_plan_builder.py` already calls every new module. Verified references in `trade_plan_builder.py`:
+- Step 8 `position_sizer`, Step 10 `backtest_engine`, `fundamentals_overlay`
+- Step 12–13 `sector_context`, `event_calendar`, `expected_value`, `portfolio_validation`
+- Step 14–16 `institutional_flow`, `regime_tilt`, `rebalance_diff`
+- `evidence_bundle` (packs everything + prompt into the zip)
 
-## Step 14 — Institutional-Flow Overlay (Fincept-inspired)
-**New:** `core/institutional_flow.py`
-- Ingests two optional local CSVs the user can drop into `data/`:
-  - `fii_dii_daily.csv` (Date, FII_Net_INR_Cr, DII_Net_INR_Cr) — from NSE/BSE daily bhav report
-  - `bulk_deals.csv` (Date, Symbol, Client, Buy_Sell, Qty, Price) — NSE bulk/block deals CSV
-- Derives per-pick and per-batch flags:
-  - `FII_Regime` (net-buying / net-selling / mixed, 5-day rolling)
-  - `Bulk_Deal_Flag` (Buy / Sell / None, last 30 days, aggregated by direction)
-  - `Institutional_Confirmation` (Yes / No / Unknown) — feeds the confidence label
-- Output: `output/top5_institutional_flow.csv` + `macro_context.json` gets `fii_regime`.
-- Files are optional: absent → columns are `Unknown`, no failure. Every module gracefully degrades if the user never downloads the CSVs.
+Artifacts land in `output/` and in the zip. The run button is not broken.
 
-## Step 15 — Regime-Conditional Scoring Tilt (Vibe-Trading-inspired)
-**New:** `core/regime_tilt.py`
-- Reads the existing `macro_context.json` (regime + India VIX) and reweights the alpha-zoo tilt (Step 5) at runtime:
-  - `RISK_OFF` → double-weight the low-vol / mean-reversion survivors, halve the momentum survivors
-  - `RISK_ON` → double-weight momentum / breakout survivors
-  - `NEUTRAL` → equal weight (current behaviour)
-- **Report-only by default** (`REGIME_TILT_APPLY=0`) so ranking is unchanged; the recommended tilt is written to `output/regime_tilt_report.json` for the LLM handoff and for a human to promote later once it's been eyeballed for a few weeks.
-- New alpha families are NOT introduced — this only re-weights the survivors we already trust.
+## What is missing — UI only
+Existing tabs: Dashboard, Scores, Shadow, Compare, DQ Report, Validation, Trade Plan. New artifacts only appear inside `trade_plan_report.md` / the zip; there is no dedicated panel.
 
-## Step 16 — Turnover / Rebalance Report vs Previous Top-5
-**New:** `core/rebalance_diff.py`
-- On every run, compares today's top-5 to the last run's `trade_plan_latest.csv` snapshot (kept as `output/history/top5_prev.csv`).
-- Emits `output/rebalance_diff.json`:
-  - `holds` (still in top-5), `exits` (dropped out — with reason: score decay / sentiment veto / horizon breach / event risk), `entries` (newly promoted)
-  - `estimated_turnover_%` (share of NAV that would rotate) + `estimated_round_trip_cost_%`
-  - `net_edge_after_cost_%` = expected excess return of the new basket − estimated round-trip cost
-- Prevents the classic "engine churns every week and gives up its edge to friction" failure mode Fincept flags in its terminal.
-- Small file, folded into the evidence bundle so the LLM can explicitly recommend "hold" vs "rotate".
+## Proposed changes (UI only, `run_app.py`)
 
-## Cross-cutting
-- All 3 modules guarded by `try/except` + a `_SAFE_MODE` env flag; new config knobs in `core/config.py`.
-- Extend `evidence_bundle.py` to include the 3 new artifacts; extend `prompts/rationale_prompt.md` so the LLM output must comment on institutional flow, regime tilt agreement, and rotate-vs-hold.
-- Add ~4 unit tests.
-- **Docs refresh:** update `WORKFLOW.md`, `README.md`, `INTEGRATION_GUIDE.md`, `CHANGES_v4_2.md` to cover Steps 6–16 in one pass (currently they stop at older versions).
+### 1. New "Portfolio" tab
+Single scrollable page with 4 cards driven by existing CSV/JSON outputs:
+- **Sizing** — table from `top5_sizing.csv` (Weight%, Capital, Stop, Max Loss, Risk Contribution).
+- **Sector & Peers** — table from `top5_sector_context.csv`.
+- **Events & EV** — merged table of `top5_event_calendar.csv` + `top5_expected_value.csv` with an amber pill when `Event_Risk_Flag = In_Window`.
+- **Portfolio Validation** — verdict pill (green/amber/red) + reasons list from `portfolio_validation.json`.
 
-## Explicitly out of scope — will not build
-Called out to close the loop on what's *not* worth porting from the two repos:
+### 2. New "Macro & Rotation" tab
+Three cards:
+- **Institutional Flow** — FII regime pill + `top5_institutional_flow.csv` table.
+- **Regime Tilt** — regime pill + family-multiplier chips from `regime_tilt_report.json` (report-only badge when `applied_to_scoring=false`).
+- **Rebalance Diff** — Holds / Exits / Entries chips, turnover %, net-edge-after-cost, recommendation pill from `rebalance_diff.json`. First run shows "First run — establishing positions".
 
-- Options overlay / derivatives greeks (Fincept) — F&O is a different risk product; the user's brief is cash-market NSE stocks + ETFs.
-- Live paper-trading loop (both) — the engine is a research pipeline, not a broker adapter.
-- Multi-agent LLM debate / self-critique (Vibe) — the external Claude handoff already gives the user one strong analyst voice; adding a second agent locally would re-introduce runtime AI, which the user explicitly excluded.
-- Terminal UI (Fincept) — outside project scope (this project already ships an HTML dashboard).
-- Alt-data (satellite, credit card) — none of it is freely available for NSE.
+### 3. Dashboard KPI strip additions
+Append three tiles reading the same JSONs already produced:
+- Batch Verdict (from `portfolio_validation.json`)
+- Turnover % (from `rebalance_diff.json`)
+- FII Regime (from `macro_context.json`, already exists on disk)
 
-## Running the workflow
-No change. Still `run_app.bat` / `run_app.command` / `python run_app.py`. Steps 14–16 will slot into the same guarded post-processing block as 10–13, and their outputs will land in `output/` and inside `insight_bundle_<ts>.zip` automatically.
+### 4. Evidence-bundle button
+Add a Ghost button next to the run controls: "Open Evidence Zip" — opens the newest `output/evidence_bundle_*.zip` in the OS file browser. This is the artifact the user hands to Claude.
 
-If FII/DII and bulk-deal CSVs are not dropped into `data/`, Step 14 quietly emits `Unknown` and the pipeline is otherwise unchanged — you can adopt it incrementally.
+## Out of scope
+- No changes to analytics, module logic, or orchestrator.
+- No new Python dependencies. All new panels reuse the existing `_df_to_model`, `Card`, and pill styles.
+- No changes to `run_app.bat` — same one-button launch.
 
----
+## Files to touch
+- `desktop/nse_quant_engine/run_app.py` — add `PortfolioView`, `MacroRotationView`, extend Dashboard KPI strip, add "Open Evidence Zip" button, register two new tabs.
 
-Approve this and I'll implement in order **14 → 16 → 15 → docs**, then this integration track is done.
+## How to run after this change
+Unchanged — double-click `run_app.bat` (Windows) or `run_app.command` (macOS), click the run button. The two new tabs populate as soon as the pipeline finishes.
