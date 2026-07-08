@@ -66,6 +66,11 @@ TOP5_SECTOR_CSV = OUTPUT_DIR / "top5_sector_context.csv"
 TOP5_EVENTS_CSV = OUTPUT_DIR / "top5_events.csv"
 TOP5_EV_CSV = OUTPUT_DIR / "top5_expected_value.csv"
 PORTFOLIO_VAL_JSON = OUTPUT_DIR / "portfolio_validation.json"
+TOP5_INSTFLOW_CSV = OUTPUT_DIR / "top5_institutional_flow.csv"
+REGIME_TILT_JSON = OUTPUT_DIR / "regime_tilt_report.json"
+REBALANCE_DIFF_JSON = OUTPUT_DIR / "rebalance_diff.json"
+PREV_TOP5_SNAPSHOT = OUTPUT_DIR / "history" / "top5_prev.csv"
+DATA_DIR = BASE_DIR / "data"
 PROMPTS_DIR = BASE_DIR / "prompts"
 
 DEFAULT_RULES = {
