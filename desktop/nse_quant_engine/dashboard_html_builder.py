@@ -1008,6 +1008,13 @@ document.getElementById("cards").innerHTML = (DATA.cards||[]).map(c=>`
       <div class="pd"><div class="l">TE 63D</div><div class="n">${c.bench.te63==null?'&mdash;':fmt(c.bench.te63*100,'%',2)}</div></div>
       <div class="pd"><div class="l">β vs Nifty</div><div class="n">${fmt(c.bench.beta,'',2)}</div></div>
     </div>` : ''}
+    ${c.horizon && c.horizon.rec_days ? `<div class="perday" style="margin-top:6px;border-top:1px dashed var(--line);padding-top:8px">
+      <div class="pd"><div class="l">Rec hold</div><div class="n">≈${c.horizon.rec_days}d</div></div>
+      <div class="pd"><div class="l">Exp return</div><div class="n">${fmt(c.horizon.exp_ret,'%',2)}</div></div>
+      <div class="pd"><div class="l">Downside vol</div><div class="n">${fmt(c.horizon.down_vol,'%',2)}</div></div>
+      <div class="pd"><div class="l">Sharpe-like</div><div class="n">${fmt(c.horizon.sharpe,'',2)}</div></div>
+    </div>${c.horizon.curve ? `<div class="sub" style="margin-top:4px;font-size:11px">Curve %: ${c.horizon.grid.map((h,i)=>`${h}d=${c.horizon.curve[i]==null?'—':c.horizon.curve[i]}`).join(' · ')}</div>` : ''}` : ''}
+    ${c.sent ? `<div class="sub" style="margin-top:6px;font-size:11.5px">📰 ${c.sent.n} headlines · 🟢 ${c.sent.pos}% / 🔴 ${c.sent.neg}% · net=${fmt(c.sent.net,'',2)}</div>` : ''}
     <div class="flags">${(c.flags||[]).map(f=>`<div class="flag"><span class="fdot ${dotc[f[0]]||'d-dim'}"></span><b>${f[1]}:</b> ${f[2]}</div>`).join('')}</div>
  </div>`).join("") || `<div class="glass panel"><div class="sub">No trade-plan output yet — run the pipeline.</div></div>`;
 
