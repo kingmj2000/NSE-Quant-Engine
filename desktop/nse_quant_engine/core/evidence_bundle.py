@@ -86,6 +86,9 @@ def build_evidence_json(output_dir: Path, top5: pd.DataFrame) -> dict:
     bench = _read("top5_benchmark_stats.csv")
     fund = _read("top5_fundamentals.csv")
     sizing = _read("top5_position_sizing.csv")
+    sector = _read("top5_sector_context.csv")
+    events = _read("top5_events.csv")
+    ev_report = _read("top5_expected_value.csv")
 
     macro = {}
     mp = output_dir / "macro_context.json"
@@ -102,6 +105,14 @@ def build_evidence_json(output_dir: Path, top5: pd.DataFrame) -> dict:
             survivors = json.loads(sp.read_text(encoding="utf-8"))
         except Exception:
             survivors = {}
+
+    portfolio_val = {}
+    pv = output_dir / "portfolio_validation.json"
+    if pv.exists():
+        try:
+            portfolio_val = json.loads(pv.read_text(encoding="utf-8"))
+        except Exception:
+            portfolio_val = {}
 
     picks = []
     for _, r in top5.iterrows():
@@ -125,6 +136,9 @@ def build_evidence_json(output_dir: Path, top5: pd.DataFrame) -> dict:
             "benchmark_stats": _row_lookup(bench, sym),
             "fundamentals": _row_lookup(fund, sym),
             "sizing": _row_lookup(sizing, sym),
+            "sector_context": _row_lookup(sector, sym),
+            "event_calendar": _row_lookup(events, sym),
+            "expected_value": _row_lookup(ev_report, sym),
             "key_risk": r.get("Key_Risk"),
         })
 
@@ -132,6 +146,7 @@ def build_evidence_json(output_dir: Path, top5: pd.DataFrame) -> dict:
         "as_of": datetime.now().isoformat(timespec="seconds"),
         "macro_context": macro,
         "alpha_zoo_survivors": survivors,
+        "portfolio_validation": portfolio_val,
         "picks": picks,
     }
 
