@@ -724,7 +724,7 @@ def _emit_horizon_sentiment_alpha(plan: pd.DataFrame) -> None:
             import json as _j
             MACRO_CTX_JSON.write_text(_j.dumps(macro, default=str, indent=2),
                                        encoding="utf-8")
-            print(f"Saved: {MACRO_CTX_JSON.name} (regime={macro.get('regime')})")
+            print(f"[fincept] Saved: {MACRO_CTX_JSON.name} (regime={macro.get('regime')})")
 
             if NEWS_LATEST_CSV.exists() and top5_syms:
                 try:
@@ -775,7 +775,7 @@ def _emit_horizon_sentiment_alpha(plan: pd.DataFrame) -> None:
                               "min_for_tilt": int(getattr(C, "ALPHA_MIN_SURVIVORS_FOR_TILT", 3))},
                              default=str, indent=2),
                     encoding="utf-8")
-                print(f"Saved: {ALPHA_IC_CSV.name} + {ALPHA_SURVIVORS_JSON.name} "
+                print(f"[vibe] Saved: {ALPHA_IC_CSV.name} + {ALPHA_SURVIVORS_JSON.name} "
                       f"({len(survivors)} survivors)")
         except Exception as e:
             print(f"[step5] alpha-zoo evaluator skipped: {e}")
@@ -858,7 +858,7 @@ def _emit_fundamentals_sizing_backtest_bundle(plan: pd.DataFrame) -> None:
             )
             if not sizing.empty:
                 sizing.to_csv(TOP5_SIZING_CSV, index=False)
-                print(f"Saved: {TOP5_SIZING_CSV.name} "
+                print(f"[vibe] Saved: {TOP5_SIZING_CSV.name} "
                       f"(sum weight={sizing['Weight_%'].sum():.1f}%)")
         except Exception as e:
             print(f"[step8] position sizer skipped: {e}")
@@ -885,7 +885,7 @@ def _emit_fundamentals_sizing_backtest_bundle(plan: pd.DataFrame) -> None:
                 cv = res.get("equity_curve")
                 if sc is not None and not sc.empty:
                     sc.to_csv(BACKTEST_CSV, index=False)
-                    print(f"Saved: {BACKTEST_CSV.name}")
+                    print(f"[vibe] Saved: {BACKTEST_CSV.name}")
                 if cv is not None and not cv.empty:
                     cv.to_csv(BACKTEST_CURVE_CSV, index=False)
         except Exception as e:
@@ -904,7 +904,7 @@ def _emit_fundamentals_sizing_backtest_bundle(plan: pd.DataFrame) -> None:
             sec = sc.enrich(top5[["Symbol"]], prices, fund_df_cached)
             if not sec.empty:
                 sec.to_csv(TOP5_SECTOR_CSV, index=False)
-                print(f"Saved: {TOP5_SECTOR_CSV.name}")
+                print(f"[fincept] Saved: {TOP5_SECTOR_CSV.name}")
         except Exception as e:
             print(f"[step10] sector context skipped: {e}")
 
@@ -917,7 +917,7 @@ def _emit_fundamentals_sizing_backtest_bundle(plan: pd.DataFrame) -> None:
             if not ev_df.empty:
                 ev_df.to_csv(TOP5_EVENTS_CSV, index=False)
                 n_in = int((ev_df["Event_Risk_Flag"] == "In_Window").sum())
-                print(f"Saved: {TOP5_EVENTS_CSV.name} ({n_in} in-window)")
+                print(f"[fincept] Saved: {TOP5_EVENTS_CSV.name} ({n_in} in-window)")
         except Exception as e:
             print(f"[step11] event calendar skipped: {e}")
 
@@ -934,7 +934,7 @@ def _emit_fundamentals_sizing_backtest_bundle(plan: pd.DataFrame) -> None:
             )
             if not evr.empty:
                 evr.to_csv(TOP5_EV_CSV, index=False)
-                print(f"Saved: {TOP5_EV_CSV.name}")
+                print(f"[vibe] Saved: {TOP5_EV_CSV.name}")
         except Exception as e:
             print(f"[step12] EV report skipped: {e}")
 
@@ -950,7 +950,7 @@ def _emit_fundamentals_sizing_backtest_bundle(plan: pd.DataFrame) -> None:
                 "min_alpha_survivors":    int(getattr(C, "PV_MIN_ALPHA_SURVIVORS", 2)),
             })
             pv.write_report(OUTPUT_DIR, report)
-            print(f"Saved: {PORTFOLIO_VAL_JSON.name} — Batch_Verdict={report['verdict']}")
+            print(f"[vibe] Saved: {PORTFOLIO_VAL_JSON.name} — Batch_Verdict={report['verdict']}")
             if report["reasons"]:
                 print(f"[step13] reasons: {'; '.join(report['reasons'])}")
             if report["caveats"]:
@@ -969,7 +969,7 @@ def _emit_fundamentals_sizing_backtest_bundle(plan: pd.DataFrame) -> None:
             )
             if not inst_df.empty:
                 inst_df.to_csv(TOP5_INSTFLOW_CSV, index=False)
-                print(f"Saved: {TOP5_INSTFLOW_CSV.name} "
+                print(f"[fincept] Saved: {TOP5_INSTFLOW_CSV.name} "
                       f"(fii_regime={fii_ctx.get('fii_regime')})")
             # merge fii into macro_context.json if present
             if MACRO_CTX_JSON.exists():
@@ -994,7 +994,7 @@ def _emit_fundamentals_sizing_backtest_bundle(plan: pd.DataFrame) -> None:
                 MACRO_CTX_JSON, ALPHA_SURVIVORS_JSON, REGIME_TILT_JSON,
                 apply=bool(getattr(C, "REGIME_TILT_APPLY", False)),
             )
-            print(f"Saved: {REGIME_TILT_JSON.name} "
+            print(f"[vibe] Saved: {REGIME_TILT_JSON.name} "
                   f"(regime={tilt.get('regime')}, mode={tilt.get('mode')})")
         except Exception as e:
             print(f"[step15] regime tilt skipped: {e}")
@@ -1016,7 +1016,7 @@ def _emit_fundamentals_sizing_backtest_bundle(plan: pd.DataFrame) -> None:
             import json as _j
             REBALANCE_DIFF_JSON.write_text(_j.dumps(rep, default=str, indent=2),
                                            encoding="utf-8")
-            print(f"Saved: {REBALANCE_DIFF_JSON.name} "
+            print(f"[vibe] Saved: {REBALANCE_DIFF_JSON.name} "
                   f"(turnover={rep.get('estimated_turnover_%')}%, "
                   f"rec={rep.get('recommendation')})")
         except Exception as e:
