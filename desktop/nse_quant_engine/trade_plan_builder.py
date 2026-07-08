@@ -655,6 +655,117 @@ def _emit_corr_and_benchmark(plan: pd.DataFrame) -> None:
         print(f"[step2] corr/benchmark stage skipped: {e}")
 
 
+def _emit_horizon_sentiment_alpha(plan: pd.DataFrame) -> None:
+    """Steps 3-5 add-on: horizon optimiser, sentiment overlay + veto, and
+    alpha-zoo IC report. All fully guarded — failures are logged and skipped;
+    the base pipeline never regresses."""
+    try:
+        from core import config as C
+    except Exception:
+        return
+    if plan is None or plan.empty or not RAW_PRICES.exists():
+        return
+    try:
+        prices = pd.read_csv(RAW_PRICES)
+    except Exception:
+        return
+
+    # top-5 symbols (post-veto, already correlation-diversified when step 2 ran)
+    try:
+        reviewable = plan[
+            ~plan["Trade_Status"].astype(str).str.contains("Avoid", case=False, na=False)
+        ].copy()
+        sort_cols = [c for c in ["Confidence_Adjusted_Score", "Final_Score"] if c in reviewable.columns]
+        if sort_cols:
+            reviewable = reviewable.sort_values(sort_cols, ascending=False)
+        top5_syms = reviewable["Symbol"].astype(str).head(5).tolist()
+    except Exception:
+        top5_syms = []
+
+    # ── Step 3: Hold-Horizon Optimizer ──
+    if getattr(C, "HORIZON_OPTIMIZER_ON", True) and top5_syms:
+        try:
+            from core import horizon_optimizer as hopt
+            recs = hopt.optimise_batch(
+                prices, top5_syms,
+                horizons=getattr(C, "HORIZON_GRID", [3, 5, 10, 21, 42, 63]),
+                hist_days=int(getattr(C, "HORIZON_HIST_DAYS", 250)),
+                risk_cap_pct=float(getattr(C, "HORIZON_RISK_CAP_PCT", 6.0)),
+            )
+            # store the curve as a JSON string for CSV portability
+            if not recs.empty:
+                recs["Exp_Ret_Curve"] = recs["Exp_Ret_Curve"].apply(lambda x: str(x))
+                recs["Horizons"] = recs["Horizons"].apply(lambda x: str(x))
+                recs.to_csv(TOP5_HORIZON_CSV, index=False)
+                print(f"Saved: {TOP5_HORIZON_CSV.name}")
+        except Exception as e:
+            print(f"[step3] horizon optimizer skipped: {e}")
+
+    # ── Step 4: Sentiment + macro overlay ──
+    if getattr(C, "SENTIMENT_OVERLAY_ON", True):
+        try:
+            from core import sentiment_overlay as sent
+            macro = sent.macro_tape_score(prices)
+            import json as _j
+            MACRO_CTX_JSON.write_text(_j.dumps(macro, default=str, indent=2),
+                                       encoding="utf-8")
+            print(f"Saved: {MACRO_CTX_JSON.name} (regime={macro.get('regime')})")
+
+            if NEWS_LATEST_CSV.exists() and top5_syms:
+                try:
+                    news = pd.read_csv(NEWS_LATEST_CSV)
+                except Exception:
+                    news = pd.DataFrame()
+                s_df = sent.score_headlines(
+                    news[news.get("Symbol", pd.Series(dtype=str)).astype(str).isin(top5_syms)]
+                    if not news.empty else news,
+                    lookback_days=int(getattr(C, "SENT_LOOKBACK_DAYS", 7)),
+                )
+                if not s_df.empty:
+                    s_df.to_csv(TOP5_SENT_CSV, index=False)
+                    print(f"Saved: {TOP5_SENT_CSV.name}")
+                    if getattr(C, "SENTIMENT_VETO_ON", True):
+                        vetoed = sent.sentiment_veto(
+                            s_df,
+                            min_headlines=int(getattr(C, "SENT_MIN_HEADLINES", 3)),
+                            neg_pct_veto=float(getattr(C, "SENT_NEG_VETO_PCT", 0.60)),
+                        )
+                        if vetoed:
+                            print(f"[step4] sentiment veto would demote: {sorted(vetoed)}")
+        except Exception as e:
+            print(f"[step4] sentiment overlay skipped: {e}")
+
+    # ── Step 5: Alpha-Zoo evaluator (report only — tilt gated on survivors) ──
+    if getattr(C, "ALPHA_ZOO_ON", True):
+        try:
+            from core import alpha_evaluator as ae
+            ic = ae.evaluate_alphas(
+                prices,
+                horizons=(5, 10, 21),
+                eval_days=int(getattr(C, "ALPHA_EVAL_DAYS", 250)),
+                folds=int(getattr(C, "ALPHA_EVAL_FOLDS", 4)),
+            )
+            if not ic.empty:
+                ic.to_csv(ALPHA_IC_CSV, index=False)
+                survivors = ae.promote_alphas(
+                    ic,
+                    min_ic=float(getattr(C, "ALPHA_IC_MIN", 0.03)),
+                    min_tstat=float(getattr(C, "ALPHA_TSTAT_MIN", 2.0)),
+                )
+                import json as _j
+                ALPHA_SURVIVORS_JSON.write_text(
+                    _j.dumps({"survivors": survivors,
+                              "threshold_ic": float(getattr(C, "ALPHA_IC_MIN", 0.03)),
+                              "threshold_tstat": float(getattr(C, "ALPHA_TSTAT_MIN", 2.0)),
+                              "min_for_tilt": int(getattr(C, "ALPHA_MIN_SURVIVORS_FOR_TILT", 3))},
+                             default=str, indent=2),
+                    encoding="utf-8")
+                print(f"Saved: {ALPHA_IC_CSV.name} + {ALPHA_SURVIVORS_JSON.name} "
+                      f"({len(survivors)} survivors)")
+        except Exception as e:
+            print(f"[step5] alpha-zoo evaluator skipped: {e}")
+
+
 def main() -> None:
     print("Trade Plan Builder - Stage 3.4.1 Validation Sync Patch")
     print("======================================================")
@@ -669,6 +780,7 @@ def main() -> None:
     plan = make_trade_plan(latest, rules, verdict, grade, source)
     write_outputs(plan, verdict, grade)
     _emit_corr_and_benchmark(plan)
+    _emit_horizon_sentiment_alpha(plan)
 
     print(f"Saved: {TRADE_PLAN_CSV}")
     print(f"Saved: {TRADE_PLAN_XLSX}")
