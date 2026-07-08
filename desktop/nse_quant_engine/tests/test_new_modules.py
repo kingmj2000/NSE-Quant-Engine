@@ -481,3 +481,13 @@ def test_bundle_includes_new_files():
                 "top5_expected_value.csv", "portfolio_validation.json"):
         assert req in src, req
     _ok("evidence bundle wires steps 10–13 files")
+
+
+if __name__ == "__main__":
+    # Run the Step 10–13 tests appended after the primary __main__ block above.
+    for _name in ("test_sector_context_enrich", "test_event_calendar_flags",
+                  "test_expected_value_top5_report",
+                  "test_portfolio_validation_verdicts",
+                  "test_bundle_includes_new_files"):
+        globals()[_name]()
+    print("ALL STEP 10–13 TESTS PASSED")
