@@ -532,10 +532,31 @@ class Dashboard(QWidget):
         for i, (title, value, tone, subtitle) in enumerate(cards):
             self.grid.addWidget(_make_kpi_card(title, value, tone, subtitle), i // 4, i % 4)
 
+        # Activation checklist for optional inputs (drives Fincept/Vibe overlays)
+        checklist = [
+            ("data/fii_dii_daily.csv",   "FII/DII flow (Step 14, Fincept)"),
+            ("data/bulk_deals.csv",      "Bulk deals (Step 14, Fincept)"),
+            ("data/fundamentals_latest.csv", "Fundamentals overlay (Step 6)"),
+            ("data/earnings_calendar.csv",   "Earnings calendar (Step 11, Fincept)"),
+        ]
+        chk_head = QLabel("Overlay activation · drop optional CSVs into data/ to light these up")
+        chk_head.setObjectName("Sub"); chk_head.setWordWrap(True)
+        chk_head.setStyleSheet("font-size:11px;letter-spacing:1px;text-transform:uppercase;margin-top:10px;")
+        self.grid.addWidget(chk_head, (len(cards) + 3) // 4, 0, 1, 4)
+        base_row = (len(cards) + 3) // 4 + 1
+        for i, (rel, label) in enumerate(checklist):
+            present = (BASE / rel).exists()
+            mark = "✅" if present else "⚠️"
+            tone = "green" if present else "amber"
+            sub  = "present" if present else "missing — overlay will run quiet"
+            self.grid.addWidget(_make_kpi_card(f"{mark}  {label}", rel, tone, sub),
+                                base_row + i // 4, i % 4)
+
         html = self._html_path()
         complete = manifest.get("completed_at") or "latest artifacts"
         self.note.setText(
-            f"Last completed: {complete}. Interactive dashboard file: {html if html.exists() else 'not generated yet'}."
+            f"Last completed: {complete}. Interactive dashboard file: {html if html.exists() else 'not generated yet'}. "
+            f"See INSPIRATION_MAP.md for what Fincept Terminal / Vibe Trading concepts each overlay borrows."
         )
 
 
