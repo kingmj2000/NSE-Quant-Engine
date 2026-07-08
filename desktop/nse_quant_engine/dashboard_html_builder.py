@@ -99,6 +99,8 @@ def _payload() -> dict:
     etfq = _safe_read_csv(OUT / "etf_quality_latest.csv")
     if etfq.empty:
         etfq = _safe_read_csv(DATA / "etf_quality_latest.csv")
+    top5_bench_df = _safe_read_csv(OUT / "top5_benchmark_stats.csv")
+    top5_corr_df = _safe_read_csv(OUT / "top5_corr_matrix.csv")
 
     # --- verdict / banner ---
     verdict = (val.get("verdict") or "Insufficient History")
@@ -285,8 +287,44 @@ def _payload() -> dict:
                 "label": "Watch only" if decision_use == "WATCHLIST ONLY" else "Live candidate",
                 "clean": (rsi is not None and rsi < 70 and (vol or 0) < 30),
                 "in_shadow_top5": _norm_sym(r.get("Symbol")) in shadow_top5_symbols,
+                "bench": None,
                 "flags": flags,
             })
+
+    # attach benchmark stats to each card by symbol
+    if not top5_bench_df.empty and "Symbol" in top5_bench_df.columns:
+        bmap = {str(row["Symbol"]): row for _, row in top5_bench_df.iterrows()}
+        for c in cards:
+            row = bmap.get(str(c["sym"]))
+            if row is not None:
+                c["bench"] = {
+                    "ex21": _num(row.get("Excess_21D"), 4),
+                    "ir63": _num(row.get("InformationRatio_63D"), 2),
+                    "te63": _num(row.get("TrackingError_63D"), 3),
+                    "beta": _num(row.get("BetaVsBenchmark_63D"), 2),
+                }
+
+    # correlation matrix payload for the top-5 (or fewer)
+    corr_payload = None
+    if not top5_corr_df.empty:
+        try:
+            first_col = top5_corr_df.columns[0]
+            cdf = top5_corr_df.set_index(first_col)
+            cdf.index = cdf.index.astype(str)
+            cdf.columns = cdf.columns.astype(str)
+            common = [s for s in cdf.index if s in cdf.columns]
+            if len(common) >= 2:
+                cdf = cdf.loc[common, common]
+                vals = cdf.round(2).values.tolist()
+                labels = [s.replace(".NS", "") for s in common]
+                # avg |off-diagonal|
+                import numpy as _np
+                arr = cdf.abs().values.astype(float).copy()
+                _np.fill_diagonal(arr, _np.nan)
+                avg_abs = float(_np.nanmean(arr)) if arr.size else None
+                corr_payload = {"labels": labels, "values": vals, "avg_abs": avg_abs}
+        except Exception:
+            corr_payload = None
 
     official_top5_symbols = {_norm_sym(c.get("sym")) for c in cards}
     if not shadow_scores.empty and "Symbol" in shadow_scores.columns:
