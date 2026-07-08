@@ -48,6 +48,9 @@ SPREAD_SUMMARY = OUTPUT_DIR / "cross_sectional_spread_summary.csv"
 TRADE_PLAN_CSV = OUTPUT_DIR / "trade_plan_latest.csv"
 TRADE_PLAN_XLSX = OUTPUT_DIR / "trade_plan_latest.xlsx"
 TRADE_PLAN_MD = OUTPUT_DIR / "trade_plan_report.md"
+TOP5_CORR_CSV = OUTPUT_DIR / "top5_corr_matrix.csv"
+TOP5_BENCH_CSV = OUTPUT_DIR / "top5_benchmark_stats.csv"
+RAW_PRICES = BASE_DIR / "data" / "raw_prices_latest.csv"
 
 DEFAULT_RULES = {
     "Round_Trip_Cost": 0.0030,
