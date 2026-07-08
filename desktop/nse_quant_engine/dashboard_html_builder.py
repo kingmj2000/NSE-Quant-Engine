@@ -699,6 +699,13 @@ canvas{margin-top:4px}
 
 <div class="banner" id="banner"></div>
 
+<div id="marketCtxWrap" style="display:none">
+  <h2>Market context</h2>
+  <div class="glass panel" id="marketCtxPanel">
+    <div id="marketCtx" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px"></div>
+  </div>
+</div>
+
 <h2>Signal maturation &amp; validation readiness</h2>
 <div class="grid twocol">
   <div class="glass g-teal panel">
