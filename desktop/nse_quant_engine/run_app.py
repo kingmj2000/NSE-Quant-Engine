@@ -1500,7 +1500,7 @@ class MainWindow(QMainWindow):
             _log_crash(f"Reveal evidence zip failed: {e}")
             QMessageBox.warning(self, "Could not open", f"{type(e).__name__}: {e}")
 
-
+    def closeEvent(self, event):
         # Guard against Qt/WebEngine-driven close attempts while a run is live.
         if self.thread and self.thread.isRunning():
             resp = QMessageBox.question(
