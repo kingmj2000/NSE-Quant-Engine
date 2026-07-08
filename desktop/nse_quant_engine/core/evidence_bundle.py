@@ -159,6 +159,7 @@ def build_evidence_json(output_dir: Path, top5: pd.DataFrame) -> dict:
             "sector_context": _row_lookup(sector, sym),
             "event_calendar": _row_lookup(events, sym),
             "expected_value": _row_lookup(ev_report, sym),
+            "institutional_flow": _row_lookup(instflow, sym),
             "key_risk": r.get("Key_Risk"),
         })
 
@@ -167,6 +168,8 @@ def build_evidence_json(output_dir: Path, top5: pd.DataFrame) -> dict:
         "macro_context": macro,
         "alpha_zoo_survivors": survivors,
         "portfolio_validation": portfolio_val,
+        "regime_tilt": regime_tilt,
+        "rebalance_diff": rebalance,
         "picks": picks,
     }
 
