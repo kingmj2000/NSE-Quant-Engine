@@ -1108,7 +1108,7 @@ class PortfolioView(QWidget):
         self._v.addWidget(vcard)
 
         # --- Sizing (Step 8) ---
-        self._v.addWidget(_section_header("Position sizing · top5_sizing.csv"))
+        self._v.addWidget(_section_header("Position sizing · top5_sizing.csv  ·  inspired by Vibe Trading"))
         if sizing_df is None or sizing_df.empty:
             self._v.addWidget(_empty_card("No sizing output — Step 8 did not produce top5_sizing.csv.", "amber"))
         else:
@@ -1118,14 +1118,14 @@ class PortfolioView(QWidget):
             self._v.addWidget(_table_card(sizing_df[cols] if cols else sizing_df, "teal"))
 
         # --- Sector & Peers (Step 12) ---
-        self._v.addWidget(_section_header("Sector & peer context · top5_sector_context.csv"))
+        self._v.addWidget(_section_header("Sector & peer context · top5_sector_context.csv  ·  inspired by Fincept Terminal"))
         if sector_df is None or sector_df.empty:
             self._v.addWidget(_empty_card("No sector context available.", "amber"))
         else:
             self._v.addWidget(_table_card(sector_df, "violet"))
 
         # --- Events + EV merged (Steps 12/13) ---
-        self._v.addWidget(_section_header("Event risk & expected value · top5_event_calendar.csv + top5_expected_value.csv"))
+        self._v.addWidget(_section_header("Event risk & expected value · top5_event_calendar.csv + top5_expected_value.csv  ·  inspired by Fincept Terminal + Vibe Trading"))
         merged = pd.DataFrame()
         if events_df is not None and not events_df.empty and ev_df is not None and not ev_df.empty:
             try:
@@ -1192,7 +1192,7 @@ class MacroRotationView(QWidget):
             self._v.addWidget(_table_card(inst_df, "blue"))
 
         # --- Regime tilt (Step 15) ---
-        self._v.addWidget(_section_header("Regime tilt · regime_tilt_report.json"))
+        self._v.addWidget(_section_header("Regime tilt · regime_tilt_report.json  ·  inspired by Vibe Trading"))
         if not regime_tilt:
             self._v.addWidget(_empty_card("No regime tilt report yet.", "amber"))
         else:
@@ -1227,7 +1227,7 @@ class MacroRotationView(QWidget):
             self._v.addWidget(card)
 
         # --- Rebalance diff (Step 16) ---
-        self._v.addWidget(_section_header("Rebalance diff · rebalance_diff.json"))
+        self._v.addWidget(_section_header("Rebalance diff · rebalance_diff.json  ·  inspired by Vibe Trading"))
         if not rebalance:
             self._v.addWidget(_empty_card("No rebalance diff yet.", "amber"))
         else:
