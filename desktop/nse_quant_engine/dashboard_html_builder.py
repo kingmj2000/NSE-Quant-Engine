@@ -101,6 +101,11 @@ def _payload() -> dict:
         etfq = _safe_read_csv(DATA / "etf_quality_latest.csv")
     top5_bench_df = _safe_read_csv(OUT / "top5_benchmark_stats.csv")
     top5_corr_df = _safe_read_csv(OUT / "top5_corr_matrix.csv")
+    top5_horizon_df = _safe_read_csv(OUT / "top5_horizon.csv")
+    top5_sent_df = _safe_read_csv(OUT / "top5_sentiment.csv")
+    macro_ctx = _safe_read_json(OUT / "macro_context.json")
+    alpha_ic_df = _safe_read_csv(OUT / "alpha_zoo_ic_report.csv")
+    alpha_survivors = _safe_read_json(OUT / "alpha_zoo_survivors.json")
 
     # --- verdict / banner ---
     verdict = (val.get("verdict") or "Insufficient History")
