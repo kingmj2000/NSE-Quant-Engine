@@ -8,7 +8,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core import regime, sector_context, etf_microstructure as micro, data_quality as dq
+from core import regime, sector_context, etf_microstructure as micro, data_quality as dq, alpha_zoo
 
 def _ok(n): print(f"  PASS: {n}")
 
@@ -104,6 +104,33 @@ def test_orchestrator_steps_build():
     assert any("nse_quant_engine" == st.name for st in s_full)
     assert len(s_no_fetch) < len(s_full)
     _ok(f"orchestrator builds {len(s_full)} / {len(s_no_fetch)} steps")
+
+
+def test_alpha_zoo_no_lookahead():
+    """Guard: no alpha may reference future values via shift(-N) or negative rolling."""
+    import inspect, re
+    src = inspect.getsource(alpha_zoo)
+    assert not re.search(r"\.shift\(\s*-\s*\d", src), "found forward .shift(-N)"
+    assert not re.search(r"rolling\(\s*-\s*\d", src), "found negative rolling window"
+    _ok("alpha_zoo lookahead guard")
+
+
+def test_alpha_zoo_compute_shape():
+    dates = pd.bdate_range("2024-01-01", periods=260)
+    rows = []
+    rng = np.random.default_rng(0)
+    for s, drift in [("A", 0.0008), ("B", 0.0003), ("C", -0.0002)]:
+        px = 100 * np.cumprod(1 + rng.normal(drift, 0.012, len(dates)))
+        for d, p in zip(dates, px):
+            rows.append({"Date": d, "Symbol": s, "Open": p, "High": p*1.01,
+                         "Low": p*0.99, "Close": p, "Volume": 100000})
+    df = pd.DataFrame(rows)
+    z = alpha_zoo.compute_alpha_zoo(df)
+    assert set(["Symbol", "Zoo_Score", "Zoo_Coverage"]).issubset(z.columns)
+    assert len(z) == 3
+    assert z["Zoo_Score"].notna().all()
+    assert (z["Zoo_Score"].between(0, 100)).all()
+    _ok(f"alpha_zoo compute: {len(alpha_zoo.ALPHAS)} alphas, coverage min={z['Zoo_Coverage'].min():.2f}")
 
 
 if __name__ == "__main__":
