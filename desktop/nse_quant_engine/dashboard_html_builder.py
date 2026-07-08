@@ -309,6 +309,47 @@ def _payload() -> dict:
                     "beta": _num(row.get("BetaVsBenchmark_63D"), 2),
                 }
 
+    # attach horizon-optimizer recommendation per card
+    if not top5_horizon_df.empty and "Symbol" in top5_horizon_df.columns:
+        hmap = {str(row["Symbol"]): row for _, row in top5_horizon_df.iterrows()}
+        for c in cards:
+            row = hmap.get(str(c["sym"]))
+            if row is None:
+                continue
+            try:
+                curve = row.get("Exp_Ret_Curve")
+                if isinstance(curve, str):
+                    import ast as _ast
+                    curve = _ast.literal_eval(curve) if curve.strip().startswith("[") else None
+                hor = row.get("Horizons")
+                if isinstance(hor, str):
+                    import ast as _ast
+                    hor = _ast.literal_eval(hor) if hor.strip().startswith("[") else None
+            except Exception:
+                curve, hor = None, None
+            c["horizon"] = {
+                "rec_days": _num(row.get("Rec_Horizon_Days"), 0),
+                "exp_ret": _num(row.get("Exp_Ret_%"), 2),
+                "down_vol": _num(row.get("Downside_Vol_%"), 2),
+                "sharpe": _num(row.get("Sharpe_like"), 2),
+                "grid": hor if isinstance(hor, list) else None,
+                "curve": curve if isinstance(curve, list) else None,
+            }
+
+    # attach sentiment chip per card
+    if not top5_sent_df.empty and "Symbol" in top5_sent_df.columns:
+        smap = {str(row["Symbol"]): row for _, row in top5_sent_df.iterrows()}
+        for c in cards:
+            row = smap.get(str(c["sym"]))
+            if row is None:
+                continue
+            c["sent"] = {
+                "n": int(row.get("Headlines_7D") or 0),
+                "pos": _num((row.get("PosPct") or 0) * 100, 0),
+                "neg": _num((row.get("NegPct") or 0) * 100, 0),
+                "net": _num(row.get("Net_Sent"), 2),
+            }
+
     # correlation matrix payload for the top-5 (or fewer)
     corr_payload = None
     if not top5_corr_df.empty:
