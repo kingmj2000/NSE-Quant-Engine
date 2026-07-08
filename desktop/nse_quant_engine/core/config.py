@@ -167,3 +167,26 @@ BACKTEST_LOOKBACK_DAYS = _i("BACKTEST_LOOKBACK_DAYS", 250)
 BACKTEST_STALE_DAYS    = _i("BACKTEST_STALE_DAYS", 7)
 BACKTEST_HOLD_DAYS     = _i("BACKTEST_HOLD_DAYS", 10)
 BACKTEST_REBAL_EVERY   = _i("BACKTEST_REBAL_EVERY", 5)
+
+# ── Step 10: Sector & Peer Context ──────────────────────────────────────────
+SECTOR_CONTEXT_ON      = (not _SAFE_MODE) and (
+    os.environ.get("SECTOR_CONTEXT_ON", "1") not in ("0", "false", "False"))
+
+# ── Step 11: Event & Catalyst Calendar ──────────────────────────────────────
+EVENT_CALENDAR_ON      = (not _SAFE_MODE) and (
+    os.environ.get("EVENT_CALENDAR_ON", "1") not in ("0", "false", "False"))
+
+# ── Step 12: Expected-Value / Kelly cross-check (report-only) ───────────────
+EV_REPORT_ON           = (not _SAFE_MODE) and (
+    os.environ.get("EV_REPORT_ON", "1") not in ("0", "false", "False"))
+KELLY_CAP_OF_WEIGHT    = _f("KELLY_CAP_OF_WEIGHT", 0.25)
+KELLY_OVERRIDE         = os.environ.get("KELLY_OVERRIDE", "0") in ("1", "true", "True")
+
+# ── Step 13: Portfolio-level validation gate ────────────────────────────────
+PORTFOLIO_VALIDATION_ON      = (not _SAFE_MODE) and (
+    os.environ.get("PORTFOLIO_VALIDATION_ON", "1") not in ("0", "false", "False"))
+PV_MAX_AVG_ABS_CORR          = _f("PV_MAX_AVG_ABS_CORR", 0.70)
+PV_MAX_PORTFOLIO_LOSS_PCT    = _f("PV_MAX_PORTFOLIO_LOSS_PCT", 3.0)
+PV_MAX_SINGLE_SECTOR_PCT     = _f("PV_MAX_SINGLE_SECTOR_PCT", 60.0)
+PV_MIN_BACKTEST_HIT_RATE     = _f("PV_MIN_BACKTEST_HIT_RATE", 0.50)
+PV_MIN_ALPHA_SURVIVORS       = _i("PV_MIN_ALPHA_SURVIVORS", 2)
