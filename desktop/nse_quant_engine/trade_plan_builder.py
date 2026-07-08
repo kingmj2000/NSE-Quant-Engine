@@ -62,6 +62,10 @@ TOP5_SIZING_CSV = OUTPUT_DIR / "top5_position_sizing.csv"
 BACKTEST_CSV = OUTPUT_DIR / "backtest_scorecard.csv"
 BACKTEST_CURVE_CSV = OUTPUT_DIR / "backtest_equity_curve.csv"
 FUND_CACHE_CSV = OUTPUT_DIR / "fundamentals_cache.csv"
+TOP5_SECTOR_CSV = OUTPUT_DIR / "top5_sector_context.csv"
+TOP5_EVENTS_CSV = OUTPUT_DIR / "top5_events.csv"
+TOP5_EV_CSV = OUTPUT_DIR / "top5_expected_value.csv"
+PORTFOLIO_VAL_JSON = OUTPUT_DIR / "portfolio_validation.json"
 PROMPTS_DIR = BASE_DIR / "prompts"
 
 DEFAULT_RULES = {
