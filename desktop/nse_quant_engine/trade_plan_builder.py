@@ -50,6 +50,12 @@ TRADE_PLAN_XLSX = OUTPUT_DIR / "trade_plan_latest.xlsx"
 TRADE_PLAN_MD = OUTPUT_DIR / "trade_plan_report.md"
 TOP5_CORR_CSV = OUTPUT_DIR / "top5_corr_matrix.csv"
 TOP5_BENCH_CSV = OUTPUT_DIR / "top5_benchmark_stats.csv"
+TOP5_HORIZON_CSV = OUTPUT_DIR / "top5_horizon.csv"
+TOP5_SENT_CSV = OUTPUT_DIR / "top5_sentiment.csv"
+MACRO_CTX_JSON = OUTPUT_DIR / "macro_context.json"
+ALPHA_IC_CSV = OUTPUT_DIR / "alpha_zoo_ic_report.csv"
+ALPHA_SURVIVORS_JSON = OUTPUT_DIR / "alpha_zoo_survivors.json"
+NEWS_LATEST_CSV = OUTPUT_DIR / "news_market_latest.csv"
 RAW_PRICES = BASE_DIR / "data" / "raw_prices_latest.csv"
 
 DEFAULT_RULES = {
