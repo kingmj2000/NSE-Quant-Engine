@@ -491,3 +491,95 @@ if __name__ == "__main__":
                   "test_bundle_includes_new_files"):
         globals()[_name]()
     print("ALL STEP 10–13 TESTS PASSED")
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Steps 14–16 tests
+# ────────────────────────────────────────────────────────────────────────────
+
+def test_institutional_flow_optional_inputs():
+    import tempfile
+    from core import institutional_flow as ifl
+    tmp = Path(tempfile.mkdtemp())
+    # no files → Unknown
+    top5 = pd.DataFrame({"Symbol": ["A", "B"]})
+    out, ctx = ifl.enrich(top5, tmp)
+    assert (out["FII_Regime"] == "Unknown").all()
+    assert ctx["fii_regime"] == "Unknown"
+    # with files
+    today = pd.Timestamp.now().normalize()
+    pd.DataFrame({
+        "Date": [today - pd.Timedelta(days=i) for i in range(5)],
+        "FII_Net_INR_Cr": [800, 900, 700, 600, 500],
+        "DII_Net_INR_Cr": [100] * 5,
+    }).to_csv(tmp / "fii_dii_daily.csv", index=False)
+    pd.DataFrame({
+        "Date": [today - pd.Timedelta(days=1)],
+        "Symbol": ["A"], "Client": ["FundX"],
+        "Buy_Sell": ["B"], "Qty": [100000], "Price": [500.0],
+    }).to_csv(tmp / "bulk_deals.csv", index=False)
+    out2, ctx2 = ifl.enrich(top5, tmp)
+    assert ctx2["fii_regime"] == "Net_Buying", ctx2
+    r_a = out2[out2["Symbol"] == "A"].iloc[0]
+    assert r_a["Bulk_Deal_Flag"] == "Buy" and r_a["Institutional_Confirmation"] == "Yes"
+    _ok(f"institutional flow: fii={ctx2['fii_regime']} bulk_A={r_a['Bulk_Deal_Flag']}")
+
+
+def test_regime_tilt_report():
+    import tempfile, json as _j
+    from core import regime_tilt as rt
+    tmp = Path(tempfile.mkdtemp())
+    (tmp / "macro.json").write_text('{"regime":"RISK_OFF"}')
+    (tmp / "surv.json").write_text(_j.dumps([
+        {"alpha": "mom_21d"}, {"alpha": "low_vol_20d"}, {"alpha": "quality_z"},
+    ]))
+    tilt = rt.build_report(tmp / "macro.json", tmp / "surv.json",
+                           tmp / "tilt.json", apply=False)
+    assert tilt["regime"] == "RISK_OFF"
+    assert tilt["alpha_multipliers"]["mom_21d"] == 0.5
+    assert tilt["alpha_multipliers"]["low_vol_20d"] == 2.0
+    assert tilt["mode"] == "REPORT_ONLY"
+    _ok(f"regime tilt: {tilt['alpha_multipliers']}")
+
+
+def test_rebalance_diff_first_and_second_run():
+    import tempfile
+    from core import rebalance_diff as rd
+    tmp = Path(tempfile.mkdtemp())
+    snap = tmp / "history" / "top5_prev.csv"
+    curr = pd.DataFrame({"Symbol": ["A", "B", "C"],
+                         "Final_Score": [90, 85, 80], "Price": [100, 200, 300]})
+    hz = pd.DataFrame({"Symbol": ["A", "B", "C"], "Exp_Ret_%": [3.0, 2.5, 2.0]})
+    # first run
+    r1 = rd.build(curr, snap, horizon_df=hz)
+    assert r1["estimated_turnover_%"] == 100.0
+    assert r1["recommendation"] == "First_Run_Establish_Positions"
+    assert snap.exists()
+    # second run: B dropped, D entered
+    curr2 = pd.DataFrame({"Symbol": ["A", "C", "D"],
+                          "Final_Score": [92, 79, 88], "Price": [100, 300, 400]})
+    r2 = rd.build(curr2, snap, horizon_df=hz, all_curr=curr2)
+    assert set(r2["holds"]) == {"A", "C"}
+    assert r2["exits"] == ["B"]
+    assert r2["entries"] == ["D"]
+    assert r2["estimated_turnover_%"] > 0
+    _ok(f"rebalance diff: rec={r2['recommendation']} turnover={r2['estimated_turnover_%']}%")
+
+
+def test_bundle_includes_steps_14_16():
+    import inspect
+    from core import evidence_bundle as eb
+    src = inspect.getsource(eb)
+    for req in ("top5_institutional_flow.csv", "regime_tilt_report.json",
+                "rebalance_diff.json"):
+        assert req in src, req
+    _ok("evidence bundle wires steps 14–16 files")
+
+
+if __name__ == "__main__":
+    for _name in ("test_institutional_flow_optional_inputs",
+                  "test_regime_tilt_report",
+                  "test_rebalance_diff_first_and_second_run",
+                  "test_bundle_includes_steps_14_16"):
+        globals()[_name]()
+    print("ALL STEP 14–16 TESTS PASSED")
