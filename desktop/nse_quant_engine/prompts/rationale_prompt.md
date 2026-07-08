@@ -64,21 +64,29 @@ symbol, in the same order as `evidence.json`). No prose outside the JSON.
       "symbol": "TICKER",
       "thesis": ["bullet 1", "bullet 2", "bullet 3"],
       "why_this_horizon": "<= 1 sentence tying Rec_Horizon_Days to Downside_Vol_% and risk cap>",
+      "sector_context": "<= 1 sentence citing Sector_RS_63D_% + Peer_Median_3M_Return_% from top5_sector_context.csv>",
+      "event_risk": "<= 1 sentence citing Event_Risk_Flag + Days_To_Earnings from top5_events.csv>",
+      "ev_sanity_check": "<= 1 sentence citing EV_% and EV_Sizing_Agree from top5_expected_value.csv>",
       "risks": ["risk 1 with the field it comes from", "risk 2"],
       "invalidation": "<= 1 sentence: what would falsify the thesis, tied to Stop_Loss / sentiment veto / regime flip>",
       "contradictions": ["signal-A says X but signal-B says Y", "..."],
       "confidence": "low | medium | high",
-      "confidence_rationale": "<= 1 sentence: which evidence drove the confidence label>"
+      "confidence_rationale": "<= 1 sentence: which evidence drove the confidence label"
     }
   ],
   "portfolio_notes": {
-    "concentration_check": "<= 1 sentence citing avg |corr| from top5_corr_matrix>",
+    "batch_verdict": "<copy portfolio_validation.verdict verbatim, add <= 1 sentence citing top reasons/caveats>",
+    "concentration_check": "<= 1 sentence citing avg |corr| from top5_corr_matrix and top_sector_weight_% from portfolio_validation>",
     "aggregate_risk_check": "<= 1 sentence citing sum of Max_Loss_%_of_NAV from top5_position_sizing>",
     "backtest_context": "<= 1 sentence citing hit rate / Sharpe from backtest_scorecard>"
   },
   "flags_for_human_review": ["symbol: reason", "..."]
 }
 ```
+
+If `portfolio_validation.verdict == "Downgrade_To_Watch"`, add a plain-language
+warning at the top of `market_context_summary` and cap every pick's
+`confidence` at `medium`.
 
 ## Confidence rubric
 
