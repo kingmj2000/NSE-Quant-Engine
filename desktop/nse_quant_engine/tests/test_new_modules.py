@@ -11,7 +11,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core import (regime, sector_context, etf_microstructure as micro,
                   data_quality as dq, alpha_zoo, portfolio_selection as psel,
                   horizon_optimizer as hopt, sentiment_overlay as sent,
-                  alpha_evaluator as ae)
+                  alpha_evaluator as ae, fundamentals_overlay as fo,
+                  position_sizer as pz, backtest_engine as bt,
+                  evidence_bundle as eb)
 
 def _ok(n): print(f"  PASS: {n}")
 
