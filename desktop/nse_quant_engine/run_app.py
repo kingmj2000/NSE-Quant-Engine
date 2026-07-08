@@ -1035,6 +1035,244 @@ class CompareView(QWidget):
 
 
 
+def _section_header(text: str) -> QLabel:
+    lbl = QLabel(text); lbl.setObjectName("Sub")
+    lbl.setStyleSheet("font-size:11px;letter-spacing:1.2px;text-transform:uppercase;color:#8A92A6;margin-top:6px;")
+    return lbl
+
+
+def _table_card(df: pd.DataFrame, accent: str = "indigo", max_rows: int = 200,
+                min_height: int = 220) -> QFrame:
+    card = QFrame(); card.setObjectName("Card"); card.setProperty("accent", accent)
+    v = QVBoxLayout(card); v.setContentsMargins(12, 10, 12, 12); v.setSpacing(6)
+    if df is None or df.empty:
+        v.addWidget(QLabel("No data available yet — run the pipeline."))
+        return card
+    tbl = QTableView(); tbl.setModel(_df_to_model(df.head(max_rows)))
+    tbl.horizontalHeader().setStretchLastSection(True)
+    tbl.verticalHeader().setVisible(False)
+    tbl.setAlternatingRowColors(False)
+    tbl.setMinimumHeight(min_height)
+    v.addWidget(tbl)
+    return card
+
+
+def _empty_card(msg: str, accent: str = "dim") -> QFrame:
+    card = QFrame(); card.setObjectName("Card"); card.setProperty("accent", accent)
+    v = QVBoxLayout(card); v.setContentsMargins(14, 12, 14, 12)
+    lbl = QLabel(msg); lbl.setWordWrap(True); lbl.setStyleSheet("color:#B7BCC6;font-size:12.5px;")
+    v.addWidget(lbl)
+    return card
+
+
+class PortfolioView(QWidget):
+    """Sizing · Sector/Peers · Events+EV · Portfolio Validation verdict."""
+    def __init__(self):
+        super().__init__()
+        outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0); outer.setSpacing(10)
+        self.body = QScrollArea(); self.body.setWidgetResizable(True); self.body.setFrameShape(QFrame.NoFrame)
+        self._holder = QWidget(); self._v = QVBoxLayout(self._holder)
+        self._v.setContentsMargins(0, 0, 0, 0); self._v.setSpacing(12)
+        self.body.setWidget(self._holder)
+        outer.addWidget(self.body, 1)
+
+    def _clear(self):
+        while self._v.count():
+            it = self._v.takeAt(0)
+            if it.widget(): it.widget().deleteLater()
+
+    def render(self, sizing_df: pd.DataFrame, sector_df: pd.DataFrame,
+               events_df: pd.DataFrame, ev_df: pd.DataFrame,
+               validation: dict):
+        self._clear()
+
+        # --- Portfolio validation verdict card (top) ---
+        verdict = str((validation or {}).get("Batch_Verdict")
+                      or (validation or {}).get("verdict") or "Unknown")
+        vtone = {"Ship": "green", "Ship_With_Caveats": "amber",
+                 "Downgrade_To_Watch": "red"}.get(verdict, "dim")
+        vcard = QFrame(); vcard.setObjectName("Card"); vcard.setProperty("accent", vtone)
+        vv = QVBoxLayout(vcard); vv.setContentsMargins(14, 12, 14, 12); vv.setSpacing(8)
+        row = QHBoxLayout(); row.setSpacing(10)
+        row.addWidget(QLabel("Portfolio Validation")); row.addWidget(_make_pill(verdict.replace("_", " "), vtone))
+        row.addStretch()
+        rw = QWidget(); rw.setLayout(row); vv.addWidget(rw)
+        reasons = (validation or {}).get("reasons") or (validation or {}).get("caveats") or []
+        if isinstance(reasons, (list, tuple)) and reasons:
+            for r in reasons[:8]:
+                lb = QLabel(f"• {r}"); lb.setWordWrap(True)
+                lb.setStyleSheet("color:#DEE0E5;font-size:12.5px;")
+                vv.addWidget(lb)
+        elif not validation:
+            vv.addWidget(QLabel("No portfolio_validation.json yet — run pipeline."))
+        self._v.addWidget(vcard)
+
+        # --- Sizing (Step 8) ---
+        self._v.addWidget(_section_header("Position sizing · top5_sizing.csv"))
+        if sizing_df is None or sizing_df.empty:
+            self._v.addWidget(_empty_card("No sizing output — Step 8 did not produce top5_sizing.csv.", "amber"))
+        else:
+            cols = [c for c in ("Symbol", "Price", "Weight_%", "Capital_INR", "Shares",
+                                "Stop_Loss_INR", "Max_Loss_INR", "Max_Loss_%_of_NAV",
+                                "Risk_Contribution_%") if c in sizing_df.columns]
+            self._v.addWidget(_table_card(sizing_df[cols] if cols else sizing_df, "teal"))
+
+        # --- Sector & Peers (Step 12) ---
+        self._v.addWidget(_section_header("Sector & peer context · top5_sector_context.csv"))
+        if sector_df is None or sector_df.empty:
+            self._v.addWidget(_empty_card("No sector context available.", "amber"))
+        else:
+            self._v.addWidget(_table_card(sector_df, "violet"))
+
+        # --- Events + EV merged (Steps 12/13) ---
+        self._v.addWidget(_section_header("Event risk & expected value · top5_event_calendar.csv + top5_expected_value.csv"))
+        merged = pd.DataFrame()
+        if events_df is not None and not events_df.empty and ev_df is not None and not ev_df.empty:
+            try:
+                merged = events_df.merge(ev_df, on="Symbol", how="outer", suffixes=("", "_ev"))
+            except Exception:
+                merged = events_df.copy()
+        elif events_df is not None and not events_df.empty:
+            merged = events_df
+        elif ev_df is not None and not ev_df.empty:
+            merged = ev_df
+        if merged.empty:
+            self._v.addWidget(_empty_card("No event / EV data yet.", "amber"))
+        else:
+            self._v.addWidget(_table_card(merged, "amber"))
+            in_window = 0
+            if "Event_Risk_Flag" in merged.columns:
+                try:
+                    in_window = int((merged["Event_Risk_Flag"].astype(str) == "In_Window").sum())
+                except Exception:
+                    in_window = 0
+            if in_window > 0:
+                caution = QHBoxLayout(); caution.setSpacing(6)
+                caution.addWidget(_make_pill(f"{in_window} in earnings window", "amber"))
+                caution.addStretch()
+                w = QWidget(); w.setLayout(caution); self._v.addWidget(w)
+
+        self._v.addStretch()
+
+
+class MacroRotationView(QWidget):
+    """Institutional flow · Regime tilt · Rebalance diff."""
+    def __init__(self):
+        super().__init__()
+        outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0); outer.setSpacing(10)
+        self.body = QScrollArea(); self.body.setWidgetResizable(True); self.body.setFrameShape(QFrame.NoFrame)
+        self._holder = QWidget(); self._v = QVBoxLayout(self._holder)
+        self._v.setContentsMargins(0, 0, 0, 0); self._v.setSpacing(12)
+        self.body.setWidget(self._holder)
+        outer.addWidget(self.body, 1)
+
+    def _clear(self):
+        while self._v.count():
+            it = self._v.takeAt(0)
+            if it.widget(): it.widget().deleteLater()
+
+    def render(self, inst_df: pd.DataFrame, macro_ctx: dict,
+               regime_tilt: dict, rebalance: dict):
+        self._clear()
+
+        # --- Institutional flow (Step 14) ---
+        fii_reg = str((macro_ctx or {}).get("fii_regime")
+                      or (regime_tilt or {}).get("fii_regime") or "Unknown")
+        ftone = {"Net_Buying": "green", "Net_Selling": "red", "Mixed": "amber"}.get(fii_reg, "dim")
+        head = QHBoxLayout(); head.setSpacing(8)
+        head.addWidget(QLabel("Institutional flow (FII/DII + bulk deals)"))
+        head.addWidget(_make_pill(f"FII: {fii_reg.replace('_',' ')}", ftone))
+        head.addStretch()
+        hw = QWidget(); hw.setLayout(head); self._v.addWidget(hw)
+        if inst_df is None or inst_df.empty:
+            self._v.addWidget(_empty_card(
+                "No institutional flow output. Drop fii_dii_daily.csv and bulk_deals.csv "
+                "into data/ then re-run to activate.", "amber"))
+        else:
+            self._v.addWidget(_table_card(inst_df, "blue"))
+
+        # --- Regime tilt (Step 15) ---
+        self._v.addWidget(_section_header("Regime tilt · regime_tilt_report.json"))
+        if not regime_tilt:
+            self._v.addWidget(_empty_card("No regime tilt report yet.", "amber"))
+        else:
+            regime = str(regime_tilt.get("regime", "NEUTRAL"))
+            rtone = {"RISK_ON": "green", "RISK_OFF": "red", "NEUTRAL": "blue"}.get(regime, "dim")
+            applied = bool(regime_tilt.get("applied_to_scoring"))
+            atone = "green" if applied else "dim"
+            atxt = "APPLIED" if applied else "REPORT-ONLY"
+            card = QFrame(); card.setObjectName("Card"); card.setProperty("accent", rtone)
+            cv = QVBoxLayout(card); cv.setContentsMargins(14, 12, 14, 12); cv.setSpacing(8)
+            row = QHBoxLayout(); row.setSpacing(8)
+            row.addWidget(QLabel("Regime")); row.addWidget(_make_pill(regime, rtone))
+            row.addSpacing(10); row.addWidget(_make_pill(atxt, atone))
+            row.addStretch()
+            rw = QWidget(); rw.setLayout(row); cv.addWidget(rw)
+            fam = regime_tilt.get("family_multipliers") or {}
+            if fam:
+                fg = QHBoxLayout(); fg.setSpacing(6)
+                for k, v in fam.items():
+                    tone = "green" if v and v > 1 else ("amber" if v and v < 1 else "dim")
+                    fg.addWidget(_make_pill(f"{k}: ×{v}", tone))
+                fg.addStretch()
+                fw = QWidget(); fw.setLayout(fg); cv.addWidget(fw)
+            n = regime_tilt.get("n_survivors")
+            if n is not None:
+                cv.addWidget(QLabel(f"Survivors reweighted: {n}"))
+            notes = regime_tilt.get("notes")
+            if notes:
+                nl = QLabel(str(notes)); nl.setWordWrap(True)
+                nl.setStyleSheet("color:#B7BCC6;font-size:12px;")
+                cv.addWidget(nl)
+            self._v.addWidget(card)
+
+        # --- Rebalance diff (Step 16) ---
+        self._v.addWidget(_section_header("Rebalance diff · rebalance_diff.json"))
+        if not rebalance:
+            self._v.addWidget(_empty_card("No rebalance diff yet.", "amber"))
+        else:
+            rec = str(rebalance.get("recommendation", "Unknown"))
+            rtone = ("green" if rec.startswith("Rotate_Edge") else
+                     "amber" if rec.startswith("Rotate") or rec.startswith("Hold_Cost") else
+                     "blue" if rec.startswith("Hold") else "dim")
+            card = QFrame(); card.setObjectName("Card"); card.setProperty("accent", rtone)
+            cv = QVBoxLayout(card); cv.setContentsMargins(14, 12, 14, 12); cv.setSpacing(8)
+            row = QHBoxLayout(); row.setSpacing(8)
+            row.addWidget(QLabel("Recommendation")); row.addWidget(_make_pill(rec.replace("_", " "), rtone))
+            turn = rebalance.get("estimated_turnover_%")
+            if turn is not None:
+                row.addSpacing(10); row.addWidget(_make_pill(f"Turnover: {turn}%", "violet"))
+            edge = rebalance.get("net_edge_after_cost_%")
+            if edge is not None:
+                et = "green" if isinstance(edge, (int, float)) and edge > 0 else "red"
+                row.addSpacing(6); row.addWidget(_make_pill(f"Net edge: {edge}%", et))
+            row.addStretch()
+            rw = QWidget(); rw.setLayout(row); cv.addWidget(rw)
+
+            def _chip_row(label: str, items: list, tone: str):
+                if not items: return
+                cv.addWidget(_section_header(f"{label} ({len(items)})"))
+                fg = QHBoxLayout(); fg.setSpacing(6)
+                for s in items[:20]:
+                    fg.addWidget(_make_pill(str(s), tone))
+                fg.addStretch()
+                fw = QWidget(); fw.setLayout(fg); cv.addWidget(fw)
+
+            _chip_row("Holds", rebalance.get("holds") or [], "blue")
+            _chip_row("Exits", rebalance.get("exits") or [], "red")
+            _chip_row("Entries", rebalance.get("entries") or [], "green")
+            reasons = rebalance.get("exit_reasons") or {}
+            if reasons:
+                cv.addWidget(_section_header("Exit reasons"))
+                for sym, why in reasons.items():
+                    lb = QLabel(f"• {sym}: {why}"); lb.setWordWrap(True)
+                    lb.setStyleSheet("color:#DEE0E5;font-size:12.5px;")
+                    cv.addWidget(lb)
+            self._v.addWidget(card)
+
+        self._v.addStretch()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1065,11 +1303,13 @@ class MainWindow(QMainWindow):
 
         self.btn_reload = QPushButton("⟳ Reload last run"); self.btn_reload.setObjectName("Ghost")
         self.btn_browser = QPushButton("Open in browser ↗"); self.btn_browser.setObjectName("Ghost")
+        self.btn_evidence = QPushButton("📦 Evidence zip"); self.btn_evidence.setObjectName("Ghost")
+        self.btn_evidence.setToolTip("Reveal the newest evidence bundle (hand this zip to Claude / any LLM)")
         self.btn_run = QPushButton("▶  Run Full Pipeline"); self.btn_run.setObjectName("Primary")
         self.btn_drawer = QToolButton(); self.btn_drawer.setObjectName("Drawer")
         self.btn_drawer.setText("☰  Activity")
         self.btn_drawer.setToolTip("Toggle run activity drawer (F9)")
-        tb.addWidget(self.btn_reload); tb.addWidget(self.btn_browser)
+        tb.addWidget(self.btn_reload); tb.addWidget(self.btn_browser); tb.addWidget(self.btn_evidence)
         tb.addWidget(self.btn_run); tb.addWidget(self.btn_drawer)
         col.addWidget(topbar)
 
@@ -1082,11 +1322,14 @@ class MainWindow(QMainWindow):
         self.tab_dq = DQReportView()
         self.tab_validation = ValidationView()
         self.tab_trade = TradePlanView()
+        self.tab_portfolio = PortfolioView()
+        self.tab_macro = MacroRotationView()
         self.tabs.addTab(self.dashboard, "Dashboard")
         for tab, name in [
             (self.tab_scores, "Scores"), (self.tab_shadow, "Shadow"),
             (self.tab_compare, "Compare"), (self.tab_dq, "DQ Report"),
             (self.tab_validation, "Validation"), (self.tab_trade, "Trade Plan"),
+            (self.tab_portfolio, "Portfolio"), (self.tab_macro, "Macro & Rotation"),
         ]:
             self.tabs.addTab(tab, name)
         col.addWidget(self.tabs, 1)
@@ -1106,6 +1349,7 @@ class MainWindow(QMainWindow):
         self.btn_run.clicked.connect(self.start_run)
         self.btn_reload.clicked.connect(lambda: self.load_last_run(refresh_tabs=True))
         self.btn_browser.clicked.connect(self.dashboard.open_browser)
+        self.btn_evidence.clicked.connect(self._reveal_evidence_zip)
         self.btn_drawer.clicked.connect(self.drawer.toggle)
         QShortcut(QKeySequence("F9"), self, activated=self.drawer.toggle)
         QShortcut(QKeySequence("Ctrl+R"), self, activated=self.load_last_run)
@@ -1228,6 +1472,34 @@ class MainWindow(QMainWindow):
         except Exception as e:
             _log_crash(f"Final reload after run failed but app stayed open: {type(e).__name__}: {e}")
 
+    def _reveal_evidence_zip(self):
+        """Reveal the newest evidence bundle zip in the OS file browser.
+        This is the artifact the user hands to Claude / any LLM for rationale."""
+        try:
+            zips = sorted(OUT.glob("evidence_bundle_*.zip"),
+                          key=lambda p: p.stat().st_mtime, reverse=True)
+            if not zips:
+                # fallback: try any zip in output/
+                zips = sorted(OUT.glob("*.zip"),
+                              key=lambda p: p.stat().st_mtime, reverse=True)
+            if not zips:
+                QMessageBox.information(
+                    self, "No evidence zip yet",
+                    "No evidence_bundle_*.zip found in output/. Run the pipeline first — "
+                    "the bundle is written by Step 11 (evidence_bundle).")
+                return
+            target = zips[0]
+            self.status.showMessage(f"Revealing {target.name}")
+            if sys.platform.startswith("win"):
+                subprocess.Popen(["explorer", "/select,", str(target)])
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", "-R", str(target)])
+            else:
+                subprocess.Popen(["xdg-open", str(target.parent)])
+        except Exception as e:
+            _log_crash(f"Reveal evidence zip failed: {e}")
+            QMessageBox.warning(self, "Could not open", f"{type(e).__name__}: {e}")
+
     def closeEvent(self, event):
         # Guard against Qt/WebEngine-driven close attempts while a run is live.
         if self.thread and self.thread.isRunning():
@@ -1315,6 +1587,25 @@ class MainWindow(QMainWindow):
             self.tab_compare.render(cmp_df, cmp_json)
         except Exception as e:
             _log_crash(f"Compare tab render failed: {e}")
+
+        # New tabs: Portfolio + Macro & Rotation (Steps 8, 10–16)
+        sizing_df   = load_csv(OUT / "top5_sizing.csv")
+        sector_df   = load_csv(OUT / "top5_sector_context.csv")
+        events_df   = load_csv(OUT / "top5_event_calendar.csv")
+        ev_df       = load_csv(OUT / "top5_expected_value.csv")
+        inst_df     = load_csv(OUT / "top5_institutional_flow.csv")
+        pv_json     = _safe_json(OUT / "portfolio_validation.json")
+        macro_json  = _safe_json(OUT / "macro_context.json")
+        tilt_json   = _safe_json(OUT / "regime_tilt_report.json")
+        rebal_json  = _safe_json(OUT / "rebalance_diff.json")
+        try:
+            self.tab_portfolio.render(sizing_df, sector_df, events_df, ev_df, pv_json)
+        except Exception as e:
+            _log_crash(f"Portfolio tab render failed: {e}")
+        try:
+            self.tab_macro.render(inst_df, macro_json, tilt_json, rebal_json)
+        except Exception as e:
+            _log_crash(f"Macro tab render failed: {e}")
 
         # drawer: hydrate step list from last run so users can see what ran
         steps = manifest.get("steps") or []
