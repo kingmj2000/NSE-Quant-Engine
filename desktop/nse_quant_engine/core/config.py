@@ -138,3 +138,32 @@ ALPHA_TSTAT_MIN    = _f("ALPHA_TSTAT_MIN", 2.0)
 ALPHA_EVAL_DAYS    = _i("ALPHA_EVAL_DAYS", 250)
 ALPHA_EVAL_FOLDS   = _i("ALPHA_EVAL_FOLDS", 4)
 ALPHA_MIN_SURVIVORS_FOR_TILT = _i("ALPHA_MIN_SURVIVORS_FOR_TILT", 3)
+
+# ── Step 6: Fundamentals & Quality Overlay ──────────────────────────────────
+FUNDAMENTALS_OVERLAY_ON = (not _SAFE_MODE) and (
+    os.environ.get("FUNDAMENTALS_OVERLAY_ON", "1") not in ("0", "false", "False"))
+QUALITY_WEIGHT           = _f("QUALITY_WEIGHT", 0.0)  # report-only until IC reviewed
+VALUATION_LOOKBACK_YEARS = _i("VALUATION_LOOKBACK_YEARS", 3)
+
+# ── Step 7: Evidence bundle (offline AI handoff) ────────────────────────────
+EVIDENCE_BUNDLE_ON   = (not _SAFE_MODE) and (
+    os.environ.get("EVIDENCE_BUNDLE_ON", "1") not in ("0", "false", "False"))
+BUNDLE_MAX_MB        = _f("BUNDLE_MAX_MB", 5.0)
+BUNDLE_KEEP_LAST_N   = _i("BUNDLE_KEEP_LAST_N", 10)
+
+# ── Step 8: Position sizer ──────────────────────────────────────────────────
+POSITION_SIZER_ON    = (not _SAFE_MODE) and (
+    os.environ.get("POSITION_SIZER_ON", "1") not in ("0", "false", "False"))
+SIZING_MODE          = os.environ.get("SIZING_MODE", "risk_parity_lite")
+PORTFOLIO_VOL_TARGET = _f("PORTFOLIO_VOL_TARGET", 0.12)
+PORTFOLIO_NAV_INR    = _f("PORTFOLIO_NAV_INR", 1_000_000.0)
+MAX_WEIGHT           = _f("MAX_WEIGHT", 0.30)
+CASH_BUFFER          = _f("CASH_BUFFER", 0.10)
+
+# ── Step 9: Walk-forward backtest ───────────────────────────────────────────
+BACKTEST_ON            = (not _SAFE_MODE) and (
+    os.environ.get("BACKTEST_ON", "1") not in ("0", "false", "False"))
+BACKTEST_LOOKBACK_DAYS = _i("BACKTEST_LOOKBACK_DAYS", 250)
+BACKTEST_STALE_DAYS    = _i("BACKTEST_STALE_DAYS", 7)
+BACKTEST_HOLD_DAYS     = _i("BACKTEST_HOLD_DAYS", 10)
+BACKTEST_REBAL_EVERY   = _i("BACKTEST_REBAL_EVERY", 5)

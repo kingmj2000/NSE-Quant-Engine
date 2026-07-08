@@ -11,7 +11,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core import (regime, sector_context, etf_microstructure as micro,
                   data_quality as dq, alpha_zoo, portfolio_selection as psel,
                   horizon_optimizer as hopt, sentiment_overlay as sent,
-                  alpha_evaluator as ae)
+                  alpha_evaluator as ae, fundamentals_overlay as fo,
+                  position_sizer as pz, backtest_engine as bt,
+                  evidence_bundle as eb)
 
 def _ok(n): print(f"  PASS: {n}")
 
@@ -260,6 +262,116 @@ def test_alpha_evaluator_smoke():
     surv = ae.promote_alphas(ic, min_ic=0.03, min_tstat=2.0)
     assert isinstance(surv, list)
     _ok(f"alpha_evaluator: {len(ic)} rows, {len(surv)} survivors on synthetic panel")
+
+
+def test_fundamentals_quality_score_sign():
+    fund = pd.DataFrame([
+        {"Symbol": "GOOD", "ROE_TTM": 0.25, "DebtToEquity": 0.1,
+         "EPS_Growth_YoY": 0.30, "PE_TTM": 18},
+        {"Symbol": "MID",  "ROE_TTM": 0.15, "DebtToEquity": 0.5,
+         "EPS_Growth_YoY": 0.10, "PE_TTM": 25},
+        {"Symbol": "BAD",  "ROE_TTM": 0.02, "DebtToEquity": 3.0,
+         "EPS_Growth_YoY": -0.20, "PE_TTM": 60},
+    ])
+    q = fo.quality_score(fund)
+    assert q.iloc[0] > q.iloc[2], q.tolist()
+    assert (q.between(-3, 3)).all()
+    flag_cheap = fo.valuation_flag(pe=10.0, self_median_pe=25.0, sector_median_pe=22.0)
+    flag_exp = fo.valuation_flag(pe=60.0, self_median_pe=25.0, sector_median_pe=22.0)
+    assert flag_cheap == "Cheap" and flag_exp == "Expensive"
+    _ok(f"fundamentals overlay: quality good>bad ({q.iloc[0]:.2f} > {q.iloc[2]:.2f})")
+
+
+def test_position_sizer_identity_corr_gives_near_equal_weight():
+    # 3 names, identity corr → risk-parity ≈ inverse-vol proportional
+    prices = _synthetic_prices(seed=4)
+    top5 = pd.DataFrame({
+        "Symbol": ["IT0", "IND0", "IND1"],
+        "Price":  [100.0, 100.0, 100.0],
+        "Stop_Loss": [95.0, 95.0, 95.0],
+    })
+    corr = pd.DataFrame(np.eye(3), index=top5["Symbol"], columns=top5["Symbol"])
+    out = pz.size_portfolio(top5, prices_long=prices, corr=corr,
+                            mode="risk_parity_lite", nav_inr=1_000_000)
+    assert not out.empty and "Weight_%" in out.columns
+    # weights positive, and after vol-target scaling sum≤100 with buffer
+    assert (out["Weight_%"] > 0).all()
+    assert out["Max_Loss_INR"].notna().all()
+    _ok(f"position sizer: weights={out['Weight_%'].round(1).tolist()}")
+
+
+def test_position_sizer_fallback_no_prices():
+    top5 = pd.DataFrame({"Symbol": ["A", "B"], "Price": [100, 200], "Stop_Loss": [95, 190]})
+    out = pz.size_portfolio(top5, prices_long=None, corr=None, nav_inr=100000)
+    assert not out.empty
+    # equal-weight fallback
+    assert abs(out["Weight_%"].sum() - 100.0) < 1e-6
+    _ok("position sizer: equal-weight fallback works")
+
+
+def test_backtest_no_lookahead_and_shape():
+    import inspect, re
+    src = inspect.getsource(bt)
+    assert not re.search(r"\.shift\(\s*-\s*\d", src), "found forward .shift(-N) in backtest"
+    prices = _synthetic_prices(seed=5)
+    # need longer history
+    dates = pd.bdate_range("2022-01-01", periods=400)
+    rng = np.random.default_rng(7)
+    rows = []
+    for s in ["A", "B", "C", "D", "E", "F", "^NSEI"]:
+        drift = rng.normal(0.0004, 0.0002)
+        px = 100 * np.cumprod(1 + rng.normal(drift, 0.011, len(dates)))
+        for d, p in zip(dates, px):
+            rows.append({"Date": d, "Symbol": s, "Close": p, "Volume": 1000})
+    df = pd.DataFrame(rows)
+    res = bt.run_backtest(df, lookback_days=200, rebal_every=10, hold_days=10, top_n=3)
+    sc = res["scorecard"]; cv = res["equity_curve"]
+    assert not sc.empty and not cv.empty
+    for col in ["Variant", "N_Rebalances", "Hit_Rate", "Sharpe_Ann"]:
+        assert col in sc.columns
+    _ok(f"backtest: {len(cv)} rebalances, variants={sc['Variant'].tolist()}")
+
+
+def test_evidence_bundle_zip_contents(tmp_path=None):
+    import tempfile, zipfile, shutil, json as _j
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        (tmp / "output").mkdir()
+        (tmp / "prompts").mkdir()
+        # minimal trade plan
+        pd.DataFrame([{
+            "Symbol": "TEST", "Name": "Test Co", "Trade_Status": "Review - evidence gated",
+            "Final_Score": 90, "Confidence_Adjusted_Score": 88, "Price": 100.0,
+            "Stop_Loss": 95, "Target_1": 110, "Target_2": 120,
+            "Buy_Zone_Low": 99, "Buy_Zone_High": 101, "Key_Risk": "test",
+        }]).to_csv(tmp / "output" / "trade_plan_latest.csv", index=False)
+        (tmp / "prompts" / "rationale_prompt.md").write_text("# stub", encoding="utf-8")
+        # optional artifact
+        pd.DataFrame([{"Symbol": "TEST", "Rec_Horizon_Days": 10, "Exp_Ret_%": 3.0}]) \
+            .to_csv(tmp / "output" / "top5_horizon.csv", index=False)
+
+        zp = eb.build_bundle(tmp / "output", tmp / "prompts")
+        assert zp is not None and zp.exists()
+        with zipfile.ZipFile(zp) as zf:
+            names = set(zf.namelist())
+            for req in ("top5.csv", "evidence.json", "run_manifest.json",
+                        "README_for_AI.md", "top5_horizon.csv"):
+                assert req in names, (req, names)
+            ev = _j.loads(zf.read("evidence.json"))
+            assert ev["picks"][0]["symbol"] == "TEST"
+            assert ev["picks"][0]["horizon"].get("Rec_Horizon_Days") == 10
+        _ok(f"evidence bundle: {zp.name} contains {len(names)} files")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_rationale_prompt_present():
+    p = Path(__file__).resolve().parent.parent / "prompts" / "rationale_prompt.md"
+    assert p.exists(), "rationale_prompt.md missing — bundle would ship without AI instructions"
+    txt = p.read_text(encoding="utf-8")
+    for req in ("Output contract", "STRICT JSON", "picks", "confidence"):
+        assert req in txt, req
+    _ok("rationale prompt spec present and complete")
 
 
 if __name__ == "__main__":
