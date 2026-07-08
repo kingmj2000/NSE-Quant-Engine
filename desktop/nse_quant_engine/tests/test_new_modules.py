@@ -417,7 +417,7 @@ def test_event_calendar_flags():
     fund = pd.DataFrame({
         "Symbol": ["A", "B", "C"],
         "NextEarningsDate": [today + pd.Timedelta(days=5),
-                             today + pd.Timedelta(days=45),
+                             today + pd.Timedelta(days=25),
                              None],
     })
     out = ec.build(top5, hz, fund, as_of=today)
