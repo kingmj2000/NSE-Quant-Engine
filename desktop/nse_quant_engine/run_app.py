@@ -1322,11 +1322,14 @@ class MainWindow(QMainWindow):
         self.tab_dq = DQReportView()
         self.tab_validation = ValidationView()
         self.tab_trade = TradePlanView()
+        self.tab_portfolio = PortfolioView()
+        self.tab_macro = MacroRotationView()
         self.tabs.addTab(self.dashboard, "Dashboard")
         for tab, name in [
             (self.tab_scores, "Scores"), (self.tab_shadow, "Shadow"),
             (self.tab_compare, "Compare"), (self.tab_dq, "DQ Report"),
             (self.tab_validation, "Validation"), (self.tab_trade, "Trade Plan"),
+            (self.tab_portfolio, "Portfolio"), (self.tab_macro, "Macro & Rotation"),
         ]:
             self.tabs.addTab(tab, name)
         col.addWidget(self.tabs, 1)
