@@ -958,6 +958,72 @@ def _emit_fundamentals_sizing_backtest_bundle(plan: pd.DataFrame) -> None:
         except Exception as e:
             print(f"[step13] portfolio validation skipped: {e}")
 
+    # ── Step 14: Institutional-Flow Overlay ──
+    if getattr(C, "INSTITUTIONAL_FLOW_ON", True) and not top5.empty:
+        try:
+            from core import institutional_flow as ifl
+            inst_df, fii_ctx = ifl.enrich(
+                top5[["Symbol"]], DATA_DIR,
+                fii_lookback=int(getattr(C, "FII_LOOKBACK_DAYS", 5)),
+                bulk_lookback=int(getattr(C, "BULK_DEALS_LOOKBACK_DAYS", 30)),
+            )
+            if not inst_df.empty:
+                inst_df.to_csv(TOP5_INSTFLOW_CSV, index=False)
+                print(f"Saved: {TOP5_INSTFLOW_CSV.name} "
+                      f"(fii_regime={fii_ctx.get('fii_regime')})")
+            # merge fii into macro_context.json if present
+            if MACRO_CTX_JSON.exists():
+                try:
+                    import json as _j
+                    m = _j.loads(MACRO_CTX_JSON.read_text(encoding="utf-8"))
+                    m["fii_regime"] = fii_ctx.get("fii_regime")
+                    m["fii_net_5d_cr"] = fii_ctx.get("fii_net_5d_cr")
+                    m["dii_net_5d_cr"] = fii_ctx.get("dii_net_5d_cr")
+                    MACRO_CTX_JSON.write_text(_j.dumps(m, default=str, indent=2),
+                                              encoding="utf-8")
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"[step14] institutional flow skipped: {e}")
+
+    # ── Step 15: Regime-Conditional Alpha Tilt (report-only default) ──
+    if getattr(C, "REGIME_TILT_ON", True):
+        try:
+            from core import regime_tilt as rt
+            tilt = rt.build_report(
+                MACRO_CTX_JSON, ALPHA_SURVIVORS_JSON, REGIME_TILT_JSON,
+                apply=bool(getattr(C, "REGIME_TILT_APPLY", False)),
+            )
+            print(f"Saved: {REGIME_TILT_JSON.name} "
+                  f"(regime={tilt.get('regime')}, mode={tilt.get('mode')})")
+        except Exception as e:
+            print(f"[step15] regime tilt skipped: {e}")
+
+    # ── Step 16: Rebalance / turnover diff vs previous top-5 ──
+    if getattr(C, "REBALANCE_DIFF_ON", True) and not top5.empty:
+        try:
+            from core import rebalance_diff as rd
+            sent_df = pd.read_csv(TOP5_SENT_CSV) if TOP5_SENT_CSV.exists() else None
+            ev_df = pd.read_csv(TOP5_EVENTS_CSV) if TOP5_EVENTS_CSV.exists() else None
+            hz_df = pd.read_csv(TOP5_HORIZON_CSV) if TOP5_HORIZON_CSV.exists() else None
+            all_curr = plan if isinstance(plan, pd.DataFrame) else None
+            rep = rd.build(
+                top5, PREV_TOP5_SNAPSHOT,
+                all_curr=all_curr, sentiment=sent_df, events=ev_df,
+                horizon_df=hz_df,
+                round_trip_cost_pct=float(getattr(C, "REBAL_ROUND_TRIP_COST_PCT", 0.35)),
+            )
+            import json as _j
+            REBALANCE_DIFF_JSON.write_text(_j.dumps(rep, default=str, indent=2),
+                                           encoding="utf-8")
+            print(f"Saved: {REBALANCE_DIFF_JSON.name} "
+                  f"(turnover={rep.get('estimated_turnover_%')}%, "
+                  f"rec={rep.get('recommendation')})")
+        except Exception as e:
+            print(f"[step16] rebalance diff skipped: {e}")
+
+
+
 
     if getattr(C, "EVIDENCE_BUNDLE_ON", True):
         try:
