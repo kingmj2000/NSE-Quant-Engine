@@ -1303,11 +1303,13 @@ class MainWindow(QMainWindow):
 
         self.btn_reload = QPushButton("⟳ Reload last run"); self.btn_reload.setObjectName("Ghost")
         self.btn_browser = QPushButton("Open in browser ↗"); self.btn_browser.setObjectName("Ghost")
+        self.btn_evidence = QPushButton("📦 Evidence zip"); self.btn_evidence.setObjectName("Ghost")
+        self.btn_evidence.setToolTip("Reveal the newest evidence bundle (hand this zip to Claude / any LLM)")
         self.btn_run = QPushButton("▶  Run Full Pipeline"); self.btn_run.setObjectName("Primary")
         self.btn_drawer = QToolButton(); self.btn_drawer.setObjectName("Drawer")
         self.btn_drawer.setText("☰  Activity")
         self.btn_drawer.setToolTip("Toggle run activity drawer (F9)")
-        tb.addWidget(self.btn_reload); tb.addWidget(self.btn_browser)
+        tb.addWidget(self.btn_reload); tb.addWidget(self.btn_browser); tb.addWidget(self.btn_evidence)
         tb.addWidget(self.btn_run); tb.addWidget(self.btn_drawer)
         col.addWidget(topbar)
 
