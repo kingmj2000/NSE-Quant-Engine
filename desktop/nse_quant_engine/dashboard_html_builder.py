@@ -464,6 +464,41 @@ def _payload() -> dict:
     except Exception:
         universe_counts = {}
 
+    # ── alpha-zoo survivors + IC snapshot (step 5) ──
+    zoo_payload = None
+    try:
+        surv = (alpha_survivors or {}).get("survivors") or []
+        if surv:
+            zoo_payload = {
+                "survivors": surv[:10],
+                "count": len(surv),
+                "min_ic": alpha_survivors.get("threshold_ic"),
+                "min_tstat": alpha_survivors.get("threshold_tstat"),
+                "min_for_tilt": alpha_survivors.get("min_for_tilt"),
+            }
+        elif not alpha_ic_df.empty:
+            zoo_payload = {"survivors": [], "count": 0,
+                            "top_by_ic": alpha_ic_df.sort_values("mean_IC", ascending=False,
+                                                                 key=lambda s: s.abs())
+                                                 .head(6)
+                                                 .to_dict(orient="records")}
+    except Exception:
+        zoo_payload = None
+
+    # ── macro context (step 4) ──
+    macro_payload = None
+    try:
+        if macro_ctx:
+            macro_payload = {
+                "regime": macro_ctx.get("regime") or "neutral",
+                "vix": _num(macro_ctx.get("vix_level"), 2),
+                "vix_pct": _num(macro_ctx.get("vix_pctile_252d"), 1),
+                "nifty_trend": _num(macro_ctx.get("nifty_50d_trend"), 2),
+                "above_50dma": macro_ctx.get("nifty_above_50dma"),
+            }
+    except Exception:
+        macro_payload = None
+
     return {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "date": date_str,
@@ -490,6 +525,8 @@ def _payload() -> dict:
         "dq": dq_notes,
         "excel": excel,
         "corr_matrix": corr_payload,
+        "macro": macro_payload,
+        "alpha_zoo": zoo_payload,
     }
 
 
