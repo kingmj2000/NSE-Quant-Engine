@@ -772,6 +772,134 @@ def _emit_horizon_sentiment_alpha(plan: pd.DataFrame) -> None:
             print(f"[step5] alpha-zoo evaluator skipped: {e}")
 
 
+def _emit_fundamentals_sizing_backtest_bundle(plan: pd.DataFrame) -> None:
+    """Steps 6, 8, 9, 7. All fully guarded — failures print and skip; the
+    base pipeline never regresses. Order: fundamentals → sizing → backtest
+    → evidence bundle (so the bundle can zip everything above)."""
+    try:
+        from core import config as C
+    except Exception:
+        return
+    if plan is None or plan.empty:
+        return
+
+    # top-5 slice reused across steps
+    try:
+        reviewable = plan[
+            ~plan["Trade_Status"].astype(str).str.contains("Avoid", case=False, na=False)
+        ].copy()
+        sort_cols = [c for c in ["Confidence_Adjusted_Score", "Final_Score"]
+                     if c in reviewable.columns]
+        if sort_cols:
+            reviewable = reviewable.sort_values(sort_cols, ascending=False)
+        top5 = reviewable.head(5).copy()
+        top5_syms = top5["Symbol"].astype(str).tolist()
+    except Exception:
+        top5 = pd.DataFrame(); top5_syms = []
+
+    prices = None
+    if RAW_PRICES.exists():
+        try:
+            prices = pd.read_csv(RAW_PRICES)
+        except Exception:
+            prices = None
+
+    # ── Step 6: Fundamentals & Quality overlay ──
+    if getattr(C, "FUNDAMENTALS_OVERLAY_ON", True) and top5_syms:
+        try:
+            from core import fundamentals_overlay as fo
+            fund_df = pd.DataFrame()
+            if FUND_CACHE_CSV.exists():
+                try:
+                    fund_df = pd.read_csv(FUND_CACHE_CSV)
+                except Exception:
+                    fund_df = pd.DataFrame()
+            # tolerate legacy column names from fundamental_factor.fetch_fundamentals
+            if not fund_df.empty:
+                rename = {"PE": "PE_TTM", "ROE": "ROE_TTM",
+                          "EarningsGrowth": "EPS_Growth_YoY"}
+                fund_df = fund_df.rename(columns={k: v for k, v in rename.items()
+                                                  if k in fund_df.columns})
+            enr = fo.enrich(top5[["Symbol"]], fund_df)
+            enr.to_csv(TOP5_FUND_CSV, index=False)
+            print(f"Saved: {TOP5_FUND_CSV.name} "
+                  f"({int(enr['Quality_Score'].notna().sum())} scored)")
+        except Exception as e:
+            print(f"[step6] fundamentals overlay skipped: {e}")
+
+    # ── Step 8: Position sizer ──
+    if getattr(C, "POSITION_SIZER_ON", True) and not top5.empty:
+        try:
+            from core import position_sizer as ps
+            corr = None
+            if TOP5_CORR_CSV.exists():
+                try:
+                    corr = pd.read_csv(TOP5_CORR_CSV, index_col=0)
+                except Exception:
+                    corr = None
+            sizing = ps.size_portfolio(
+                top5[[c for c in ["Symbol", "Price", "Stop_Loss"] if c in top5.columns]],
+                prices_long=prices,
+                corr=corr,
+                mode=str(getattr(C, "SIZING_MODE", "risk_parity_lite")),
+                nav_inr=float(getattr(C, "PORTFOLIO_NAV_INR", 1_000_000.0)),
+                vol_target=float(getattr(C, "PORTFOLIO_VOL_TARGET", 0.12)),
+                max_weight=float(getattr(C, "MAX_WEIGHT", 0.30)),
+                cash_buffer=float(getattr(C, "CASH_BUFFER", 0.10)),
+            )
+            if not sizing.empty:
+                sizing.to_csv(TOP5_SIZING_CSV, index=False)
+                print(f"Saved: {TOP5_SIZING_CSV.name} "
+                      f"(sum weight={sizing['Weight_%'].sum():.1f}%)")
+        except Exception as e:
+            print(f"[step8] position sizer skipped: {e}")
+
+    # ── Step 9: Walk-forward style backtest ──
+    if getattr(C, "BACKTEST_ON", True) and prices is not None:
+        try:
+            # skip if scorecard was refreshed recently
+            stale_days = int(getattr(C, "BACKTEST_STALE_DAYS", 7))
+            fresh = False
+            if BACKTEST_CSV.exists():
+                age_days = (pd.Timestamp.now() -
+                            pd.Timestamp.fromtimestamp(BACKTEST_CSV.stat().st_mtime)).days
+                fresh = age_days < stale_days
+            if not fresh:
+                from core import backtest_engine as bt
+                res = bt.run_backtest(
+                    prices,
+                    lookback_days=int(getattr(C, "BACKTEST_LOOKBACK_DAYS", 250)),
+                    rebal_every=int(getattr(C, "BACKTEST_REBAL_EVERY", 5)),
+                    hold_days=int(getattr(C, "BACKTEST_HOLD_DAYS", 10)),
+                )
+                sc = res.get("scorecard")
+                cv = res.get("equity_curve")
+                if sc is not None and not sc.empty:
+                    sc.to_csv(BACKTEST_CSV, index=False)
+                    print(f"Saved: {BACKTEST_CSV.name}")
+                if cv is not None and not cv.empty:
+                    cv.to_csv(BACKTEST_CURVE_CSV, index=False)
+        except Exception as e:
+            print(f"[step9] backtest skipped: {e}")
+
+    # ── Step 7: Evidence bundle (must be last) ──
+    if getattr(C, "EVIDENCE_BUNDLE_ON", True):
+        try:
+            from core import evidence_bundle as eb
+            zpath = eb.build_bundle(
+                OUTPUT_DIR, PROMPTS_DIR,
+                bundle_max_mb=float(getattr(C, "BUNDLE_MAX_MB", 5.0)),
+                keep_last_n=int(getattr(C, "BUNDLE_KEEP_LAST_N", 10)),
+            )
+            if zpath and zpath.exists():
+                size_kb = zpath.stat().st_size / 1024.0
+                print(f"Saved: {zpath.name} ({size_kb:.0f} KB)")
+                print(f"[step7] Upload {zpath.name} to Claude with the "
+                      f"included README_for_AI.md as the system prompt.")
+        except Exception as e:
+            print(f"[step7] evidence bundle skipped: {e}")
+
+
 def main() -> None:
     print("Trade Plan Builder - Stage 3.4.1 Validation Sync Patch")
     print("======================================================")
@@ -787,6 +915,7 @@ def main() -> None:
     write_outputs(plan, verdict, grade)
     _emit_corr_and_benchmark(plan)
     _emit_horizon_sentiment_alpha(plan)
+    _emit_fundamentals_sizing_backtest_bundle(plan)
 
     print(f"Saved: {TRADE_PLAN_CSV}")
     print(f"Saved: {TRADE_PLAN_XLSX}")
