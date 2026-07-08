@@ -8,7 +8,10 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core import regime, sector_context, etf_microstructure as micro, data_quality as dq, alpha_zoo, portfolio_selection as psel
+from core import (regime, sector_context, etf_microstructure as micro,
+                  data_quality as dq, alpha_zoo, portfolio_selection as psel,
+                  horizon_optimizer as hopt, sentiment_overlay as sent,
+                  alpha_evaluator as ae)
 
 def _ok(n): print(f"  PASS: {n}")
 
