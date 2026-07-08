@@ -1101,6 +1101,54 @@ document.getElementById("dqNote").innerHTML = `
 
 // excel summary
 document.getElementById("excel").textContent = DATA.excel;
+
+// ── Market context strip (step 4) ──
+(function renderMacro(){
+  const m = DATA.macro;
+  if(!m) return;
+  const wrap = document.getElementById("marketCtxWrap");
+  const body = document.getElementById("marketCtx");
+  const regimeColor = m.regime==="risk-on" ? "#3FB950" : (m.regime==="risk-off" ? "#F2B13C" : "#8A92A6");
+  body.innerHTML = `
+    <div class="glass panel"><div class="sub">Regime</div><div style="font-size:20px;font-weight:600;color:${regimeColor}">${(m.regime||'neutral').toUpperCase()}</div></div>
+    <div class="glass panel"><div class="sub">India VIX</div><div style="font-size:20px;font-weight:600">${fmt(m.vix,'',2)}</div><div class="sub">${m.vix_pct==null?'':`${m.vix_pct}% percentile (252d)`}</div></div>
+    <div class="glass panel"><div class="sub">Nifty 50D trend</div><div style="font-size:20px;font-weight:600">${fmt(m.nifty_trend,'%',2)}</div><div class="sub">${m.above_50dma===true?'Above 50-DMA':(m.above_50dma===false?'Below 50-DMA':'—')}</div></div>
+    <div class="glass panel"><div class="sub">Read</div><div class="sub" style="margin-top:6px">Sentiment veto and horizon optimizer act only on the top-5 candidates; this strip is the whole-market backdrop.</div></div>`;
+  wrap.style.display="block";
+})();
+
+// ── Alpha-Zoo survivors tile (step 5) ──
+(function renderAlphaZoo(){
+  const z = DATA.alpha_zoo;
+  if(!z) return;
+  const wrap = document.getElementById("alphaZooWrap");
+  const cap = document.getElementById("alphaZooCaption");
+  const body = document.getElementById("alphaZooBody");
+  if(z.survivors && z.survivors.length){
+    cap.innerHTML = `<b>${z.count}</b> signal${z.count===1?'':'s'} independently predicted 5–21 day moves over the last ~12 months (IC≥${z.min_ic}, |t|≥${z.min_tstat}). Blend into scoring gated on ≥${z.min_for_tilt} survivors.`;
+    let html = '<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr>'
+      + ['Alpha','Horizon (d)','Mean IC','t-stat','Hit rate'].map(h=>`<th style="padding:6px 8px;text-align:left;color:var(--muted);border-bottom:1px solid var(--line);font-weight:500">${h}</th>`).join('')
+      + '</tr></thead><tbody>';
+    z.survivors.forEach(s=>{
+      html += `<tr><td style="padding:6px 8px">${s.alpha}</td><td style="padding:6px 8px">${s.horizon}</td><td style="padding:6px 8px">${(s.mean_IC>0?'+':'')+s.mean_IC.toFixed(3)}</td><td style="padding:6px 8px">${(s.t_stat==null?'—':s.t_stat.toFixed(2))}</td><td style="padding:6px 8px">${s.hit_rate==null?'—':(s.hit_rate*100).toFixed(0)+'%'}</td></tr>`;
+    });
+    html += '</tbody></table>';
+    body.innerHTML = html;
+  } else if(z.top_by_ic && z.top_by_ic.length){
+    cap.innerHTML = `No alpha cleared IC/t-stat thresholds yet — showing top 6 by |mean IC| for review. Scoring blend stays disabled.`;
+    let html = '<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr>'
+      + ['Alpha','Horizon (d)','Mean IC','t-stat'].map(h=>`<th style="padding:6px 8px;text-align:left;color:var(--muted);border-bottom:1px solid var(--line);font-weight:500">${h}</th>`).join('')
+      + '</tr></thead><tbody>';
+    z.top_by_ic.forEach(s=>{
+      html += `<tr><td style="padding:6px 8px">${s.alpha}</td><td style="padding:6px 8px">${s.horizon}</td><td style="padding:6px 8px">${Number(s.mean_IC||0).toFixed(3)}</td><td style="padding:6px 8px">${s.t_stat==null?'—':Number(s.t_stat).toFixed(2)}</td></tr>`;
+    });
+    html += '</tbody></table>';
+    body.innerHTML = html;
+  } else {
+    return;
+  }
+  wrap.style.display="block";
+})();
 </script>
 </body></html>
 """
