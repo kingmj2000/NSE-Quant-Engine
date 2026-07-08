@@ -1472,7 +1472,35 @@ class MainWindow(QMainWindow):
         except Exception as e:
             _log_crash(f"Final reload after run failed but app stayed open: {type(e).__name__}: {e}")
 
-    def closeEvent(self, event):
+    def _reveal_evidence_zip(self):
+        """Reveal the newest evidence bundle zip in the OS file browser.
+        This is the artifact the user hands to Claude / any LLM for rationale."""
+        try:
+            zips = sorted(OUT.glob("evidence_bundle_*.zip"),
+                          key=lambda p: p.stat().st_mtime, reverse=True)
+            if not zips:
+                # fallback: try any zip in output/
+                zips = sorted(OUT.glob("*.zip"),
+                              key=lambda p: p.stat().st_mtime, reverse=True)
+            if not zips:
+                QMessageBox.information(
+                    self, "No evidence zip yet",
+                    "No evidence_bundle_*.zip found in output/. Run the pipeline first — "
+                    "the bundle is written by Step 11 (evidence_bundle).")
+                return
+            target = zips[0]
+            self.status.showMessage(f"Revealing {target.name}")
+            if sys.platform.startswith("win"):
+                subprocess.Popen(["explorer", "/select,", str(target)])
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", "-R", str(target)])
+            else:
+                subprocess.Popen(["xdg-open", str(target.parent)])
+        except Exception as e:
+            _log_crash(f"Reveal evidence zip failed: {e}")
+            QMessageBox.warning(self, "Could not open", f"{type(e).__name__}: {e}")
+
+
         # Guard against Qt/WebEngine-driven close attempts while a run is live.
         if self.thread and self.thread.isRunning():
             resp = QMessageBox.question(
