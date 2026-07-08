@@ -1180,7 +1180,7 @@ class MacroRotationView(QWidget):
                       or (regime_tilt or {}).get("fii_regime") or "Unknown")
         ftone = {"Net_Buying": "green", "Net_Selling": "red", "Mixed": "amber"}.get(fii_reg, "dim")
         head = QHBoxLayout(); head.setSpacing(8)
-        head.addWidget(QLabel("Institutional flow (FII/DII + bulk deals)"))
+        head.addWidget(QLabel("Institutional flow (FII/DII + bulk deals)  ·  inspired by Fincept Terminal"))
         head.addWidget(_make_pill(f"FII: {fii_reg.replace('_',' ')}", ftone))
         head.addStretch()
         hw = QWidget(); hw.setLayout(head); self._v.addWidget(hw)
