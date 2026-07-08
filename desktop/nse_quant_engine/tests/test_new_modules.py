@@ -379,3 +379,115 @@ if __name__ == "__main__":
         if callable(fn) and getattr(fn, "__name__", "").startswith("test_"):
             fn()
     print("\nALL NEW-MODULE TESTS PASSED")
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Steps 10–13 tests
+# ────────────────────────────────────────────────────────────────────────────
+
+def _prices_frame(seed=11, n=200, syms=("A", "B", "C", "D", "E", "F", "^NSEI")):
+    dates = pd.bdate_range("2024-01-01", periods=n)
+    rng = np.random.default_rng(seed)
+    rows = []
+    for s in syms:
+        px = 100 * np.cumprod(1 + rng.normal(0.0005, 0.011, len(dates)))
+        for d, p in zip(dates, px):
+            rows.append({"Date": d, "Symbol": s, "Close": p, "Volume": 1000})
+    return pd.DataFrame(rows)
+
+
+def test_sector_context_enrich():
+    from core import sector_context as sc
+    top5 = pd.DataFrame({"Symbol": ["A", "B", "C"]})
+    fund = pd.DataFrame({"Symbol": ["A", "B", "C"],
+                         "Sector": ["Technology", "Banks", "Healthcare"]})
+    out = sc.enrich(top5, _prices_frame(), fund)
+    assert not out.empty
+    for c in ("Sector_RS_63D_%", "Peer_1", "Peer_Median_3M_Return_%"):
+        assert c in out.columns, c
+    assert (out["Sector"] == ["Technology", "Banks", "Healthcare"]).all()
+    _ok(f"sector context: peers={out['Peer_1'].tolist()}")
+
+
+def test_event_calendar_flags():
+    from core import event_calendar as ec
+    top5 = pd.DataFrame({"Symbol": ["A", "B", "C"]})
+    hz = pd.DataFrame({"Symbol": ["A", "B", "C"], "Rec_Horizon_Days": [10, 10, 10]})
+    today = pd.Timestamp("2026-07-08")
+    fund = pd.DataFrame({
+        "Symbol": ["A", "B", "C"],
+        "NextEarningsDate": [today + pd.Timedelta(days=5),
+                             today + pd.Timedelta(days=25),
+                             None],
+    })
+    out = ec.build(top5, hz, fund, as_of=today)
+    flags = dict(zip(out["Symbol"], out["Event_Risk_Flag"]))
+    assert flags["A"] == "In_Window", flags
+    assert flags["B"] == "Pre_Earnings", flags
+    assert flags["C"] == "Unknown", flags
+    _ok(f"event calendar: {flags}")
+
+
+def test_expected_value_top5_report():
+    from core import expected_value as ev
+    top5 = pd.DataFrame({"Symbol": ["A", "B"]})
+    backtest = pd.DataFrame([{
+        "Variant": "Style_Backtest_Top5_EW", "Hit_Rate": 0.60,
+        "AvgWin_%": 3.0, "AvgLoss_%": -2.0, "N_Rebalances": 20,
+    }])
+    hz = pd.DataFrame({"Symbol": ["A", "B"], "Downside_Vol_%": [1.2, 2.1]})
+    sizing = pd.DataFrame({"Symbol": ["A", "B"], "Weight_%": [55.0, 35.0]})
+    out = ev.top5_ev_report(top5, backtest, hz, sizing, kelly_cap_of_weight=0.25)
+    assert not out.empty
+    # EV = 0.6*3 - 0.4*2 = 1.0 (%)
+    assert abs(float(out["EV_%"].iloc[0]) - 1.0) < 0.01, out["EV_%"].tolist()
+    assert (out["EV_Sizing_Agree"] == "Yes").all()
+    assert out["Kelly_Fraction_Capped"].notna().all()
+    _ok(f"EV report: EV_%={out['EV_%'].tolist()}")
+
+
+def test_portfolio_validation_verdicts():
+    import tempfile, json as _j
+    from core import portfolio_validation as pv
+    tmp = Path(tempfile.mkdtemp()) / "output"
+    tmp.mkdir(parents=True)
+    # Ship path: no breaches
+    pd.DataFrame({"Symbol": ["A", "B"], "A": [1.0, 0.2], "B": [0.2, 1.0]}) \
+        .to_csv(tmp / "top5_corr_matrix.csv", index=False)
+    pd.DataFrame({"Symbol": ["A", "B"], "Weight_%": [50.0, 50.0],
+                  "Max_Loss_%_of_NAV": [1.0, 1.0]}) \
+        .to_csv(tmp / "top5_position_sizing.csv", index=False)
+    pd.DataFrame({"Symbol": ["A", "B"], "Sector": ["Tech", "Banks"]}) \
+        .to_csv(tmp / "top5_sector_context.csv", index=False)
+    pd.DataFrame([{"Variant": "Style_Backtest_Top5_EW", "Hit_Rate": 0.62}]) \
+        .to_csv(tmp / "backtest_scorecard.csv", index=False)
+    (tmp / "alpha_zoo_survivors.json").write_text(
+        _j.dumps([{"alpha": "a1"}, {"alpha": "a2"}, {"alpha": "a3"}]))
+    (tmp / "macro_context.json").write_text('{"regime":"NEUTRAL"}')
+    r = pv.validate_batch(tmp)
+    assert r["verdict"] == "Ship", r
+    # Downgrade path: RISK_OFF
+    (tmp / "macro_context.json").write_text('{"regime":"RISK_OFF"}')
+    r2 = pv.validate_batch(tmp)
+    assert r2["verdict"] == "Downgrade_To_Watch", r2
+    _ok(f"portfolio validation: verdicts={r['verdict']} / {r2['verdict']}")
+
+
+def test_bundle_includes_new_files():
+    import inspect
+    from core import evidence_bundle as eb
+    src = inspect.getsource(eb)
+    for req in ("top5_sector_context.csv", "top5_events.csv",
+                "top5_expected_value.csv", "portfolio_validation.json"):
+        assert req in src, req
+    _ok("evidence bundle wires steps 10–13 files")
+
+
+if __name__ == "__main__":
+    # Run the Step 10–13 tests appended after the primary __main__ block above.
+    for _name in ("test_sector_context_enrich", "test_event_calendar_flags",
+                  "test_expected_value_top5_report",
+                  "test_portfolio_validation_verdicts",
+                  "test_bundle_includes_new_files"):
+        globals()[_name]()
+    print("ALL STEP 10–13 TESTS PASSED")

@@ -25,6 +25,10 @@ _CANDIDATE_FILES = [
     "top5_corr_matrix.csv",
     "top5_fundamentals.csv",
     "top5_position_sizing.csv",
+    "top5_sector_context.csv",
+    "top5_events.csv",
+    "top5_expected_value.csv",
+    "portfolio_validation.json",
     "alpha_zoo_ic_report.csv",
     "alpha_zoo_survivors.json",
     "macro_context.json",
@@ -82,6 +86,9 @@ def build_evidence_json(output_dir: Path, top5: pd.DataFrame) -> dict:
     bench = _read("top5_benchmark_stats.csv")
     fund = _read("top5_fundamentals.csv")
     sizing = _read("top5_position_sizing.csv")
+    sector = _read("top5_sector_context.csv")
+    events = _read("top5_events.csv")
+    ev_report = _read("top5_expected_value.csv")
 
     macro = {}
     mp = output_dir / "macro_context.json"
@@ -98,6 +105,14 @@ def build_evidence_json(output_dir: Path, top5: pd.DataFrame) -> dict:
             survivors = json.loads(sp.read_text(encoding="utf-8"))
         except Exception:
             survivors = {}
+
+    portfolio_val = {}
+    pv = output_dir / "portfolio_validation.json"
+    if pv.exists():
+        try:
+            portfolio_val = json.loads(pv.read_text(encoding="utf-8"))
+        except Exception:
+            portfolio_val = {}
 
     picks = []
     for _, r in top5.iterrows():
@@ -121,6 +136,9 @@ def build_evidence_json(output_dir: Path, top5: pd.DataFrame) -> dict:
             "benchmark_stats": _row_lookup(bench, sym),
             "fundamentals": _row_lookup(fund, sym),
             "sizing": _row_lookup(sizing, sym),
+            "sector_context": _row_lookup(sector, sym),
+            "event_calendar": _row_lookup(events, sym),
+            "expected_value": _row_lookup(ev_report, sym),
             "key_risk": r.get("Key_Risk"),
         })
 
@@ -128,6 +146,7 @@ def build_evidence_json(output_dir: Path, top5: pd.DataFrame) -> dict:
         "as_of": datetime.now().isoformat(timespec="seconds"),
         "macro_context": macro,
         "alpha_zoo_survivors": survivors,
+        "portfolio_validation": portfolio_val,
         "picks": picks,
     }
 
@@ -136,7 +155,7 @@ def build_manifest(output_dir: Path, included: list[str],
                    config_snapshot: Optional[dict]) -> dict:
     return {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
-        "engine_version": "insight-engine v4 + steps 1-9",
+        "engine_version": "insight-engine v4 + steps 1-13",
         "included_files": included,
         "missing_files": [f for f in _CANDIDATE_FILES if f not in included],
         "config_snapshot": config_snapshot or {},
