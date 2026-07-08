@@ -37,6 +37,21 @@ Steps 3–16 in one shot; Steps 1–2 always run.
 All outputs land in `output/`. Steps 7–16 are automatically packaged into the
 zip bundle for the LLM handoff.
 
+## Inspiration provenance
+
+Concepts borrowed from the two reference repos and where they live now (see
+`INSPIRATION_MAP.md` for the full mapping and how to activate each one):
+
+- **Fincept Terminal** → Steps 4, 10, 11, 14 (macro regime, sector/peer desk,
+  event calendar, FII/DII + bulk-deals institutional flow).
+- **Vibe Trading** → Steps 5, 8, 9, 12, 13, 15, 16 (alpha zoo IC gating,
+  risk-parity sizing, walk-forward backtest, EV/Kelly, portfolio ship-gate,
+  regime-conditional alpha tilt, turnover-vs-cost rebalance diff).
+- **Both** → Step 7 (portable evidence bundle + baked LLM prompt).
+
+Terminal log lines for these steps are prefixed `[fincept]` or `[vibe]` so
+each run makes the provenance visible.
+
 ## AI handoff (offline)
 
 The script never calls an LLM. Instead, at the end of every run it produces:

@@ -27,3 +27,19 @@ This is a screener that, once validated, can tell you whether your ranking beats
 a benchmark after costs. It is not — and cannot be — a low-risk/high-profit/
 short-hold oracle. The validation layer's most valuable possible answer is
 sometimes "No Proven Edge Yet." Believe it when it says so.
+
+## Credits & inspiration
+
+Professional-desk features (macro regime, sector/peer context, event calendar,
+FII/DII + bulk-deals institutional flow, multi-alpha IC survivorship, walk-
+forward backtest, EV/Kelly, portfolio ship-gate, regime-conditional alpha
+tilt, turnover-vs-cost rebalance diff, portable LLM evidence bundle) were
+inspired by two open-source projects:
+
+- **Fincept Terminal** — https://github.com/Fincept-Corporation/FinceptTerminal
+- **Vibe Trading** — https://github.com/HKUDS/Vibe-Trading
+
+None of their code is bundled. See `INSPIRATION_MAP.md` for the concept →
+module → artifact → activation table, and `WORKFLOW.md` for the full 16-step
+pipeline. Terminal log lines for borrowed steps are prefixed `[fincept]` or
+`[vibe]` so each run makes the provenance visible.

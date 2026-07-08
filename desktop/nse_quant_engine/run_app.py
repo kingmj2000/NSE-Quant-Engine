@@ -532,10 +532,31 @@ class Dashboard(QWidget):
         for i, (title, value, tone, subtitle) in enumerate(cards):
             self.grid.addWidget(_make_kpi_card(title, value, tone, subtitle), i // 4, i % 4)
 
+        # Activation checklist for optional inputs (drives Fincept/Vibe overlays)
+        checklist = [
+            ("data/fii_dii_daily.csv",   "FII/DII flow (Step 14, Fincept)"),
+            ("data/bulk_deals.csv",      "Bulk deals (Step 14, Fincept)"),
+            ("data/fundamentals_latest.csv", "Fundamentals overlay (Step 6)"),
+            ("data/earnings_calendar.csv",   "Earnings calendar (Step 11, Fincept)"),
+        ]
+        chk_head = QLabel("Overlay activation · drop optional CSVs into data/ to light these up")
+        chk_head.setObjectName("Sub"); chk_head.setWordWrap(True)
+        chk_head.setStyleSheet("font-size:11px;letter-spacing:1px;text-transform:uppercase;margin-top:10px;")
+        self.grid.addWidget(chk_head, (len(cards) + 3) // 4, 0, 1, 4)
+        base_row = (len(cards) + 3) // 4 + 1
+        for i, (rel, label) in enumerate(checklist):
+            present = (BASE / rel).exists()
+            mark = "✅" if present else "⚠️"
+            tone = "green" if present else "amber"
+            sub  = "present" if present else "missing — overlay will run quiet"
+            self.grid.addWidget(_make_kpi_card(f"{mark}  {label}", rel, tone, sub),
+                                base_row + i // 4, i % 4)
+
         html = self._html_path()
         complete = manifest.get("completed_at") or "latest artifacts"
         self.note.setText(
-            f"Last completed: {complete}. Interactive dashboard file: {html if html.exists() else 'not generated yet'}."
+            f"Last completed: {complete}. Interactive dashboard file: {html if html.exists() else 'not generated yet'}. "
+            f"See INSPIRATION_MAP.md for what Fincept Terminal / Vibe Trading concepts each overlay borrows."
         )
 
 
@@ -1108,7 +1129,7 @@ class PortfolioView(QWidget):
         self._v.addWidget(vcard)
 
         # --- Sizing (Step 8) ---
-        self._v.addWidget(_section_header("Position sizing · top5_sizing.csv"))
+        self._v.addWidget(_section_header("Position sizing · top5_sizing.csv  ·  inspired by Vibe Trading"))
         if sizing_df is None or sizing_df.empty:
             self._v.addWidget(_empty_card("No sizing output — Step 8 did not produce top5_sizing.csv.", "amber"))
         else:
@@ -1118,14 +1139,14 @@ class PortfolioView(QWidget):
             self._v.addWidget(_table_card(sizing_df[cols] if cols else sizing_df, "teal"))
 
         # --- Sector & Peers (Step 12) ---
-        self._v.addWidget(_section_header("Sector & peer context · top5_sector_context.csv"))
+        self._v.addWidget(_section_header("Sector & peer context · top5_sector_context.csv  ·  inspired by Fincept Terminal"))
         if sector_df is None or sector_df.empty:
             self._v.addWidget(_empty_card("No sector context available.", "amber"))
         else:
             self._v.addWidget(_table_card(sector_df, "violet"))
 
         # --- Events + EV merged (Steps 12/13) ---
-        self._v.addWidget(_section_header("Event risk & expected value · top5_event_calendar.csv + top5_expected_value.csv"))
+        self._v.addWidget(_section_header("Event risk & expected value · top5_event_calendar.csv + top5_expected_value.csv  ·  inspired by Fincept Terminal + Vibe Trading"))
         merged = pd.DataFrame()
         if events_df is not None and not events_df.empty and ev_df is not None and not ev_df.empty:
             try:
@@ -1180,7 +1201,7 @@ class MacroRotationView(QWidget):
                       or (regime_tilt or {}).get("fii_regime") or "Unknown")
         ftone = {"Net_Buying": "green", "Net_Selling": "red", "Mixed": "amber"}.get(fii_reg, "dim")
         head = QHBoxLayout(); head.setSpacing(8)
-        head.addWidget(QLabel("Institutional flow (FII/DII + bulk deals)"))
+        head.addWidget(QLabel("Institutional flow (FII/DII + bulk deals)  ·  inspired by Fincept Terminal"))
         head.addWidget(_make_pill(f"FII: {fii_reg.replace('_',' ')}", ftone))
         head.addStretch()
         hw = QWidget(); hw.setLayout(head); self._v.addWidget(hw)
@@ -1192,7 +1213,7 @@ class MacroRotationView(QWidget):
             self._v.addWidget(_table_card(inst_df, "blue"))
 
         # --- Regime tilt (Step 15) ---
-        self._v.addWidget(_section_header("Regime tilt · regime_tilt_report.json"))
+        self._v.addWidget(_section_header("Regime tilt · regime_tilt_report.json  ·  inspired by Vibe Trading"))
         if not regime_tilt:
             self._v.addWidget(_empty_card("No regime tilt report yet.", "amber"))
         else:
@@ -1227,7 +1248,7 @@ class MacroRotationView(QWidget):
             self._v.addWidget(card)
 
         # --- Rebalance diff (Step 16) ---
-        self._v.addWidget(_section_header("Rebalance diff · rebalance_diff.json"))
+        self._v.addWidget(_section_header("Rebalance diff · rebalance_diff.json  ·  inspired by Vibe Trading"))
         if not rebalance:
             self._v.addWidget(_empty_card("No rebalance diff yet.", "amber"))
         else:
