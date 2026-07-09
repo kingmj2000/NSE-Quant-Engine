@@ -169,3 +169,105 @@ def promote_alphas(eval_df: pd.DataFrame,
             "hit_rate": float(r["hit_rate"]) if pd.notna(r["hit_rate"]) else None,
         })
     return out
+
+
+# ─── Residual-IC gate (Part A6 of the tightened plan) ───────────────────────
+
+def _rank_align(a: pd.Series, b: pd.Series) -> tuple[pd.Series, pd.Series]:
+    both = pd.concat([a, b], axis=1, join="inner").dropna()
+    if both.empty:
+        return pd.Series(dtype=float), pd.Series(dtype=float)
+    return both.iloc[:, 0].rank(), both.iloc[:, 1].rank()
+
+
+def residual_ic(candidate: pd.Series,
+                survivors: pd.DataFrame,
+                fwd_return: pd.Series) -> float:
+    """Spearman IC of candidate residual (after regressing on survivors) vs fwd.
+
+    All inputs indexed by Symbol for a single evaluation date. Candidates
+    that are near-linear combinations of survivors return near-zero
+    residual IC and get rejected.
+    """
+    if candidate is None or candidate.dropna().empty or fwd_return is None or fwd_return.dropna().empty:
+        return float("nan")
+    if survivors is None or survivors.empty:
+        # no survivors yet — residual IC == standalone IC
+        return _spearman_ic(candidate, fwd_return)
+    idx = candidate.dropna().index.intersection(survivors.dropna(how="all").index)
+    if len(idx) < 8:
+        return float("nan")
+    c = candidate.loc[idx].astype(float).to_numpy()
+    S = survivors.loc[idx].astype(float).fillna(0.0).to_numpy()
+    # OLS: residual = c - S β̂
+    try:
+        beta, *_ = np.linalg.lstsq(S, c, rcond=None)
+        resid = pd.Series(c - S @ beta, index=idx)
+    except Exception:
+        return float("nan")
+    return _spearman_ic(resid, fwd_return)
+
+
+def build_promotion_log(eval_df: pd.DataFrame,
+                        panels: dict,
+                        fwd: dict,
+                        min_ic: float,
+                        min_tstat: float,
+                        min_residual_ic: float) -> list[dict]:
+    """Combine standalone gate + residual-IC gate into a per-candidate log.
+
+    `panels` : {date: DataFrame(index=Symbol, cols=alphas)}, from evaluate_alphas.
+    `fwd`    : {horizon: DataFrame(index=Date, cols=Symbol)}.
+    Returns records ready to be written as `alpha_promotion_log.json`.
+    """
+    if eval_df is None or eval_df.empty:
+        return []
+    # Standalone survivors, keyed by (alpha, horizon).
+    survivors_pairs = {(r["alpha"], int(r["horizon"])) for r in promote_alphas(
+        eval_df, min_ic=min_ic, min_tstat=min_tstat)}
+    log: list[dict] = []
+    for _, r in eval_df.iterrows():
+        alpha_name = str(r["alpha"])
+        horizon = int(r["horizon"])
+        standalone_ic = float(r["mean_IC"]) if pd.notna(r["mean_IC"]) else float("nan")
+        standalone_t  = float(r["t_stat"])  if pd.notna(r["t_stat"])  else float("nan")
+
+        # compute mean residual IC across available eval dates
+        resid_ics: list[float] = []
+        for d, panel in (panels or {}).items():
+            if alpha_name not in panel.columns:
+                continue
+            survivor_cols = [a for (a, h) in survivors_pairs
+                             if h == horizon and a != alpha_name and a in panel.columns]
+            fwd_h = (fwd or {}).get(horizon)
+            if fwd_h is None or d not in fwd_h.index:
+                continue
+            r_ic = residual_ic(panel[alpha_name],
+                               panel[survivor_cols] if survivor_cols else pd.DataFrame(),
+                               fwd_h.loc[d])
+            if pd.notna(r_ic):
+                resid_ics.append(r_ic)
+        mean_resid = float(np.mean(resid_ics)) if resid_ics else float("nan")
+
+        standalone_pass = (pd.notna(standalone_ic) and abs(standalone_ic) >= min_ic
+                           and pd.notna(standalone_t) and abs(standalone_t) >= min_tstat)
+        residual_pass = pd.notna(mean_resid) and mean_resid >= float(min_residual_ic)
+
+        if standalone_pass and residual_pass:
+            decision, reason = "promote", "passed standalone + residual gates"
+        elif not standalone_pass:
+            decision, reason = "reject", "failed standalone IC or t-stat gate"
+        else:
+            decision, reason = "reject", ("residual IC below "
+                                          f"{min_residual_ic:.3f} — redundant with survivors")
+        log.append({
+            "alpha": alpha_name,
+            "horizon": horizon,
+            "standalone_ic":   None if pd.isna(standalone_ic) else round(standalone_ic, 4),
+            "standalone_tstat": None if pd.isna(standalone_t) else round(standalone_t, 3),
+            "residual_ic":     None if pd.isna(mean_resid) else round(mean_resid, 4),
+            "n_residual_dates": len(resid_ics),
+            "decision": decision,
+            "reason":   reason,
+        })
+    return log
