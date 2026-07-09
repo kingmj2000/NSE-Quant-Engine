@@ -1099,10 +1099,26 @@ canvas{margin-top:4px}
 
 <h1>NSE Quant Evidence Review</h1>
 <div class="sub">Daily run &middot; Generated __GENERATED__ &middot; expanded NSE stock universe / NSE ETFs &middot; cross-sectional validation report is the authority</div>
+<div class="upills" id="universePills"></div>
+
+<h2>Progress to a verdict</h2>
+<div class="glass g-violet panel">
+  <div class="progress-row">
+    <div class="vchip neutral" id="verdictChip">
+      <div class="vhead">Validation Verdict</div>
+      <div class="vtitle" id="vTitle">&mdash;</div>
+      <div class="vgloss" id="vGloss">&mdash;</div>
+      <div class="vsrc" id="vSource"></div>
+    </div>
+    <div class="pbwrap" id="progressBar"></div>
+    <div class="matbox" id="maturationBox"></div>
+  </div>
+</div>
 
 <div class="bottomline" id="bottomline"></div>
 
 <div class="banner" id="banner"></div>
+
 
 <div id="marketCtxWrap" style="display:none">
   <h2>Market context</h2>
