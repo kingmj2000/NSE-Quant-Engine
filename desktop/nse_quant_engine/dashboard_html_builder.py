@@ -358,23 +358,40 @@ def _payload() -> dict:
     alpha_survivors = _safe_read_json(OUT / "alpha_zoo_survivors.json")
 
     # --- verdict / banner ---
-    verdict = (val.get("verdict") or "Insufficient History")
-    grade = (val.get("evidence_grade") or "Insufficient Evidence")
+    # Verdict source order: structured JSON → markdown fallback → neutral chip.
+    # Missing sources must NEVER default to a positive verdict.
+    verdict_source = "unavailable"
+    verdict = None
+    grade = None
+    if (OUT / "validation_status.json").exists() and val:
+        verdict = val.get("verdict")
+        grade = val.get("evidence_grade")
+        if verdict:
+            verdict_source = "validation_status.json"
+    if not verdict:
+        md_verdict = _verdict_from_markdown(OUT / "cross_sectional_validation_report.md")
+        if md_verdict:
+            verdict = md_verdict
+            verdict_source = "cross_sectional_validation_report.md"
+    if not verdict:
+        verdict = "Verdict not yet available"
+        grade = grade or "Insufficient Evidence"
+
+    grade = grade or "Insufficient Evidence"
     stats = val.get("stats", {}) or {}
 
     rec = (cmp_.get("recommendation") or "REVIEW: continue running both")
     rec_low = rec.lower()
-    shadow_state = ("green" if "shadow leads" in rec_low or "switch to shadow" in rec_low
-                    else "red"   if "official still leads" in rec_low or "do not switch" in rec_low or verdict != "Validation Positive"
-                    else "amber")
 
     decision_use = "LIVE" if verdict == "Validation Positive" else "WATCHLIST ONLY"
+    # shadow_state is finalized below after the streak/history is read.
+    shadow_state = "amber"
     bottom_line = (
         f"<b>{decision_use}.</b> Validation is <b>{verdict}</b>. "
         f"All entry / stop / target levels below are mechanical reference levels, "
-        f"not recommendations. Shadow stays "
-        f"{'🟢 GREEN' if shadow_state=='green' else '🔴 RED' if shadow_state=='red' else '🟡 AMBER'}."
+        f"not recommendations."
     )
+
 
     # --- maturity metric cards (matured vs maturing) — filtered to 10-day slice ---
     matured = maturing = 0
