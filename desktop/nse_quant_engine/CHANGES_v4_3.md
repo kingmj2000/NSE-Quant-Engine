@@ -3,6 +3,19 @@
 Added between the last release and now. All changes are 100% local, no new
 pip deps, no runtime AI, no API keys.
 
+## Step 0.5 — Optional-data auto-fetchers (new)
+- `core/optional_data_fetchers.py`: pulls `fii_dii_daily.csv` (Moneycontrol),
+  `bulk_deals.csv` (NSE JSON), `fundamentals_latest.csv` (yfinance), and
+  `earnings_calendar.csv` (yfinance) at the start of every run.
+- Fails soft — a source outage never breaks the pipeline; last-good cache is
+  kept and the run continues with the overlay quiet.
+- Freshness cache: 24h for flow feeds, 7d for fundamentals/earnings. User-
+  dropped CSVs always win when newer.
+- Wired into `orchestrator.py` (Step 0.5 before universe_builder) and
+  `run_full_workflow.bat`; UI adds a **🔄 Refresh optional feeds now** button
+  and shows per-file freshness + row count on the dashboard.
+
+
 ## Step 6 — Fundamentals & Quality Overlay
 - `core/fundamentals_overlay.py`: z-score quality blend + Cheap/Fair/Expensive vs 3Y self-median + sector-median PE.
 - Report-only (`QUALITY_WEIGHT=0.0`) until IC review.
