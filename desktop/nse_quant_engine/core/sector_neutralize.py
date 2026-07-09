@@ -67,12 +67,13 @@ def neutralize(df: pd.DataFrame,
             if sizes.loc[g.index].iloc[0] < min_members:
                 continue
             neut.loc[g.index] = _zscore(neut.loc[g.index]).astype(float)
+        audit_cols[f"SectorZ_{col}"] = neut.copy()   # per-sector z (before universe rescale)
 
         # Universe-wide re-standardization keeps skipped-sector symbols
         # comparable to neutralized ones.
-        neut = _zscore(neut).astype(float)
-        out[col] = neut
-        audit_cols[f"Neutralized_{col}"] = neut
+        final = _zscore(neut).astype(float)
+        out[col] = final
+        audit_cols[f"Neutralized_{col}"] = final
 
     audit = pd.DataFrame(audit_cols)
     return out, audit
