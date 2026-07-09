@@ -474,29 +474,56 @@ def _payload() -> dict:
             if usable:
                 quintile_horizon = max(usable)
 
-    # --- shadow chip ---
+    # --- shadow chip (tightened four-gate) ---
     overlap = shadow_summary.get("top20_overlap_count")
     added = shadow_summary.get("v4_added_to_top20", []) or []
     dropped = shadow_summary.get("v4_dropped_from_top20", []) or []
     shadow_warnings = shadow_summary.get("warnings", []) or []
-    shadow_reason_bits = []
-    if verdict != "Validation Positive":
-        shadow_reason_bits.append("official validation is not positive (Green requires it)")
     veto_in_shadow = [s for s in added if _veto_symbol(s)]
+
+    shadow_history = _shadow_history_payload(OUT / "shadow_vs_official_history.csv")
+    min_streak = int(_cfg("SHADOW_GREEN_MIN_STREAK", 8))
+    min_matured_obs = int(_cfg("SHADOW_GREEN_MIN_MATURED_OBS",
+                               _cfg("CROSSVAL_MIN_EFFECTIVE_DATES", 6)))
+    lead_streak = int(shadow_history.get("consecutive_shadow_leads") or 0)
+    vpos_streak = int(shadow_history.get("consecutive_verdict_positive") or 0)
+    latest_obs = shadow_history.get("latest_shadow_matured_obs")
+    latest_obs_val = float(latest_obs) if latest_obs is not None else 0.0
+
+    failed_checks: list[str] = []
+    if verdict != "Validation Positive":
+        failed_checks.append("official verdict is not Validation Positive")
+    if lead_streak < min_streak:
+        failed_checks.append(f"only {lead_streak} consecutive shadow-lead run(s) — {min_streak} required")
+    if vpos_streak < min_streak:
+        failed_checks.append(f"only {vpos_streak} consecutive verdict-positive run(s) — {min_streak} required")
+    if latest_obs_val < min_matured_obs:
+        failed_checks.append(f"shadow matured-independent obs {latest_obs_val:.0f} — {min_matured_obs} required")
     if veto_in_shadow:
-        shadow_reason_bits.append(
+        failed_checks.append(
             f"shadow Top-20 pulls in governance-vetoed name(s): {', '.join(veto_in_shadow)}")
-    if not shadow_reason_bits:
-        shadow_reason_bits.append(rec)
+
+    if not failed_checks:
+        shadow_state = "green"
+    elif ("official still leads" in rec_low or "do not switch" in rec_low
+          or verdict == "Validation Negative"):
+        shadow_state = "red"
+    else:
+        shadow_state = "amber"
+
+    if shadow_state == "green":
+        shadow_reason = "Shadow leads matured EV/day and clears every green-gate check."
+    elif shadow_state == "red":
+        shadow_reason = "<b>Do not switch.</b> " + "; ".join(failed_checks or [rec]) + "."
+    else:
+        shadow_reason = "Green-gate checks not met: " + "; ".join(failed_checks) + "."
 
     shadow = {
         "state": shadow_state,
         "chip": ("🟢 GREEN" if shadow_state == "green"
                  else "🔴 RED" if shadow_state == "red" else "🟡 AMBER"),
-        "reason": "<b>Do not switch.</b> " + "; ".join(shadow_reason_bits) + "."
-                  if shadow_state == "red"
-                  else ("Shadow leads matured EV/day. " + rec) if shadow_state == "green"
-                  else rec,
+        "reason": shadow_reason,
+
         "overlap": overlap,
         "added": len(added),
         "dropped": len(dropped),
