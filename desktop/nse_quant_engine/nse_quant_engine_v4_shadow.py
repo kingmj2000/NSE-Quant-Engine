@@ -349,6 +349,10 @@ def main() -> None:
 
     summary = make_summary(old, out, warnings_out)
     write_outputs(out, summary)
+    try:
+        _run_adaptive_shadow()
+    except Exception as e:
+        print(f"adaptive shadow non-fatal: {e}")
 
     print("")
     print("Shadow mode complete. Official outputs were NOT overwritten.")
