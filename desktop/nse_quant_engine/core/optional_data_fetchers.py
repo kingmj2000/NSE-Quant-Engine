@@ -616,19 +616,232 @@ def fetch_earnings_calendar(data_dir: Path, base: Path, cap: int = 120,
 
 
 # =========================================================================
+# 5) Delivery % daily (NSE sec_bhavdata_full) — appended cache, fail-soft
+# =========================================================================
+def _bhavcopy_url(d: datetime) -> str:
+    # historical bhavcopy path — daily CSV with %DlyQtToTradedQty
+    return ("https://archives.nseindia.com/products/content/"
+            f"sec_bhavdata_full_{d.strftime('%d%m%Y')}.csv")
+
+
+def _fetch_delivery_pct_day(sess, d: datetime) -> pd.DataFrame:
+    url = _bhavcopy_url(d)
+    last_exc: BaseException | None = None
+    for attempt in range(2):
+        try:
+            r = sess.get(url, timeout=20, headers={"Referer": "https://www.nseindia.com/"})
+            if r.status_code == 404:
+                raise RuntimeError("404 (holiday / not yet published)")
+            if r.status_code >= 500:
+                raise RuntimeError(f"HTTP {r.status_code}")
+            r.raise_for_status()
+            df = pd.read_csv(io.StringIO(r.text))
+            df.columns = [str(c).strip() for c in df.columns]
+            cmap = {c.lower(): c for c in df.columns}
+            def pick(*names):
+                for n in names:
+                    for k, v in cmap.items():
+                        if n in k:
+                            return v
+                return None
+            sym_c   = pick("symbol")
+            ser_c   = pick("series")
+            date_c  = pick("date")
+            dely_c  = pick("dlyqttotradedqty", "deliv_qty%", "%dlyqt")
+            if not (sym_c and date_c and dely_c):
+                raise RuntimeError(f"bhavcopy: missing columns {list(df.columns)[:12]}")
+            out = pd.DataFrame({
+                "Date":   pd.to_datetime(df[date_c], errors="coerce", dayfirst=True),
+                "Symbol": df[sym_c].astype(str).str.strip(),
+                "Series": df[ser_c].astype(str).str.strip() if ser_c else "",
+                "Delivery_Pct": pd.to_numeric(
+                    df[dely_c].astype(str).str.replace("%", "").str.strip(),
+                    errors="coerce"),
+            }).dropna(subset=["Date", "Symbol", "Delivery_Pct"])
+            if ser_c:
+                out = out[out["Series"].isin(["EQ", "BE", ""])]
+            return out.drop(columns=["Series"], errors="ignore")
+        except Exception as e:
+            last_exc = e
+            time.sleep(2.0 * (attempt + 1))
+    raise RuntimeError(f"bhavcopy {d:%d-%m-%Y} failed after retry: {last_exc}")
+
+
+def fetch_delivery_pct(data_dir: Path, days: int = 5, keep_days: int = 365) -> bool:
+    """Append-only cache. A failed fetch NEVER wipes the existing CSV."""
+    target = data_dir / "delivery_pct_daily.csv"
+    if _is_fresh(target, FRESH_FLOW_HOURS):
+        _log(f"delivery_pct_daily.csv fresh (<{FRESH_FLOW_HOURS}h) — skipping fetch")
+        return True
+    sess = _requests_session()
+    _nse_warmup(sess)
+
+    collected: list[pd.DataFrame] = []
+    # walk back N calendar days; skip weekends (bhavcopy is trading-day only)
+    end = datetime.now()
+    for i in range(1, days + 1):
+        d = end - timedelta(days=i)
+        if d.weekday() >= 5:
+            continue
+        try:
+            df = _fetch_delivery_pct_day(sess, d)
+            if not df.empty:
+                collected.append(df)
+                _log(f"delivery% for {d:%Y-%m-%d}: {len(df)} rows")
+        except Exception as e:
+            _log(f"delivery% {d:%Y-%m-%d} skipped: {type(e).__name__}: {e}")
+            continue
+
+    if not collected:
+        _warn("delivery_pct (bhavcopy)", RuntimeError("no trading days fetched"))
+        return target.exists()
+
+    new_df = pd.concat(collected, ignore_index=True)
+    # append + dedupe on (Date, Symbol); NEVER wipe on read error
+    if target.exists():
+        try:
+            old = pd.read_csv(target)
+            merged = pd.concat([old, new_df], ignore_index=True)
+        except Exception:
+            merged = new_df
+    else:
+        merged = new_df
+    merged["Date"] = pd.to_datetime(merged["Date"], errors="coerce")
+    merged = merged.dropna(subset=["Date", "Symbol"])
+    merged = merged.drop_duplicates(subset=["Date", "Symbol"], keep="last")
+    cutoff = pd.Timestamp.now() - pd.Timedelta(days=keep_days)
+    merged = merged[merged["Date"] >= cutoff].sort_values(["Date", "Symbol"])
+    merged["Date"] = merged["Date"].dt.strftime("%Y-%m-%d")
+    data_dir.mkdir(parents=True, exist_ok=True)
+    merged.to_csv(target, index=False)
+    _log(f"delivery_pct_daily.csv refreshed ({len(merged)} rows in cache)")
+    return True
+
+
+# =========================================================================
+# 6) IV Rank daily (NSE option-chain-equities) — appended cache, fail-soft
+# =========================================================================
+def _iv_rank_from_option_chain(sess, symbol: str) -> float | None:
+    url = f"https://www.nseindia.com/api/option-chain-equities?symbol={symbol}"
+    last_exc: BaseException | None = None
+    for attempt in range(2):
+        try:
+            r = sess.get(url, timeout=15, headers={
+                "Accept": "application/json, text/plain, */*",
+                "Referer": f"https://www.nseindia.com/option-chain?symbol={symbol}",
+                "X-Requested-With": "XMLHttpRequest",
+            })
+            if r.status_code >= 500:
+                raise RuntimeError(f"HTTP {r.status_code}")
+            r.raise_for_status()
+            payload = r.json()
+            rec = (payload.get("records") or {})
+            underlying = float(rec.get("underlyingValue") or 0)
+            data = rec.get("data") or []
+            if underlying <= 0 or not data:
+                return None
+            # Pick ATM strike (closest to spot), take max IV of CE/PE.
+            atm = min(data, key=lambda row: abs(float(row.get("strikePrice", 0)) - underlying))
+            ce_iv = float(((atm.get("CE") or {}).get("impliedVolatility")) or 0)
+            pe_iv = float(((atm.get("PE") or {}).get("impliedVolatility")) or 0)
+            iv = max(ce_iv, pe_iv)
+            return iv if iv > 0 else None
+        except Exception as e:
+            last_exc = e
+            time.sleep(2.0 * (attempt + 1))
+    raise RuntimeError(f"option-chain {symbol} failed: {last_exc}")
+
+
+def _iv_rank_percentile(series: pd.Series, current: float, lookback: int = 252) -> float:
+    s = pd.to_numeric(series.tail(lookback), errors="coerce").dropna()
+    if s.empty:
+        return float("nan")
+    return float((s < current).mean() * 100.0)
+
+
+def fetch_iv_rank(data_dir: Path, base: Path, cap: int = 60,
+                  keep_days: int = 400) -> bool:
+    """Fetch today's ATM IV per shortlisted F&O name; append to cache.
+    A failed run NEVER wipes cached data.
+    """
+    target = data_dir / "iv_rank_daily.csv"
+    if _is_fresh(target, FRESH_FLOW_HOURS):
+        _log(f"iv_rank_daily.csv fresh (<{FRESH_FLOW_HOURS}h) — skipping fetch")
+        return True
+
+    symbols = _shortlist_symbols(base, cap=cap)
+    # bhavcopy symbols are NSE tickers without .NS suffix; strip if present
+    symbols = [s.replace(".NS", "").strip().upper() for s in symbols if s]
+    if not symbols:
+        _log("iv_rank: no shortlist yet — skipping")
+        return target.exists()
+
+    sess = _requests_session()
+    _nse_warmup(sess)
+
+    today = pd.Timestamp.now().normalize()
+    old = pd.DataFrame()
+    if target.exists():
+        try:
+            old = pd.read_csv(target)
+            old["Date"] = pd.to_datetime(old["Date"], errors="coerce")
+        except Exception:
+            old = pd.DataFrame()
+
+    rows: list[dict] = []
+    hit = miss = 0
+    for sym in symbols:
+        try:
+            iv = _iv_rank_from_option_chain(sess, sym)
+            if iv is None:
+                miss += 1
+                continue
+            hist = old[old["Symbol"].astype(str) == sym]["IV"] if not old.empty and "IV" in old.columns else pd.Series(dtype=float)
+            rank = _iv_rank_percentile(hist, iv)
+            rows.append({"Date": today.strftime("%Y-%m-%d"),
+                         "Symbol": sym, "IV": iv, "IV_Rank": rank})
+            hit += 1
+        except Exception as e:
+            miss += 1
+            _log(f"iv_rank {sym} failed: {type(e).__name__}: {e}")
+            continue
+        time.sleep(0.2)  # be polite to NSE
+
+    if not rows:
+        _warn("iv_rank (option-chain)",
+              RuntimeError(f"no symbols returned IV ({miss} misses)"))
+        return target.exists()
+
+    new_df = pd.DataFrame(rows)
+    merged = pd.concat([old, new_df], ignore_index=True) if not old.empty else new_df
+    merged["Date"] = pd.to_datetime(merged["Date"], errors="coerce")
+    merged = merged.dropna(subset=["Date", "Symbol"])
+    merged = merged.drop_duplicates(subset=["Date", "Symbol"], keep="last")
+    cutoff = pd.Timestamp.now() - pd.Timedelta(days=keep_days)
+    merged = merged[merged["Date"] >= cutoff].sort_values(["Date", "Symbol"])
+    merged["Date"] = merged["Date"].dt.strftime("%Y-%m-%d")
+    data_dir.mkdir(parents=True, exist_ok=True)
+    merged.to_csv(target, index=False)
+    _log(f"iv_rank_daily.csv refreshed (hit={hit} miss={miss}, {len(merged)} rows in cache)")
+    return True
+
+
+# =========================================================================
 # Top-level entry
 # =========================================================================
 def refresh_all(base: Path | None = None, only: Iterable[str] | None = None) -> dict:
     """Refresh whichever feeds are stale/missing.
 
-    only: optional subset of {'fii_dii', 'bulk_deals', 'fundamentals', 'earnings'}
+    only: optional subset of {'fii_dii', 'bulk_deals', 'fundamentals',
+                              'earnings', 'delivery_pct', 'iv_rank'}
     Returns a small status dict, never raises.
     """
     base = Path(base) if base else Path(__file__).resolve().parent.parent
     data_dir = base / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
     _log(f"refreshing optional overlay feeds into {data_dir}")
-    wanted = set(only) if only else {"fii_dii", "bulk_deals", "fundamentals", "earnings"}
+    wanted = set(only) if only else {"fii_dii", "bulk_deals", "fundamentals",
+                                     "earnings", "delivery_pct", "iv_rank"}
     status: dict[str, bool] = {}
     if "fii_dii" in wanted:
         status["fii_dii"] = fetch_fii_dii(data_dir)
@@ -638,6 +851,18 @@ def refresh_all(base: Path | None = None, only: Iterable[str] | None = None) -> 
         status["fundamentals"] = fetch_fundamentals(data_dir, base)
     if "earnings" in wanted:
         status["earnings"] = fetch_earnings_calendar(data_dir, base)
+    if "delivery_pct" in wanted:
+        try:
+            status["delivery_pct"] = fetch_delivery_pct(data_dir)
+        except Exception as e:
+            _warn("delivery_pct", e)
+            status["delivery_pct"] = (data_dir / "delivery_pct_daily.csv").exists()
+    if "iv_rank" in wanted:
+        try:
+            status["iv_rank"] = fetch_iv_rank(data_dir, base)
+        except Exception as e:
+            _warn("iv_rank", e)
+            status["iv_rank"] = (data_dir / "iv_rank_daily.csv").exists()
     ok = sum(1 for v in status.values() if v)
     _log(f"done — {ok}/{len(status)} feeds available (missing feeds keep the pipeline running quiet)")
     return status
