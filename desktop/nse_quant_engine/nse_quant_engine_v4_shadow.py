@@ -245,6 +245,60 @@ def write_outputs(df: pd.DataFrame, summary: dict) -> None:
     SUMMARY_JSON.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
 
+def _run_adaptive_shadow() -> None:
+    """Fit adaptive alpha weights (dormant by default). Always writes both
+    adaptive_weights_shadow.json AND adaptive_weights_log.json so the evidence
+    bundle has audit trail even when nothing changed."""
+    try:
+        from core import adaptive_weights as aw, config as C, validation_status as vs
+    except Exception as e:
+        print(f"adaptive shadow skipped (import): {e}")
+        return
+
+    baseline = getattr(C, "ALPHA_WEIGHTS", None) or {"momentum": 0.5, "quality": 0.3, "value": 0.2}
+    v_status = vs.read_status(OUTPUT_DIR / "validation_status.json")
+    n_eff = int(v_status.get("stats", {}).get("effective_validation_dates") or 0)
+
+    # Panel is optional; if forward_return_history is absent, fit will still
+    # gracefully record "dormant, insufficient effective history".
+    panel = pd.DataFrame()
+    fwd_path = OUTPUT_DIR / "forward_return_history.csv"
+    if fwd_path.exists():
+        try:
+            panel = pd.read_csv(fwd_path)
+            keep = [c for c in panel.columns if c in ("Signal_Date", "Net_Forward_Return")]
+            if "Signal_Date" in panel.columns:
+                panel = panel.rename(columns={"Signal_Date": "Date",
+                                              "Net_Forward_Return": "Fwd_Return"})
+        except Exception:
+            panel = pd.DataFrame()
+
+    log = aw.fit_adaptive_weights(
+        panel=panel,
+        baseline=baseline,
+        target_date=pd.Timestamp.now(),
+        horizon=int(getattr(C, "BACKTEST_HOLD_DAYS", 10)),
+        enabled=bool(getattr(C, "ADAPTIVE_ENABLED", False)),
+        n_effective_dates=n_eff,
+        min_dates=int(getattr(C, "ADAPTIVE_MIN_DATES", 60)),
+        validation_verdict=str(v_status.get("verdict", "")),
+        shrinkage_alpha=float(getattr(C, "ADAPTIVE_SHRINKAGE_ALPHA", 0.20)),
+        max_step=float(getattr(C, "ADAPTIVE_MAX_STEP", 0.05)),
+        max_total_drift=float(getattr(C, "ADAPTIVE_MAX_TOTAL_DRIFT", 0.30)),
+        ridge_alpha=float(getattr(C, "ADAPTIVE_RIDGE_ALPHA", 1.0)),
+    )
+    (OUTPUT_DIR / "adaptive_weights_log.json").write_text(
+        json.dumps(log, indent=2), encoding="utf-8")
+    (OUTPUT_DIR / "adaptive_weights_shadow.json").write_text(
+        json.dumps({"weights": log.get("shrunk_final") or log.get("baseline"),
+                    "dormant": log.get("dormant", True),
+                    "dormant_reason": log.get("dormant_reason")}, indent=2),
+        encoding="utf-8",
+    )
+    tag = "dormant" if log.get("dormant") else "active-shadow"
+    print(f"adaptive_weights: {tag} ({log.get('dormant_reason') or 'ok'})")
+
+
 def main() -> None:
     print("NSE Quant Engine - Stage 4.0 Shadow Scoring Runner")
     print("==================================================")
