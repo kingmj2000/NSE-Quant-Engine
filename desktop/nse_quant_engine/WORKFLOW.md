@@ -72,14 +72,26 @@ prompt. The model returns strict JSON with per-pick thesis, risks, event risk,
 institutional-flow confirmation, EV sanity check, batch verdict, and a
 rotate-vs-hold recommendation. No dependency on any hosted AI at runtime.
 
-## Optional local data files
+## Optional local data files (auto-fetched)
 
-Drop these into `data/` to activate Step 14 (institutional flow):
-- `fii_dii_daily.csv` — columns: `Date, FII_Net_INR_Cr, DII_Net_INR_Cr`
-- `bulk_deals.csv`   — columns: `Date, Symbol, Client, Buy_Sell, Qty, Price`
+The 4 optional overlay CSVs are **auto-refreshed at Step 0.5** of every run by
+`core/optional_data_fetchers.py`:
 
-Both are optional; missing files → `Institutional_Confirmation=Unknown`, pipeline
-unchanged.
+| File | Source | Schema |
+|---|---|---|
+| `data/fii_dii_daily.csv` | Moneycontrol FII/DII activity page | `Date, FII_Net_INR_Cr, DII_Net_INR_Cr` |
+| `data/bulk_deals.csv` | NSE historical bulk-deals JSON | `Date, Symbol, Client, Buy_Sell, Qty, Price` |
+| `data/fundamentals_latest.csv` | `yfinance.Ticker(...).info` | `Symbol, ROE_TTM, DebtToEquity, EPS_Growth_YoY, PE_TTM, PEG, ProfitMargin, PromoterPledgePct, PE_Self_Median_3Y` |
+| `data/earnings_calendar.csv` | `yfinance.Ticker(...).calendar` | `Symbol, Event_Date` |
+
+All fetchers fail soft — a public-source outage never breaks the pipeline;
+the last-good cache is kept and the matching overlay just runs quiet. Drop
+your own CSV in `data/` (Screener export, broker feed, etc.) to override the
+auto-fetch — user files always win when newer than the freshness window
+(24h for flows, 7d for fundamentals/earnings). Manual on-demand refresh is
+available from the dashboard's **🔄 Refresh optional feeds now** button.
+
+
 
 ## Kill switches (env vars)
 
