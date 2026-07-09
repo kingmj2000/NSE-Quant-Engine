@@ -1746,7 +1746,33 @@ document.getElementById("cards").innerHTML = (DATA.cards||[]).map(c=>`
     </div>${c.horizon.curve ? `<div class="sub" style="margin-top:4px;font-size:11px">Curve %: ${c.horizon.grid.map((h,i)=>`${h}d=${c.horizon.curve[i]==null?'—':c.horizon.curve[i]}`).join(' · ')}</div>` : ''}` : ''}
     ${c.sent ? `<div class="sub" style="margin-top:6px;font-size:11.5px">📰 ${c.sent.n} headlines · 🟢 ${c.sent.pos}% / 🔴 ${c.sent.neg}% · net=${fmt(c.sent.net,'',2)}</div>` : ''}
     <div class="flags">${(c.flags||[]).map(f=>`<div class="flag"><span class="fdot ${dotc[f[0]]||'d-dim'}"></span><b>${f[1]}:</b> ${f[2]}</div>`).join('')}</div>
+    ${c.plain ? `<div class="plain">${c.plain}</div>` : ''}
  </div>`).join("") || `<div class="glass panel"><div class="sub">No trade-plan output yet — run the pipeline.</div></div>`;
+
+// Plain-English summary card + permanent disclaimer panel — deterministic HTML built server-side.
+(function injectPlainLayer(){
+  const s = document.getElementById("plainSummary");
+  if (s && DATA.plain_summary_html) s.innerHTML = DATA.plain_summary_html;
+  const d = document.getElementById("plainDisclaimer");
+  if (d && DATA.plain_disclaimer_html) d.innerHTML = DATA.plain_disclaimer_html;
+})();
+
+// Also attach the plain-words line inside shadow-only cards.
+(function patchShadowUniquePlain(){
+  const host = document.getElementById("shadowUniqueCards");
+  if (!host) return;
+  const rows = DATA.shadow_unique_top5 || [];
+  const els = host.querySelectorAll(".card");
+  rows.forEach((c, i) => {
+    if (!c.plain) return;
+    const el = els[i]; if (!el) return;
+    const p = document.createElement("div");
+    p.className = "plain";
+    p.innerHTML = c.plain;
+    el.appendChild(p);
+  });
+})();
+
 
 // Correlation matrix tile
 (function renderCorr(){
