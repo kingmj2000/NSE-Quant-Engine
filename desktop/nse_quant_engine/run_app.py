@@ -1411,6 +1411,10 @@ class MainWindow(QMainWindow):
         self.tab_portfolio = PortfolioView()
         self.tab_macro = MacroRotationView()
         self.tabs.addTab(self.dashboard, "Dashboard")
+        # Embedded HTML dashboard (Chart.js) — only shown when WebEngine is available.
+        self.tab_html = HtmlDashboardView() if HAS_WEBENGINE else None
+        if self.tab_html is not None:
+            self.tabs.addTab(self.tab_html, "Dashboard (HTML)")
         for tab, name in [
             (self.tab_scores, "Scores"), (self.tab_shadow, "Shadow"),
             (self.tab_compare, "Compare"), (self.tab_dq, "DQ Report"),
