@@ -204,6 +204,77 @@ def alpha_close_over_ma50(df: pd.DataFrame) -> float:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Overlay alphas — cached time series keyed by (Date, Symbol). Loaded lazily
+# from data/*.csv the first time they're needed. Missing files => NaN alphas
+# (safe: evaluator will just not promote them). See core/optional_data_fetchers.
+# ─────────────────────────────────────────────────────────────────────────────
+_OVERLAY_CACHE: dict[str, pd.DataFrame] = {}
+
+
+def _overlay_wide(name: str, value_col: str, base_dir: pd.Series | None = None) -> pd.DataFrame:
+    """Return wide-format overlay (index=Date, columns=Symbol, values=value_col).
+    Cached in-process."""
+    if name in _OVERLAY_CACHE:
+        return _OVERLAY_CACHE[name]
+    try:
+        from pathlib import Path as _P
+        candidates = [
+            _P(__file__).resolve().parent.parent / "data" / f"{name}.csv",
+        ]
+        path = next((p for p in candidates if p.exists()), None)
+        if path is None:
+            _OVERLAY_CACHE[name] = pd.DataFrame()
+            return _OVERLAY_CACHE[name]
+        df = pd.read_csv(path)
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        df = df.dropna(subset=["Date", "Symbol", value_col])
+        wide = df.pivot_table(index="Date", columns="Symbol",
+                              values=value_col, aggfunc="last").sort_index()
+        _OVERLAY_CACHE[name] = wide
+        return wide
+    except Exception:
+        _OVERLAY_CACHE[name] = pd.DataFrame()
+        return _OVERLAY_CACHE[name]
+
+
+def _overlay_value_asof(name: str, value_col: str, symbol: str,
+                        asof: pd.Timestamp | None = None) -> float:
+    wide = _overlay_wide(name, value_col)
+    if wide.empty or symbol not in wide.columns:
+        return np.nan
+    ser = wide[symbol].dropna()
+    if ser.empty:
+        return np.nan
+    if asof is not None:
+        ser = ser[ser.index <= asof]
+        if ser.empty:
+            return np.nan
+    return float(ser.iloc[-1])
+
+
+def alpha_delivery_momentum(df: pd.DataFrame) -> float:
+    """5d mean delivery% minus 20d mean delivery%.  Reads cached NSE bhavcopy."""
+    sym = str(df["Symbol"].iloc[-1]) if "Symbol" in df.columns and not df.empty else None
+    if not sym:
+        return np.nan
+    wide = _overlay_wide("delivery_pct_daily", "Delivery_Pct")
+    if wide.empty or sym not in wide.columns:
+        return np.nan
+    ser = wide[sym].dropna()
+    if len(ser) < 20:
+        return np.nan
+    return float(ser.tail(5).mean() - ser.tail(20).mean())
+
+
+def alpha_iv_rank(df: pd.DataFrame) -> float:
+    """Latest IV_Rank from cached NSE option-chain daily snapshot."""
+    sym = str(df["Symbol"].iloc[-1]) if "Symbol" in df.columns and not df.empty else None
+    if not sym:
+        return np.nan
+    return _overlay_value_asof("iv_rank_daily", "IV_Rank", sym)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # registry + top-level compute
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -223,6 +294,9 @@ ALPHAS: dict[str, Callable[[pd.DataFrame], float]] = {
     "quiet_uptrend":       alpha_quiet_uptrend,
     "volume_surge":        alpha_volume_surge,
     "close_over_ma50":     alpha_close_over_ma50,
+    # Candidate overlay alphas — gated by alpha_evaluator + residual-IC check.
+    "delivery_momentum":   alpha_delivery_momentum,
+    "iv_rank":             alpha_iv_rank,
 }
 
 
