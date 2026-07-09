@@ -590,8 +590,8 @@ def test_sector_neutralize_zero_mean_and_skips():
         rows.append({"Symbol": s, "Sector": "FMCG", "raw": 100 + i})
     df = pd.DataFrame(rows)
     out, audit = sn.neutralize(df, ["raw"], "Sector", min_members=5)
-    tech = out[out["Sector"] == "TECH"]["raw"].astype(float)
-    assert abs(tech.mean()) < 1e-6, tech.mean()
+    tech_sz = audit[audit["Sector"] == "TECH"]["SectorZ_raw"].astype(float)
+    assert abs(tech_sz.mean()) < 1e-6, tech_sz.mean()
     fmcg_skipped = audit[audit["Sector"] == "FMCG"]["Skipped"].iloc[0]
     assert bool(fmcg_skipped) is True
     _ok("sector_neutralize zero-mean per sector + skip small sectors")
