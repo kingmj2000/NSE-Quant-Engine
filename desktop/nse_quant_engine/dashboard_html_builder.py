@@ -1235,18 +1235,75 @@ const num = v => (v===null||v===undefined) ? "&mdash;" : Number(v).toLocaleStrin
 // bottom line + banner
 document.getElementById("bottomline").innerHTML = DATA.bottom_line;
 const vClass = DATA.verdict==="Validation Positive" ? "green"
-              : DATA.verdict.startsWith("Insufficient") ? "" : "amber";
+              : DATA.verdict==="Validation Negative" ? "amber"
+              : (DATA.verdict||"").startsWith("Insufficient") ? "" : "amber";
 document.getElementById("banner").innerHTML = `
  <div class="verdict ${vClass}">
    <div style="font-size:10.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.6px">Validation Verdict</div>
    <div class="v">${DATA.verdict}</div>
    <div style="font-size:12px;color:var(--muted);margin-top:2px">Evidence grade: ${DATA.grade}</div>
    <div class="pillrow">
-     <span class="pill"><b>${num(DATA.signal_count)}</b> signals maturing</span>
      <span class="pill">Market regime: <b>${DATA.regime}</b></span>
      <span class="pill">Mode: <b>${DATA.decision_use}</b></span>
    </div>
  </div>`;
+
+// ─── Progress to a verdict ────────────────────────────────────────────────
+(function renderProgress(){
+  const p = DATA.progress || {};
+  const state = p.state || "neutral";
+  const chip = document.getElementById("verdictChip");
+  chip.className = "vchip " + state;
+  document.getElementById("vTitle").textContent = p.verdict || "Verdict not yet available";
+  document.getElementById("vGloss").textContent = p.gloss || "";
+  const src = p.source && p.source !== "unavailable"
+    ? "Source: " + p.source
+    : "Source: not yet available";
+  document.getElementById("vSource").textContent = src;
+
+  // Progress bar (effective → CROSSVAL_MIN_EFFECTIVE_DATES, with adaptive tick)
+  const now = (p.effective_now==null) ? 0 : Number(p.effective_now);
+  const tgt = Math.max(1, Number(p.effective_target || 1));
+  const pct = Math.max(2, Math.min(100, Math.round(now / tgt * 100)));
+  const cls = now >= tgt ? "" : (now >= tgt * 0.5 ? "mid" : "low");
+  const tickPct = Math.min(100, Math.round(Number(p.adaptive_tick || 0) / tgt * 100));
+  const tickHtml = tickPct > 0 && tickPct <= 100
+    ? `<span class="pbtick" style="left:${tickPct}%" data-label="adaptive-weighting (${p.adaptive_tick})"></span>`
+    : "";
+  const rawTxt = (p.raw_now==null)
+    ? `raw dates: not yet available`
+    : `${p.raw_now} / ${p.raw_target} raw dates${Number(p.raw_now) >= p.raw_target ? " — clears breadth floor" : ""}`;
+  document.getElementById("progressBar").innerHTML = `
+    <div class="pblab">Effective validation dates</div>
+    <div class="pbcount">${p.effective_now==null ? '&mdash;' : Number(p.effective_now).toFixed(1)} / ${p.effective_target}</div>
+    <div class="pbbar"><div class="pbfill ${cls}" style="width:${pct}%"></div>${tickHtml}</div>
+    <div class="pbraw">${rawTxt}</div>
+    <div class="pbfoot">Verdict requires &ge; ${p.effective_target} effective dates plus spread, t-stat, and bootstrap gates. Adaptive weighting is a separate downstream gate — see tick.</div>`;
+
+  // Maturation summary + delta chip
+  let deltaHtml = "";
+  if (p.delta_matured !== null && p.delta_matured !== undefined) {
+    const d = Number(p.delta_matured);
+    if (d > 0) deltaHtml = `<span class="matdelta up">&#9650; +${d} since prior run</span>`;
+    else if (d < 0) deltaHtml = `<span class="matdelta down">&#9660; ${d} since prior run</span>`;
+    else deltaHtml = `<span class="matdelta flat">flat since prior run</span>`;
+  }
+  document.getElementById("maturationBox").innerHTML = `
+    <div class="pblab">Signal maturation (10-day)</div>
+    <div class="matline">Matured <b>${num(p.matured)}</b> &middot; Awaiting <b>${num(p.maturing)}</b></div>
+    <div class="matline">Total <b>${num(p.total)}</b></div>
+    ${deltaHtml}`;
+})();
+
+// Universe pill strip in the header (donut removed).
+(function renderUniversePills(){
+  const uni = DATA.universe || {};
+  const keys = Object.keys(uni);
+  if (!keys.length) return;
+  const el = document.getElementById("universePills");
+  el.innerHTML = keys.map(k => `<span class="upill">${k} &middot; <b>${uni[k]}</b></span>`).join("");
+})();
+
 
 // Readiness meter — replaces the 5D-vs-10D evidence tile row with a
 // horizontal progress-bar visual driven by the 10-day validation stats.
