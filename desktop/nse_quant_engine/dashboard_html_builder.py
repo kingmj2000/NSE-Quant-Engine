@@ -1325,6 +1325,9 @@ canvas{margin-top:4px}
 <div class="sub">Daily run &middot; Generated __GENERATED__ &middot; expanded NSE stock universe / NSE ETFs &middot; cross-sectional validation report is the authority</div>
 <div class="upills" id="universePills"></div>
 
+<div id="plainSummary"></div>
+
+
 <h2>Progress to a verdict</h2>
 <div class="glass g-violet panel">
   <div class="progress-row">
