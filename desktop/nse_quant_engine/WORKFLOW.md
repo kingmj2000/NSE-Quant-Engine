@@ -104,3 +104,31 @@ available from the dashboard's **🔄 Refresh optional feeds now** button.
 | `BACKTEST_STALE_DAYS` | 7 | Skips backtest if last one is younger |
 
 See `core/config.py` for the full list.
+
+
+## v4.4 workflow additions
+
+Every run now:
+1. `optional_data_fetchers.refresh_all()` also refreshes
+   `data/delivery_pct_daily.csv` and `data/iv_rank_daily.csv` (append-only).
+2. `alpha_zoo.compute_alpha_zoo()` produces `delivery_momentum` and
+   `iv_rank` alongside the price-only alphas.
+3. `alpha_evaluator` runs walk-forward IC + t-stat per candidate AND a
+   residual-IC check against current survivors. Both metrics are recorded
+   in `output/alpha_promotion_log.json`.
+4. `alpha_weighting.compute_weights()` blends survivor IC with turnover
+   from `rebalance_diff.json` history → `output/alpha_weights_current.json`.
+5. `scoring` applies sector-neutralization (`SECTOR_NEUTRAL=1`, default)
+   for sectors with ≥ `SECTOR_NEUTRAL_MIN_MEMBERS` members; smaller
+   sectors are logged as `Skipped` in
+   `output/scoring_sector_neutralization.csv`.
+6. `cross_sectional_validation` applies **Bayesian shrinkage** to the
+   hit-rate and IC-like stats before the ship/hold gate; raw values are
+   preserved as `*_raw` keys in `validation_status.json`.
+7. `nse_quant_engine_v4_shadow._run_adaptive_shadow()` always runs and
+   always writes `adaptive_weights_log.json` +
+   `adaptive_weights_shadow.json`. With `ADAPTIVE_ENABLED=False`
+   (default) the log records `dormant: true` with a precise reason.
+
+Env flag to enable the adaptive shadow: set `ADAPTIVE_ENABLED=1`. The
+primary engine remains untouched regardless.
