@@ -1295,7 +1295,30 @@ canvas{margin-top:4px}
 .aznew{display:inline-block;font-size:9.5px;font-weight:700;padding:1px 7px;border-radius:5px;background:var(--teal-bg);color:var(--teal);margin-left:6px;letter-spacing:.3px}
 
 
+
+/* Plain-English layer — top summary card, per-card sub-line, disclaimer, glossary tooltips */
+.plain-summary{margin:6px 0 14px}
+.plain-summary .ps-head{font-size:10.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px}
+.plain-summary .ps-body{font-size:14.5px;line-height:1.55;color:var(--txt)}
+.plain-summary .ps-sub{font-size:11px;color:var(--muted);margin-top:8px}
+.plain{font-size:12px;color:var(--muted);margin-top:10px;padding:8px 10px;border-radius:8px;
+  background:rgba(255,255,255,0.03);border:1px dashed var(--line2);line-height:1.5}
+.plain-disclaimer{margin:22px 0 6px}
+.plain-disclaimer .pd-head{font-size:14px;font-weight:700;color:var(--amber);margin-bottom:8px}
+.plain-disclaimer ul{margin:0 0 6px 20px;padding:0;color:var(--txt);font-size:13px;line-height:1.6}
+.plain-disclaimer ul li{margin:3px 0}
+.plain-disclaimer .pd-sub{font-size:11px;color:var(--muted);margin-top:8px}
+.gloss{position:relative;border-bottom:1px dotted var(--muted);cursor:help;outline:none}
+.gloss:focus,.gloss:focus-within{border-bottom-color:var(--teal)}
+.gloss .tt{position:absolute;left:50%;bottom:calc(100% + 6px);transform:translateX(-50%);
+  min-width:200px;max-width:280px;background:rgba(14,16,26,0.97);color:var(--txt);
+  border:1px solid var(--line2);border-radius:8px;padding:8px 10px;font-size:11.5px;
+  line-height:1.45;text-transform:none;letter-spacing:normal;font-weight:400;
+  box-shadow:0 8px 24px -8px rgba(0,0,0,0.7);opacity:0;pointer-events:none;
+  transition:opacity .12s ease;z-index:50;white-space:normal}
+.gloss:hover .tt,.gloss:focus .tt,.gloss:focus-within .tt,.gloss:active .tt{opacity:1;pointer-events:auto}
 </style></head>
+
 <body>
 
 <h1>NSE Quant Evidence Review</h1>
