@@ -1,59 +1,60 @@
+## Problem
 
-## Goal
+Two of the four auto-fetchers are failing on every run:
 
-Kill the manual CSV drops. Add auto-fetchers so `data/fii_dii_daily.csv`, `data/bulk_deals.csv`, `data/fundamentals_latest.csv`, and `data/earnings_calendar.csv` are populated at the start of every pipeline run from free public sources — same schemas the existing overlays already read, so no downstream code changes.
+1. **FII/DII (Moneycontrol)** — `pandas.read_html` needs a parser. Behind the scenes it tries `lxml` first, but on this Windows install pandas is falling through to `html5lib` and raising `ImportError: Missing optional dependency 'html5lib'`. Root cause: we never pass `flavor="lxml"` explicitly, and the Moneycontrol page has malformed markup that lxml rejects — pandas then asks for html5lib.
+2. **Bulk deals (NSE)** — the `nseindia.com/api/historical/bulk-deals` endpoint returns HTTP 503. NSE aggressively blocks non-browser clients from the cloud/office IP ranges and rate-limits repeat callers. A single cookie warm-up is not enough anymore.
 
-Design principle: **fail quiet, never break the pipeline.** If a source is down, we keep the last good cache and print a `[fetch]` warning. Overlays then run against whatever we have (possibly stale), and the activation checklist shows freshness (✅ fresh / 🟡 stale >7 days / ⚠ missing) instead of only present/missing.
+Both need a more robust fetch strategy with real fallbacks, not just "fail quiet".
 
-## New module: `core/optional_data_fetchers.py`
+## Fix
 
-One file, four independent functions, each ~40–80 lines. Called from `run_app.py` (and `run_full_workflow.bat`) as a new pre-step **Step 0.5** before universe build. Uses only libraries already in `requirements.txt` (`requests`, `pandas`, `beautifulsoup4`, `lxml`, `yfinance`).
+### 1. `core/optional_data_fetchers.py` — FII/DII
 
-| Function | Source | How | Notes |
-|---|---|---|---|
-| `fetch_fii_dii(data_dir, days=60)` | **NSDL** `https://www.fpi.nsdl.co.in/web/Reports/Yearwise.aspx` for FII, **Moneycontrol** `https://www.moneycontrol.com/stocks/marketstats/fii_dii_activity/index.php` as fallback for DII | `requests` + `pandas.read_html` / `BeautifulSoup` table parse, normalize to `Date, FII_Net_INR_Cr, DII_Net_INR_Cr` | Both are HTML tables, no API key. Merge with existing CSV, dedupe by Date, keep last 90 rows. |
-| `fetch_bulk_deals(data_dir, days=30)` | **NSE** `https://www.nseindia.com/api/historical/bulk-deals?from=DD-MM-YYYY&to=DD-MM-YYYY` (JSON) | `requests` with browser-like headers + cookie bootstrap (hit `nseindia.com` first to get cookies), map fields to `Date, Symbol, Client, Buy_Sell, Qty, Price` | NSE requires a cookie handshake — pattern is well known and used by many OSS projects. |
-| `fetch_fundamentals(data_dir, symbols)` | **yfinance** `Ticker.info` (already used by `fundamental_factor.py`) | Reuse `core.fundamental_factor.fetch_fundamentals`, but write output to `data/fundamentals_latest.csv` in the schema `fundamentals_overlay.py` expects (`Symbol, ROE_TTM, DebtToEquity, EPS_Growth_YoY, PE_TTM, PEG, ProfitMargin, PromoterPledgePct, PE_Self_Median_3Y`) — map `ROE→ROE_TTM`, `PE→PE_TTM`, `EarningsGrowth→EPS_Growth_YoY`. Missing fields stay NaN. | Only refetches symbols older than N days in the cache (default 7) so a full run stays under ~2 min for the top-500 shortlist. |
-| `fetch_earnings_calendar(data_dir, symbols)` | **yfinance** `Ticker.calendar` (returns next earnings date per ticker) | Loop the shortlist, collect `Symbol, Event_Date` where `Earnings Date` is present, write CSV | Free, no scraping. Only writes symbols that have a scheduled date within the next 90 days. |
+- Add `html5lib>=1.1` to `requirements.txt` so `pandas.read_html` always has a fallback parser (tiny pure-Python dep, no compile).
+- Rewrite `fetch_fii_dii` to try sources in order and return the first that yields a parseable table with rows in the last ~10 days:
+  1. **NSDL FPI daily** — `https://www.fpi.nsdl.co.in/web/Reports/Daily.aspx` (form POST for date range). Provides FII net; DII filled from source 2.
+  2. **Moneycontrol FII/DII activity** — same URL, but call `pd.read_html(text, flavor="lxml")` first, then `flavor="html5lib"` on `ValueError`, and `flavor="bs4"` last. Wrap in `try/except` per flavor.
+  3. **Trendlyne / Groww public FII-DII JSON** as final fallback (no key, browser UA).
+- Column detection stays heuristic (already handles multi-index headers).
+- Log which source succeeded: `[fetch] fii_dii via nsdl` / `via moneycontrol` / `via trendlyne`.
 
-Cache/staleness policy (per file):
-- Fresh (<24h for flows, <7d for fundamentals/earnings) → skip fetch.
-- Stale but present → refetch; on failure keep old file and mark 🟡.
-- Missing → attempt fetch; on failure leave missing and mark ⚠.
+### 2. `core/optional_data_fetchers.py` — Bulk deals
 
-All fetchers:
-- 10-second per-request timeout, single retry with backoff.
-- Wrapped in `try/except` — any exception logs `[fetch][warn] <source>: <msg>` and returns without raising.
-- Never delete an existing file.
+Replace the single NSE JSON call with a 3-tier strategy:
 
-## Wiring
+1. **NSE CSV report** — `https://archives.nseindia.com/content/equities/bulk.csv` (static daily CSV, mirrors the JSON, and does NOT require the cookie handshake). This is the reliable primary source most OSS libs use.
+2. **NSE JSON API** — keep current path as fallback, but with:
+   - proper cookie chain: hit `nseindia.com` → `market-data/live-equity-market` → the API, with `Referer` + `Sec-Fetch-*` headers.
+   - retry once after a 2s sleep on 5xx.
+3. **BSE bulk deals CSV** — `https://www.bseindia.com/markets/equity/EQReports/bulk_deals.aspx` for cross-exchange coverage (optional final fallback; NSE-only symbols will still map correctly).
 
-1. **`run_app.py`** — new "Refreshing optional data feeds…" phase before the universe build. Runs the four fetchers in sequence (they're I/O bound and fast). Emits progress lines to the existing log pane. Failure of any fetcher is non-fatal.
-2. **`orchestrator.py`** — same call at the top of the pipeline so CLI runs behave identically.
-3. **`run_full_workflow.bat`** — insert a `python -c "from core.optional_data_fetchers import refresh_all; refresh_all()"` line before `universe_builder.py`. Non-fatal (`if errorlevel 1` removed for this one step).
-4. **Activation checklist panel in `run_app.py`** — upgrade the ⚠/✅ badges to show file mtime and row count (e.g. `✅ fii_dii_daily.csv · 342 rows · updated 2h ago`), plus a "🔄 Refresh now" button that re-runs `refresh_all()` on demand without a full pipeline run.
-5. **`INSPIRATION_MAP.md`** and **`WORKFLOW.md`** — update "How to activate" column from "drop CSV" to "auto-fetched from <source>; manual override still supported by placing your own CSV in `data/`".
+Normalize all three to the existing `Date, Symbol, Client, Buy_Sell, Qty, Price` schema. The daily CSV only covers the current day, so we merge with the existing 60-day cache (already handled by `_merge_dated`).
 
-## Manual override preserved
+### 3. Small polish
 
-If the user drops their own file into `data/`, the fetcher sees it, respects freshness, and only refetches if stale. Broker/paid data (e.g. Screener Pro exports) will always win because the user's file is newer than the auto-fetch cache. No behavior lost.
+- Add `[fetch] fii_dii source attempted: <name>` warning line for each failed source, then final `[fetch][warn]` only if ALL sources fail — makes the log actionable instead of blaming one source.
+- Add unit-friendly small helper `_try_read_html(text)` that walks the flavor list.
+- No change to freshness windows, cache policy, pipeline wiring, or UI.
 
-## Risk & honest caveats
+### Files touched
 
-- **NSE/NSDL/Moneycontrol are unofficial scrapes.** They can change HTML any time. That's why every fetcher fails soft: pipeline continues, overlay just runs quiet, user sees a warning in the log. No new hard dependency.
-- **yfinance fundamentals coverage for NSE is patchy** (already documented in `fundamental_factor.py`). Auto-fetch doesn't fix that — it just automates what's available. The `fundamentals_overlay` `Fundamentals_Coverage` column already surfaces this per-symbol.
-- **Rate limits.** yfinance loop is throttled to `sleep=0.2s`. NSE endpoints use one request per session with a cookie warm-up.
-- No new dependencies. No API keys. Fully offline-friendly after first fetch (cache is reused for 24h/7d).
+- edit `desktop/nse_quant_engine/core/optional_data_fetchers.py` (rewrite `fetch_fii_dii` and `fetch_bulk_deals`, add helpers)
+- edit `desktop/nse_quant_engine/requirements.txt` (+ `html5lib>=1.1`)
+- edit `desktop/nse_quant_engine/CHANGES_v4_3.md` (note the fetcher hardening)
 
-## Files touched
+### Out of scope
 
-- **New**: `desktop/nse_quant_engine/core/optional_data_fetchers.py`
-- **Edit**: `desktop/nse_quant_engine/run_app.py` (Step 0.5 call, enhanced activation checklist, Refresh-now button)
-- **Edit**: `desktop/nse_quant_engine/orchestrator.py` (Step 0.5 call)
-- **Edit**: `desktop/nse_quant_engine/run_full_workflow.bat` (one extra line before universe build)
-- **Edit**: `desktop/nse_quant_engine/INSPIRATION_MAP.md`, `desktop/nse_quant_engine/WORKFLOW.md` (docs)
-- **Edit**: `desktop/nse_quant_engine/CHANGES_v4_3.md` (changelog entry)
+- No changes to the other 15 pipeline steps, UI, dashboard, or any scoring logic.
+- If NSE blocks the office IP entirely (corporate proxy / geo-block), even the archives CSV can 403 — in that case the pipeline still runs quiet with a clear log line, and the user can drop `data/bulk_deals.csv` manually as before.
 
-## Out of scope (kept from prior plan)
+### Verification
 
-- Part 2 (embedded `QWebEngineView` for dashboard HTML) proceeds as previously described in the same round: add PySide6-WebEngine to `setup_windows.bat` / `requirements.txt`, new **Dashboard** tab renders `output/dashboard_latest.html` in-app with a "Open in browser" fallback if WebEngine import fails.
+After the change, next run's log should show either:
+
+```
+[fetch] fii_dii via moneycontrol (32 rows)
+[fetch] bulk_deals via nse-archives (18 rows today, 412 in cache)
+```
+
+or, if a source is down, a specific `attempted → failed → next` chain instead of a single opaque error.
