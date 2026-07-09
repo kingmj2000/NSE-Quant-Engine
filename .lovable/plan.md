@@ -1,60 +1,60 @@
+# Fix FII/DII fetch by using NSE official endpoints
+
 ## Problem
+- Moneycontrol path fails because `html5lib` isn't installed in the user's env (they haven't re-run `setup_windows.bat`).
+- Groww fallback returns 502.
+- Result: `fii_dii_daily.csv` never refreshes.
 
-Two of the four auto-fetchers are failing on every run:
+User's ask: pull FII/DII directly from NSE India (official), which does publish this data for free.
 
-1. **FII/DII (Moneycontrol)** — `pandas.read_html` needs a parser. Behind the scenes it tries `lxml` first, but on this Windows install pandas is falling through to `html5lib` and raising `ImportError: Missing optional dependency 'html5lib'`. Root cause: we never pass `flavor="lxml"` explicitly, and the Moneycontrol page has malformed markup that lxml rejects — pandas then asks for html5lib.
-2. **Bulk deals (NSE)** — the `nseindia.com/api/historical/bulk-deals` endpoint returns HTTP 503. NSE aggressively blocks non-browser clients from the cloud/office IP ranges and rate-limits repeat callers. A single cookie warm-up is not enough anymore.
+## NSE endpoints we'll use (both free, no login)
 
-Both need a more robust fetch strategy with real fallbacks, not just "fail quiet".
+1. **Primary — NSE JSON API (today's provisional + previous day final):**
+   `https://www.nseindia.com/api/fiidiiTradeReact`
+   Returns a small JSON array with entries for `FII/FPI *` and `DII *` including `buyValue`, `sellValue`, `netValue`, `date`, `category`. Requires the same cookie-warmup handshake we already use for the bulk-deals API (hit `nseindia.com` homepage first, then the report page, then the API with `Referer` + `X-Requested-With`). Retry once on 5xx with a 2s backoff.
 
-## Fix
+2. **Secondary — NSE historical archives (fills gaps + backfill):**
+   `https://www.nseindia.com/api/historical/fiidiiTradeReact?from=DD-MM-YYYY&to=DD-MM-YYYY`
+   Same handshake. Returns up to ~90 days of history in one shot. Used to backfill when the local CSV is missing days.
 
-### 1. `core/optional_data_fetchers.py` — FII/DII
+3. **Tertiary — Moneycontrol** (keep existing, only reachable if `html5lib`/`lxml` present).
+4. **Quaternary — Groww JSON** (keep existing).
 
-- Add `html5lib>=1.1` to `requirements.txt` so `pandas.read_html` always has a fallback parser (tiny pure-Python dep, no compile).
-- Rewrite `fetch_fii_dii` to try sources in order and return the first that yields a parseable table with rows in the last ~10 days:
-  1. **NSDL FPI daily** — `https://www.fpi.nsdl.co.in/web/Reports/Daily.aspx` (form POST for date range). Provides FII net; DII filled from source 2.
-  2. **Moneycontrol FII/DII activity** — same URL, but call `pd.read_html(text, flavor="lxml")` first, then `flavor="html5lib"` on `ValueError`, and `flavor="bs4"` last. Wrap in `try/except` per flavor.
-  3. **Trendlyne / Groww public FII-DII JSON** as final fallback (no key, browser UA).
-- Column detection stays heuristic (already handles multi-index headers).
-- Log which source succeeded: `[fetch] fii_dii via nsdl` / `via moneycontrol` / `via trendlyne`.
+## Code changes (only `core/optional_data_fetchers.py` + `requirements.txt` housekeeping)
 
-### 2. `core/optional_data_fetchers.py` — Bulk deals
+### `core/optional_data_fetchers.py`
+- Add helper `_nse_warmup(sess)` that hits homepage → market-data page → FII/DII report page, matching the pattern already in `_bulk_from_nse_api`. Reuse it for both bulk-deals and FII/DII to avoid duplication.
+- Add `_fii_dii_from_nse_api(sess)`:
+  - warm up cookies
+  - GET `/api/fiidiiTradeReact` with proper headers, retry once on 5xx
+  - Parse JSON list; group by `date`; sum FII rows (`FII/FPI *`) and DII rows (`DII *`) `netValue` into `FII_Net_INR_Cr` / `DII_Net_INR_Cr`
+  - Return normalized DataFrame `Date, FII_Net_INR_Cr, DII_Net_INR_Cr`
+- Add `_fii_dii_from_nse_archive(sess, days=90)`:
+  - warm up cookies
+  - GET `/api/historical/fiidiiTradeReact?from=...&to=...`
+  - Same normalization; used to backfill history in one shot
+- Update `fetch_fii_dii` source order to:
+  1. `nse-api` (today + yesterday, primary)
+  2. `nse-archive` (backfill 90 days)
+  3. `moneycontrol`
+  4. `groww`
+  Merge results across whichever sources succeed instead of stopping at the first — `nse-api` only gives 1–2 rows, so we always try `nse-archive` too and union with existing CSV via the existing `_merge_dated` helper. Only fall through to moneycontrol/groww when both NSE calls fail.
+- Improve logging so every source attempt prints outcome + row count.
 
-Replace the single NSE JSON call with a 3-tier strategy:
+### `requirements.txt`
+- Already has `html5lib>=1.1` from the last change; leave as-is. NSE path doesn't need it, so pipeline now works even if the user hasn't re-run `setup_windows.bat`.
 
-1. **NSE CSV report** — `https://archives.nseindia.com/content/equities/bulk.csv` (static daily CSV, mirrors the JSON, and does NOT require the cookie handshake). This is the reliable primary source most OSS libs use.
-2. **NSE JSON API** — keep current path as fallback, but with:
-   - proper cookie chain: hit `nseindia.com` → `market-data/live-equity-market` → the API, with `Referer` + `Sec-Fetch-*` headers.
-   - retry once after a 2s sleep on 5xx.
-3. **BSE bulk deals CSV** — `https://www.bseindia.com/markets/equity/EQReports/bulk_deals.aspx` for cross-exchange coverage (optional final fallback; NSE-only symbols will still map correctly).
+## Pipeline usage (verify, no changes expected)
+Confirm that `core/institutional_flow.py` (the consumer of `fii_dii_daily.csv`) still reads columns `Date, FII_Net_INR_Cr, DII_Net_INR_Cr` in INR crore — our normalization matches that schema, so downstream scoring/overlays keep working unchanged. If the file reveals a different expectation (e.g., separate buy/sell columns), extend the normalizer to emit those too. No changes to `orchestrator.py`, scoring, or UI.
 
-Normalize all three to the existing `Date, Symbol, Client, Buy_Sell, Qty, Price` schema. The daily CSV only covers the current day, so we merge with the existing 60-day cache (already handled by `_merge_dated`).
+## Validation
+- After edit, ask the user to re-run the pipeline. Expected log:
+  ```
+  [fetch] fii_dii source 'nse-api' ok (2 rows)
+  [fetch] fii_dii source 'nse-archive' ok (60 rows)
+  [fetch] fii_dii_daily.csv refreshed via nse-api+nse-archive (~60 rows)
+  ```
+- If NSE blocks the IP, moneycontrol/groww fallbacks still fire; failure remains soft.
 
-### 3. Small polish
-
-- Add `[fetch] fii_dii source attempted: <name>` warning line for each failed source, then final `[fetch][warn]` only if ALL sources fail — makes the log actionable instead of blaming one source.
-- Add unit-friendly small helper `_try_read_html(text)` that walks the flavor list.
-- No change to freshness windows, cache policy, pipeline wiring, or UI.
-
-### Files touched
-
-- edit `desktop/nse_quant_engine/core/optional_data_fetchers.py` (rewrite `fetch_fii_dii` and `fetch_bulk_deals`, add helpers)
-- edit `desktop/nse_quant_engine/requirements.txt` (+ `html5lib>=1.1`)
-- edit `desktop/nse_quant_engine/CHANGES_v4_3.md` (note the fetcher hardening)
-
-### Out of scope
-
-- No changes to the other 15 pipeline steps, UI, dashboard, or any scoring logic.
-- If NSE blocks the office IP entirely (corporate proxy / geo-block), even the archives CSV can 403 — in that case the pipeline still runs quiet with a clear log line, and the user can drop `data/bulk_deals.csv` manually as before.
-
-### Verification
-
-After the change, next run's log should show either:
-
-```
-[fetch] fii_dii via moneycontrol (32 rows)
-[fetch] bulk_deals via nse-archives (18 rows today, 412 in cache)
-```
-
-or, if a source is down, a specific `attempted → failed → next` chain instead of a single opaque error.
+## Out of scope
+- No changes to bulk deals, fundamentals, earnings, dashboard, or scoring logic.
