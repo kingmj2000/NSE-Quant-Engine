@@ -68,3 +68,8 @@ cash-market NSE brief the user set):
 - Multi-agent LLM debate at runtime (external Claude handoff covers analysis).
 - Terminal UI beyond the existing HTML dashboard.
 - Alt-data (satellite, cards) — not freely available for NSE.
+
+## Fetcher hardening (post-review)
+- `optional_data_fetchers.fetch_fii_dii`: now tries `moneycontrol` (with lxml → html5lib → bs4 parser fallback) then `groww` public JSON; added `html5lib` to `requirements.txt` so `pandas.read_html` never fails on missing optional parser.
+- `optional_data_fetchers.fetch_bulk_deals`: replaced single NSE JSON call with `nse-archives` (static daily CSV, no cookie handshake) → `nse-api` (with stronger cookie chain + retry on 5xx) → `bse` JSON fallback for cross-exchange coverage.
+- Per-source failures now log `bulk_deals source 'X' failed: <err>` so the operator sees which fallback triggered.
