@@ -53,12 +53,19 @@ import orchestrator
 import md_to_widgets
 
 
-# The in-app dashboard is native Qt. Avoid importing QtWebEngine in the desktop
-# process because local-file Chart.js reloads were the source of the Windows
-# native access-violation exit (-1073741819). The generated HTML still opens in
-# the user's external browser via Dashboard.open_browser().
-QWebEnginePage = None
-HAS_WEBENGINE = False
+# Optional: try to enable the embedded HTML dashboard (QWebEngineView). If the
+# import fails (WebEngine wheel not installed), we transparently fall back to
+# the external-browser button. Historical Windows access-violation crashes were
+# tied to repeated live reloads, so the embedded tab now loads the local file
+# once per run instead of polling.
+try:
+    from PySide6.QtWebEngineWidgets import QWebEngineView  # type: ignore
+    from PySide6.QtWebEngineCore import QWebEnginePage      # type: ignore
+    HAS_WEBENGINE = True
+except Exception:
+    QWebEngineView = None  # type: ignore
+    QWebEnginePage = None  # type: ignore
+    HAS_WEBENGINE = False
 
 
 # --------------------------- Global crash guards ----------------------------
