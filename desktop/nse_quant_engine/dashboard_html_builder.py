@@ -1372,17 +1372,25 @@ document.getElementById("maturityCards").innerHTML = `
 
 
 
-// Universe composition donut — uses teal/blue/violet/amber, never crimson.
-const uni = DATA.universe || {};
-const uniLabels = Object.keys(uni);
-const uniVals   = uniLabels.map(k => uni[k]);
-safeChart("universeChart",{
-  type:"doughnut",
-  data:{labels:uniLabels, datasets:[{data:uniVals.length?uniVals:[1],
-    backgroundColor:["#38BDB0","#58A6FF","#A371F7","#F2B13C","#7FE0C6","#9CC6FF"].slice(0,Math.max(uniLabels.length,1)),
-    borderColor:"#0B0B0F", borderWidth:2}]},
-  options:{cutout:"62%", plugins:{legend:{position:"bottom",labels:{boxWidth:11,padding:12}}}}
-});
+// Universe donut removed — counts now live in the header pill strip above.
+
+// Shadow streak strip — running record of consecutive lead / verdict-positive runs.
+(function renderStreakStrip(){
+  const sh = DATA.shadow || {};
+  const h  = sh.history || {};
+  const strip = document.getElementById("streakStrip");
+  const leadCls = (h.lead_streak||0) >= (h.min_streak||8) ? "" : "warn";
+  const vposCls = (h.vpos_streak||0) >= (h.min_streak||8) ? "" : "warn";
+  const rows = [
+    `<span class="streak ${leadCls}">Shadow lead streak: <b>${h.lead_streak||0} run${(h.lead_streak||0)===1?'':'s'}</b></span>`,
+    `<span class="streak ${vposCls}">Verdict-positive streak: <b>${h.vpos_streak||0} run${(h.vpos_streak||0)===1?'':'s'}</b></span>`,
+    `<span class="streak">Green requires: &ge; <b>${h.min_streak||8}</b> consecutive leads <b>AND</b> verdict = Validation Positive <b>AND</b> shadow matured-independent obs &ge; <b>${h.min_matured_obs||6}</b></span>`,
+  ];
+  if (!h.available) {
+    rows.unshift(`<span class="streak warn">History not yet available &mdash; ledger will populate after next shadow_vs_official run.</span>`);
+  }
+  strip.innerHTML = rows.join("");
+})();
 
 // Shadow vs official — KPI cards + horizontal stacked bar (replaces crimson donut).
 const sh = DATA.shadow || {};
@@ -1403,9 +1411,12 @@ safeChart("shadowBar",{
   options:{indexAxis:"y", plugins:{legend:{position:"bottom",labels:{boxWidth:10,padding:10}}},
     scales:{x:{stacked:true,grid:{color:"rgba(255,255,255,0.06)"}},y:{stacked:true,grid:{display:false}}}}
 });
+const _shadowReasonHtml = sh.reason ? `<div style="margin-bottom:6px">${sh.reason}</div>` : "";
 document.getElementById("shadowWarnings").innerHTML =
-  (sh.warnings && sh.warnings.length) ? "Shadow neutralizations: " + sh.warnings.map(w=>`<span class="pill">${w}</span>`).join(" ")
-                                      : "";
+  _shadowReasonHtml +
+  ((sh.warnings && sh.warnings.length) ? "Shadow neutralizations: " + sh.warnings.map(w=>`<span class="pill">${w}</span>`).join(" ")
+                                       : "");
+
 
 const qh = DATA.quintile_horizon;
 const qvals = qh ? (DATA.quintile[String(qh)] || []) : [];
