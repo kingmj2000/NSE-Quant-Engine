@@ -1617,38 +1617,100 @@ document.getElementById("excel").textContent = DATA.excel;
   wrap.style.display="block";
 })();
 
-// ── Alpha-Zoo survivors tile (step 5) ──
-(function renderAlphaZoo(){
-  const z = DATA.alpha_zoo;
-  if(!z) return;
+// ── Alpha-Zoo evidence panel: standalone IC, residual IC, t-stat, verdict ──
+(function renderAlphaEvidence(){
+  const ev = DATA.alpha_evidence;
+  const legacy = DATA.alpha_zoo;
   const wrap = document.getElementById("alphaZooWrap");
-  const cap = document.getElementById("alphaZooCaption");
+  const cap  = document.getElementById("alphaZooCaption");
   const body = document.getElementById("alphaZooBody");
-  if(z.survivors && z.survivors.length){
-    cap.innerHTML = `<b>${z.count}</b> signal${z.count===1?'':'s'} independently predicted 5–21 day moves over the last ~12 months (IC≥${z.min_ic}, |t|≥${z.min_tstat}). Blend into scoring gated on ≥${z.min_for_tilt} survivors.`;
-    let html = '<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr>'
-      + ['Alpha','Horizon (d)','Mean IC','t-stat','Hit rate'].map(h=>`<th style="padding:6px 8px;text-align:left;color:var(--muted);border-bottom:1px solid var(--line);font-weight:500">${h}</th>`).join('')
-      + '</tr></thead><tbody>';
-    z.survivors.forEach(s=>{
-      html += `<tr><td style="padding:6px 8px">${s.alpha}</td><td style="padding:6px 8px">${s.horizon}</td><td style="padding:6px 8px">${(s.mean_IC>0?'+':'')+s.mean_IC.toFixed(3)}</td><td style="padding:6px 8px">${(s.t_stat==null?'—':s.t_stat.toFixed(2))}</td><td style="padding:6px 8px">${s.hit_rate==null?'—':(s.hit_rate*100).toFixed(0)+'%'}</td></tr>`;
-    });
-    html += '</tbody></table>';
-    body.innerHTML = html;
-  } else if(z.top_by_ic && z.top_by_ic.length){
-    cap.innerHTML = `No alpha cleared IC/t-stat thresholds yet — showing top 6 by |mean IC| for review. Scoring blend stays disabled.`;
-    let html = '<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr>'
-      + ['Alpha','Horizon (d)','Mean IC','t-stat'].map(h=>`<th style="padding:6px 8px;text-align:left;color:var(--muted);border-bottom:1px solid var(--line);font-weight:500">${h}</th>`).join('')
-      + '</tr></thead><tbody>';
-    z.top_by_ic.forEach(s=>{
-      html += `<tr><td style="padding:6px 8px">${s.alpha}</td><td style="padding:6px 8px">${s.horizon}</td><td style="padding:6px 8px">${Number(s.mean_IC||0).toFixed(3)}</td><td style="padding:6px 8px">${s.t_stat==null?'—':Number(s.t_stat).toFixed(2)}</td></tr>`;
-    });
-    html += '</tbody></table>';
-    body.innerHTML = html;
-  } else {
+  const foot = document.getElementById("alphaZooFoot");
+  if(!wrap) return;
+
+  // If neither the new evidence payload nor the legacy zoo payload exists,
+  // render an explicit "not yet available" panel — never hide the story.
+  if(!ev && !legacy){
+    cap.innerHTML = `<b>Not yet available.</b> Run the alpha_evaluator step to populate <code>alpha_promotion_log.json</code>, <code>alpha_zoo_ic_report.csv</code>, and <code>alpha_zoo_survivors.json</code>.`;
+    body.innerHTML = "";
+    foot.innerHTML = "";
+    wrap.style.display = "block";
     return;
   }
-  wrap.style.display="block";
+
+  if(ev && ev.rows && ev.rows.length){
+    const mIC = ev.min_ic==null ? "—" : Number(ev.min_ic).toFixed(3);
+    const mT  = ev.min_tstat==null ? "—" : Number(ev.min_tstat).toFixed(2);
+    const mR  = ev.min_residual_ic==null ? "—" : Number(ev.min_residual_ic).toFixed(3);
+    cap.innerHTML = `Survivor gate: IC &ge; <b>${mIC}</b>, t-stat &ge; <b>${mT}</b>, residual IC &ge; <b>${mR}</b>. New candidates enter live scoring only after clearing all three.`;
+    const newSet = new Set(["delivery_momentum","iv_rank"]);
+    const chipFor = (r) => {
+      if(r.promote === true) return '<span class="azchip green">Promoted</span>';
+      if(r.promote === false){
+        const belowResidual = r.residual_ic != null && ev.min_residual_ic != null && Math.abs(r.residual_ic) < ev.min_residual_ic;
+        if(belowResidual) return '<span class="azchip amber">Watch — below residual gate</span>';
+        return '<span class="azchip red">Rejected</span>';
+      }
+      return '<span class="azchip dim">Baseline (no eval)</span>';
+    };
+    const fmtIC = v => (v==null) ? '&mdash;' : (v>=0?'+':'') + Number(v).toFixed(3);
+    const fmtT  = v => (v==null) ? '&mdash;' : Number(v).toFixed(2);
+    let html = '<table class="aztable"><thead><tr>'
+      + ['Alpha','Standalone IC','Residual IC','t-stat','Windows','Verdict']
+        .map(h=>`<th>${h}</th>`).join('')
+      + '</tr></thead><tbody>';
+    ev.rows.forEach(r => {
+      const nameCell = `${r.alpha}${newSet.has(r.alpha) ? ' <span class="aznew">NEW CANDIDATE</span>' : ''}`;
+      const reason = r.reason ? `<div class="sub" style="font-size:10.5px;margin-top:2px">${r.reason}</div>` : '';
+      html += `<tr>
+        <td>${nameCell}${reason}</td>
+        <td class="num">${fmtIC(r.standalone_ic)}</td>
+        <td class="num">${fmtIC(r.residual_ic)}</td>
+        <td class="num">${fmtT(r.tstat)}</td>
+        <td class="num">${r.windows==null?'&mdash;':r.windows}</td>
+        <td>${chipFor(r)}</td>
+      </tr>`;
+    });
+    html += '</tbody></table>';
+    body.innerHTML = html;
+    const src = ev.sources || {};
+    const bits = [];
+    if(!src.promotion_log) bits.push("alpha_promotion_log.json not yet available");
+    if(!src.ic_report)     bits.push("alpha_zoo_ic_report.csv not yet available");
+    if(!src.survivors)     bits.push("alpha_zoo_survivors.json not yet available");
+    foot.innerHTML = bits.length ? "Partial sources: " + bits.join(" &middot; ") + "." : "";
+    wrap.style.display = "block";
+    return;
+  }
+
+  // Fall back to the legacy zoo payload when only IC/survivor data exists.
+  if(legacy){
+    if(legacy.survivors && legacy.survivors.length){
+      cap.innerHTML = `<b>${legacy.count}</b> signal${legacy.count===1?'':'s'} cleared IC/t-stat thresholds (IC&ge;${legacy.min_ic}, |t|&ge;${legacy.min_tstat}). Residual-IC evidence not yet available.`;
+      let html = '<table class="aztable"><thead><tr>'
+        + ['Alpha','Horizon (d)','Mean IC','t-stat','Hit rate'].map(h=>`<th>${h}</th>`).join('')
+        + '</tr></thead><tbody>';
+      legacy.survivors.forEach(s=>{
+        html += `<tr><td>${s.alpha}</td><td class="num">${s.horizon}</td><td class="num">${(s.mean_IC>0?'+':'')+Number(s.mean_IC).toFixed(3)}</td><td class="num">${s.t_stat==null?'—':Number(s.t_stat).toFixed(2)}</td><td class="num">${s.hit_rate==null?'—':(s.hit_rate*100).toFixed(0)+'%'}</td></tr>`;
+      });
+      body.innerHTML = html + '</tbody></table>';
+    } else if(legacy.top_by_ic && legacy.top_by_ic.length){
+      cap.innerHTML = `No alpha cleared IC/t-stat thresholds yet — top by |mean IC| for review. Scoring blend stays disabled.`;
+      let html = '<table class="aztable"><thead><tr>'
+        + ['Alpha','Horizon (d)','Mean IC','t-stat'].map(h=>`<th>${h}</th>`).join('')
+        + '</tr></thead><tbody>';
+      legacy.top_by_ic.forEach(s=>{
+        html += `<tr><td>${s.alpha}</td><td class="num">${s.horizon}</td><td class="num">${Number(s.mean_IC||0).toFixed(3)}</td><td class="num">${s.t_stat==null?'—':Number(s.t_stat).toFixed(2)}</td></tr>`;
+      });
+      body.innerHTML = html + '</tbody></table>';
+    } else {
+      cap.innerHTML = `<b>Not yet available.</b> No survivors or IC report to display.`;
+      body.innerHTML = "";
+    }
+    foot.innerHTML = "";
+    wrap.style.display = "block";
+  }
 })();
+
 </script>
 </body></html>
 """
