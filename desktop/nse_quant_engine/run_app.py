@@ -1359,6 +1359,60 @@ class MacroRotationView(QWidget):
         self._v.addStretch()
 
 
+# --------------------------- Embedded HTML dashboard -------------------------
+class HtmlDashboardView(QWidget):
+    """Renders output/dashboard_latest.html inside the app via QWebEngineView.
+
+    Loaded on demand (Reload button) or after a completed run — never on a
+    timer, to avoid the historical Windows access-violation from repeated
+    local-file reloads.
+    """
+    def __init__(self):
+        super().__init__()
+        root = QVBoxLayout(self); root.setContentsMargins(0, 0, 0, 0); root.setSpacing(6)
+
+        bar = QHBoxLayout(); bar.setContentsMargins(12, 8, 12, 0); bar.setSpacing(8)
+        self.btn_reload = QPushButton("⟳ Reload"); self.btn_reload.setObjectName("Ghost")
+        self.btn_browser = QPushButton("Open in browser ↗"); self.btn_browser.setObjectName("Ghost")
+        self.status = QLabel("no dashboard on disk yet"); self.status.setObjectName("Sub")
+        bar.addWidget(self.btn_reload); bar.addWidget(self.btn_browser)
+        bar.addSpacing(12); bar.addWidget(self.status, 1)
+        root.addLayout(bar)
+
+        if HAS_WEBENGINE and QWebEngineView is not None:
+            self.view = QWebEngineView()
+            root.addWidget(self.view, 1)
+        else:
+            self.view = None
+            hint = QLabel("QWebEngineView not available — install PySide6-WebEngine and restart.")
+            hint.setObjectName("Sub"); hint.setWordWrap(True)
+            root.addWidget(hint); root.addStretch()
+
+        self.btn_reload.clicked.connect(self.reload)
+        self.btn_browser.clicked.connect(self._open_browser)
+
+    def _html_path(self) -> Path:
+        return OUT / "dashboard_latest.html"
+
+    def reload(self):
+        p = self._html_path()
+        if not p.exists():
+            self.status.setText("no dashboard on disk yet — run the pipeline")
+            return
+        if self.view is not None:
+            self.view.setUrl(QUrl.fromLocalFile(str(p.resolve())))
+            self.status.setText(f"loaded {p.name} · {datetime.now().strftime('%H:%M:%S')}")
+
+    def _open_browser(self):
+        p = self._html_path()
+        if p.exists():
+            import webbrowser
+            webbrowser.open(p.resolve().as_uri())
+
+
+
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
