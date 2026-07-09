@@ -206,3 +206,27 @@ REGIME_TILT_APPLY  = os.environ.get("REGIME_TILT_APPLY", "0") in ("1", "true", "
 REBALANCE_DIFF_ON       = (not _SAFE_MODE) and (
     os.environ.get("REBALANCE_DIFF_ON", "1") not in ("0", "false", "False"))
 REBAL_ROUND_TRIP_COST_PCT = _f("REBAL_ROUND_TRIP_COST_PCT", 0.35)
+
+
+# ── Part A (tightened plan): sector-neutral scoring + turnover-aware weights ─
+SECTOR_NEUTRAL              = os.environ.get("SECTOR_NEUTRAL", "1") not in ("0", "false", "False")
+SECTOR_NEUTRAL_MIN_MEMBERS  = _i("SECTOR_NEUTRAL_MIN_MEMBERS", 5)
+TURNOVER_LAMBDA             = _f("TURNOVER_LAMBDA", 0.25)
+ALPHA_INCREMENTAL_IC_MIN    = _f("ALPHA_INCREMENTAL_IC_MIN", 0.015)
+
+# ── Part B (dormant, shadow-only): adaptive alpha weighting ─────────────────
+# Every guardrail here is mandatory. Keep ADAPTIVE_ENABLED=False in production
+# until the shadow-vs-primary report gives you an unambiguous reason to flip.
+ADAPTIVE_ENABLED            = os.environ.get("ADAPTIVE_ENABLED", "0") in ("1", "true", "True")
+ADAPTIVE_MIN_DATES          = _i("ADAPTIVE_MIN_DATES", 60)      # effective (overlap-adjusted)
+ADAPTIVE_SHRINKAGE_ALPHA    = _f("ADAPTIVE_SHRINKAGE_ALPHA", 0.20)
+ADAPTIVE_MAX_STEP           = _f("ADAPTIVE_MAX_STEP", 0.05)
+ADAPTIVE_MAX_TOTAL_DRIFT    = _f("ADAPTIVE_MAX_TOTAL_DRIFT", 0.30)
+ADAPTIVE_RIDGE_ALPHA        = _f("ADAPTIVE_RIDGE_ALPHA", 1.0)
+
+# ── Validation-layer Bayesian shrinkage (protects ship/hold gate) ───────────
+# Separate from adaptive-weight shrinkage; always on unless explicitly disabled.
+VALIDATION_BAYES_SHRINK        = os.environ.get("VALIDATION_BAYES_SHRINK", "1") not in ("0", "false", "False")
+VALIDATION_HITRATE_PRIOR_ALPHA = _f("VALIDATION_HITRATE_PRIOR_ALPHA", 10.0)
+VALIDATION_HITRATE_PRIOR_BETA  = _f("VALIDATION_HITRATE_PRIOR_BETA", 10.0)
+VALIDATION_IC_PRIOR_N          = _i("VALIDATION_IC_PRIOR_N", 20)
