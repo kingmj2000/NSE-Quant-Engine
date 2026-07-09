@@ -84,6 +84,256 @@ def _norm_sym(sym: str) -> str:
     return str(sym or "").replace(".NS", "").upper().strip()
 
 
+def _cfg(name: str, default):
+    """Look up a core.config constant with a safe default. Never raises."""
+    try:
+        from core import config as _C
+        return getattr(_C, name, default)
+    except Exception:
+        return default
+
+
+# ─── verdict fallback + progress ──────────────────────────────────────────────
+_VALID_VERDICTS = (
+    "Validation Positive", "Validation Negative", "No Proven Edge Yet",
+    "Insufficient Statistical Evidence", "Insufficient Breadth",
+    "Insufficient Independent History", "Insufficient History",
+)
+_VERDICT_GLOSS = {
+    "Validation Positive": "Edge confirmed — live mode.",
+    "Validation Negative": "Edge is negative after costs — do not act on picks.",
+    "No Proven Edge Yet":  "No measurable edge after costs yet — watchlist only.",
+    "Insufficient History":              "Not enough evidence yet — watchlist only.",
+    "Insufficient Independent History":  "Not enough evidence yet — watchlist only.",
+    "Insufficient Statistical Evidence": "Not enough evidence yet — watchlist only.",
+    "Insufficient Breadth":              "Not enough evidence yet — watchlist only.",
+}
+
+
+def _verdict_state(v: str | None) -> str:
+    if v == "Validation Positive":
+        return "green"
+    if v == "Validation Negative":
+        return "red"
+    if v in _VERDICT_GLOSS:
+        return "amber"
+    return "neutral"
+
+
+def _verdict_from_markdown(md_path: Path) -> str | None:
+    """Fallback verdict extractor. Looks for a line naming one of VALID_VERDICTS."""
+    if not md_path.exists():
+        return None
+    try:
+        txt = md_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+    for line in txt.splitlines():
+        low = line.strip()
+        if not low:
+            continue
+        # Prefer lines that look like a verdict heading, but accept any exact match.
+        for v in _VALID_VERDICTS:
+            if v in line:
+                return v
+    return None
+
+
+def _delta_matured_from_history(history_csv: Path, matured_today: int) -> int | None:
+    """Diff matured count vs the most recent DISTINCT prior date in score_history.
+    Returns None when there is no strictly-prior distinct date (hides the chip)."""
+    if not history_csv.exists():
+        return None
+    try:
+        h = pd.read_csv(history_csv, usecols=lambda c: c in ("Date", "Net_Forward_Return", "Horizon_Days"))
+    except Exception:
+        try:
+            h = pd.read_csv(history_csv)
+        except Exception:
+            return None
+    if h.empty or "Date" not in h.columns:
+        return None
+    today_str = datetime.now().date().isoformat()
+    try:
+        dates = sorted({str(d) for d in h["Date"].dropna().astype(str).tolist()})
+    except Exception:
+        return None
+    prior = [d for d in dates if d < today_str]
+    if not prior:
+        return None
+    prior_date = prior[-1]
+    sub = h[h["Date"].astype(str) == prior_date]
+    if "Horizon_Days" in sub.columns:
+        try:
+            s10 = sub[sub["Horizon_Days"] == 10]
+            if not s10.empty:
+                sub = s10
+        except Exception:
+            pass
+    if "Net_Forward_Return" in sub.columns:
+        prior_matured = int(sub["Net_Forward_Return"].notna().sum())
+    else:
+        prior_matured = 0
+    return int(matured_today) - prior_matured
+
+
+def _trailing_run(seq, predicate) -> int:
+    n = 0
+    for x in reversed(list(seq)):
+        if predicate(x):
+            n += 1
+        else:
+            break
+    return n
+
+
+def _shadow_history_payload(hist_csv: Path) -> dict:
+    """Read shadow_vs_official_history.csv (written by shadow_vs_official_report)
+    and compute trailing streaks. Returns zeros when file is missing."""
+    empty = {
+        "available": False,
+        "consecutive_shadow_leads": 0,
+        "consecutive_verdict_positive": 0,
+        "latest_shadow_matured_obs": None,
+        "rows": 0,
+    }
+    if not hist_csv.exists():
+        return empty
+    try:
+        df = pd.read_csv(hist_csv)
+    except Exception:
+        return empty
+    if df.empty or "date" not in df.columns:
+        return empty
+    df = df.sort_values("date")
+    def _truthy(v):
+        s = str(v).strip().lower()
+        return s in ("true", "1", "yes", "y", "t")
+    leads = _trailing_run(df.get("shadow_beats_official_net", pd.Series(dtype=object)).tolist(),
+                          _truthy)
+    vpos = _trailing_run(df.get("verdict", pd.Series(dtype=str)).astype(str).tolist(),
+                         lambda v: v == "Validation Positive")
+    latest_obs = None
+    try:
+        latest_obs = df.iloc[-1].get("shadow_matured_obs")
+        if pd.isna(latest_obs):
+            latest_obs = None
+        else:
+            latest_obs = float(latest_obs)
+    except Exception:
+        latest_obs = None
+    return {
+        "available": True,
+        "consecutive_shadow_leads": int(leads),
+        "consecutive_verdict_positive": int(vpos),
+        "latest_shadow_matured_obs": latest_obs,
+        "rows": int(len(df)),
+    }
+
+
+def _alpha_evidence_payload(out_dir: Path) -> dict | None:
+    """Merge alpha_promotion_log.json + alpha_zoo_ic_report.csv + survivors.json
+    into a table-ready payload for the Alpha Zoo evidence panel.
+    Returns None when NONE of the three sources exist."""
+    plog_p = out_dir / "alpha_promotion_log.json"
+    ic_p = out_dir / "alpha_zoo_ic_report.csv"
+    surv_p = out_dir / "alpha_zoo_survivors.json"
+    if not (plog_p.exists() or ic_p.exists() or surv_p.exists()):
+        return None
+    plog = _safe_read_json(plog_p) or {}
+    ic_df = _safe_read_csv(ic_p)
+    surv = _safe_read_json(surv_p) or {}
+
+    min_ic = surv.get("threshold_ic") or plog.get("threshold_ic")
+    min_t  = surv.get("threshold_tstat") or plog.get("threshold_tstat")
+    inc_ic = _cfg("ALPHA_INCREMENTAL_IC_MIN", 0.015)
+
+    survivor_names = set()
+    for s in (surv.get("survivors") or []):
+        nm = s.get("alpha") if isinstance(s, dict) else str(s)
+        if nm:
+            survivor_names.add(str(nm))
+
+    # index IC report by alpha name (highest |mean_IC| row wins if duplicated by horizon)
+    ic_by_name: dict[str, dict] = {}
+    if not ic_df.empty and "alpha" in ic_df.columns:
+        try:
+            ic_df = ic_df.copy()
+            ic_df["_abs"] = pd.to_numeric(ic_df.get("mean_IC"), errors="coerce").abs()
+            ic_df = ic_df.sort_values("_abs", ascending=False)
+            for _, r in ic_df.iterrows():
+                nm = str(r.get("alpha"))
+                if nm and nm not in ic_by_name:
+                    ic_by_name[nm] = r.to_dict()
+        except Exception:
+            pass
+
+    # candidate records from promotion log
+    candidates = []
+    plog_entries = plog.get("candidates") or plog.get("entries") or []
+    if isinstance(plog_entries, dict):
+        plog_entries = [dict(v, alpha=k) for k, v in plog_entries.items()]
+    plog_names = set()
+    for e in plog_entries:
+        if not isinstance(e, dict):
+            continue
+        nm = str(e.get("alpha") or e.get("name") or "").strip()
+        if not nm:
+            continue
+        plog_names.add(nm)
+        promoted = e.get("promote")
+        if promoted is None:
+            promoted = e.get("promoted")
+        reason = str(e.get("reason") or e.get("verdict") or "").strip()
+        candidates.append({
+            "alpha": nm,
+            "standalone_ic": _num(e.get("standalone_ic") or e.get("mean_IC") or e.get("ic"), 4),
+            "residual_ic": _num(e.get("residual_ic"), 4),
+            "tstat": _num(e.get("t_stat") or e.get("tstat"), 2),
+            "windows": _num(e.get("windows") or e.get("n_windows"), 0),
+            "promote": promoted,
+            "reason": reason,
+            "in_zoo": nm in survivor_names,
+        })
+
+    # add zoo-only rows (already surviving, but not in this run's promotion log)
+    for nm, rec in ic_by_name.items():
+        if nm in plog_names:
+            continue
+        candidates.append({
+            "alpha": nm,
+            "standalone_ic": _num(rec.get("mean_IC"), 4),
+            "residual_ic": None,
+            "tstat": _num(rec.get("t_stat") or rec.get("tstat"), 2),
+            "windows": _num(rec.get("n_windows") or rec.get("windows"), 0),
+            "promote": True if nm in survivor_names else None,
+            "reason": "In zoo — baseline survivor" if nm in survivor_names else "Baseline (no eval this run)",
+            "in_zoo": nm in survivor_names,
+        })
+
+    # sort: promoted first, then by |standalone_ic| desc
+    def _rank(c):
+        p = 0 if c.get("promote") is True else (1 if c.get("promote") is None else 2)
+        ic = abs(c.get("standalone_ic") or 0.0)
+        return (p, -ic)
+    candidates.sort(key=_rank)
+
+    return {
+        "min_ic": min_ic,
+        "min_tstat": min_t,
+        "min_residual_ic": inc_ic,
+        "rows": candidates[:20],
+        "sources": {
+            "promotion_log": plog_p.exists(),
+            "ic_report": ic_p.exists(),
+            "survivors": surv_p.exists(),
+        },
+    }
+
+
+
+
+
 # ---------------------------------------------------------------- payload ----
 def _payload() -> dict:
     val = _safe_read_json(OUT / "validation_status.json")
@@ -108,23 +358,40 @@ def _payload() -> dict:
     alpha_survivors = _safe_read_json(OUT / "alpha_zoo_survivors.json")
 
     # --- verdict / banner ---
-    verdict = (val.get("verdict") or "Insufficient History")
-    grade = (val.get("evidence_grade") or "Insufficient Evidence")
+    # Verdict source order: structured JSON → markdown fallback → neutral chip.
+    # Missing sources must NEVER default to a positive verdict.
+    verdict_source = "unavailable"
+    verdict = None
+    grade = None
+    if (OUT / "validation_status.json").exists() and val:
+        verdict = val.get("verdict")
+        grade = val.get("evidence_grade")
+        if verdict:
+            verdict_source = "validation_status.json"
+    if not verdict:
+        md_verdict = _verdict_from_markdown(OUT / "cross_sectional_validation_report.md")
+        if md_verdict:
+            verdict = md_verdict
+            verdict_source = "cross_sectional_validation_report.md"
+    if not verdict:
+        verdict = "Verdict not yet available"
+        grade = grade or "Insufficient Evidence"
+
+    grade = grade or "Insufficient Evidence"
     stats = val.get("stats", {}) or {}
 
     rec = (cmp_.get("recommendation") or "REVIEW: continue running both")
     rec_low = rec.lower()
-    shadow_state = ("green" if "shadow leads" in rec_low or "switch to shadow" in rec_low
-                    else "red"   if "official still leads" in rec_low or "do not switch" in rec_low or verdict != "Validation Positive"
-                    else "amber")
 
     decision_use = "LIVE" if verdict == "Validation Positive" else "WATCHLIST ONLY"
+    # shadow_state is finalized below after the streak/history is read.
+    shadow_state = "amber"
     bottom_line = (
         f"<b>{decision_use}.</b> Validation is <b>{verdict}</b>. "
         f"All entry / stop / target levels below are mechanical reference levels, "
-        f"not recommendations. Shadow stays "
-        f"{'🟢 GREEN' if shadow_state=='green' else '🔴 RED' if shadow_state=='red' else '🟡 AMBER'}."
+        f"not recommendations."
     )
+
 
     # --- maturity metric cards (matured vs maturing) — filtered to 10-day slice ---
     matured = maturing = 0
@@ -207,36 +474,74 @@ def _payload() -> dict:
             if usable:
                 quintile_horizon = max(usable)
 
-    # --- shadow chip ---
+    # --- shadow chip (tightened four-gate) ---
     overlap = shadow_summary.get("top20_overlap_count")
     added = shadow_summary.get("v4_added_to_top20", []) or []
     dropped = shadow_summary.get("v4_dropped_from_top20", []) or []
     shadow_warnings = shadow_summary.get("warnings", []) or []
-    shadow_reason_bits = []
-    if verdict != "Validation Positive":
-        shadow_reason_bits.append("official validation is not positive (Green requires it)")
     veto_in_shadow = [s for s in added if _veto_symbol(s)]
+
+    shadow_history = _shadow_history_payload(OUT / "shadow_vs_official_history.csv")
+    min_streak = int(_cfg("SHADOW_GREEN_MIN_STREAK", 8))
+    min_matured_obs = int(_cfg("SHADOW_GREEN_MIN_MATURED_OBS",
+                               _cfg("CROSSVAL_MIN_EFFECTIVE_DATES", 6)))
+    lead_streak = int(shadow_history.get("consecutive_shadow_leads") or 0)
+    vpos_streak = int(shadow_history.get("consecutive_verdict_positive") or 0)
+    latest_obs = shadow_history.get("latest_shadow_matured_obs")
+    latest_obs_val = float(latest_obs) if latest_obs is not None else 0.0
+
+    failed_checks: list[str] = []
+    if verdict != "Validation Positive":
+        failed_checks.append("official verdict is not Validation Positive")
+    if lead_streak < min_streak:
+        failed_checks.append(f"only {lead_streak} consecutive shadow-lead run(s) — {min_streak} required")
+    if vpos_streak < min_streak:
+        failed_checks.append(f"only {vpos_streak} consecutive verdict-positive run(s) — {min_streak} required")
+    if latest_obs_val < min_matured_obs:
+        failed_checks.append(f"shadow matured-independent obs {latest_obs_val:.0f} — {min_matured_obs} required")
     if veto_in_shadow:
-        shadow_reason_bits.append(
+        failed_checks.append(
             f"shadow Top-20 pulls in governance-vetoed name(s): {', '.join(veto_in_shadow)}")
-    if not shadow_reason_bits:
-        shadow_reason_bits.append(rec)
+
+    if not failed_checks:
+        shadow_state = "green"
+    elif ("official still leads" in rec_low or "do not switch" in rec_low
+          or verdict == "Validation Negative"):
+        shadow_state = "red"
+    else:
+        shadow_state = "amber"
+
+    if shadow_state == "green":
+        shadow_reason = "Shadow leads matured EV/day and clears every green-gate check."
+    elif shadow_state == "red":
+        shadow_reason = "<b>Do not switch.</b> " + "; ".join(failed_checks or [rec]) + "."
+    else:
+        shadow_reason = "Green-gate checks not met: " + "; ".join(failed_checks) + "."
 
     shadow = {
         "state": shadow_state,
         "chip": ("🟢 GREEN" if shadow_state == "green"
                  else "🔴 RED" if shadow_state == "red" else "🟡 AMBER"),
-        "reason": "<b>Do not switch.</b> " + "; ".join(shadow_reason_bits) + "."
-                  if shadow_state == "red"
-                  else ("Shadow leads matured EV/day. " + rec) if shadow_state == "green"
-                  else rec,
+        "reason": shadow_reason,
+
         "overlap": overlap,
         "added": len(added),
         "dropped": len(dropped),
         "added_symbols": added,
         "dropped_symbols": dropped,
         "warnings": shadow_warnings,
+        "history": {
+            "available": shadow_history.get("available", False),
+            "lead_streak": lead_streak,
+            "vpos_streak": vpos_streak,
+            "latest_matured_obs": latest_obs,
+            "min_streak": min_streak,
+            "min_matured_obs": min_matured_obs,
+            "failed_checks": failed_checks,
+        },
     }
+    bottom_line = bottom_line + f" Shadow stays {shadow['chip']}."
+
 
     shadow_top5_symbols: set[str] = set()
     shadow_unique_top5 = []
@@ -499,6 +804,32 @@ def _payload() -> dict:
     except Exception:
         macro_payload = None
 
+
+    # ── progress-to-a-verdict payload ──
+    effective_now = stats.get("effective_validation_dates") if stats else None
+    raw_now = stats.get("validation_dates") if stats else None
+    effective_target = int(_cfg("CROSSVAL_MIN_EFFECTIVE_DATES", 6))
+    raw_target = int(_cfg("CROSSVAL_MIN_DATES", 10))
+    adaptive_tick = int(_cfg("ADAPTIVE_MIN_DATES", 60))
+    delta_matured = _delta_matured_from_history(OUT / "score_history.csv", matured)
+    progress_payload = {
+        "verdict": verdict,
+        "gloss": _VERDICT_GLOSS.get(verdict, "Verdict not yet available."),
+        "state": _verdict_state(verdict),
+        "source": verdict_source,
+        "effective_now": _num(effective_now, 1) if effective_now is not None else None,
+        "effective_target": effective_target,
+        "adaptive_tick": adaptive_tick,
+        "raw_now": _num(raw_now, 0) if raw_now is not None else None,
+        "raw_target": raw_target,
+        "matured": matured,
+        "maturing": maturing,
+        "total": total_signals,
+        "delta_matured": delta_matured,
+    }
+
+    alpha_evidence = _alpha_evidence_payload(OUT)
+
     return {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "date": date_str,
@@ -511,6 +842,8 @@ def _payload() -> dict:
         "maturity": {"matured": matured, "maturing": maturing,
                      "total": total_signals, "rate": maturation_rate},
 
+        "progress": progress_payload,
+        "alpha_evidence": alpha_evidence,
         "evidence_10": evidence_10,
         "evidence_5": evidence_5,
         "quintile": quintile,
@@ -528,6 +861,7 @@ def _payload() -> dict:
         "macro": macro_payload,
         "alpha_zoo": zoo_payload,
     }
+
 
 
 # ---------------------------------------------------------------- template ----
@@ -689,15 +1023,102 @@ td .rsym{font-weight:640}
 .foot code{color:var(--txt);background:transparent}
 canvas{margin-top:4px}
 .chart-error{margin-top:10px;padding:12px;border:1px dashed rgba(255,255,255,.14);border-radius:10px;color:var(--amber);background:rgba(242,177,60,.08);font-size:12px}
+
+/* Progress-to-a-verdict section */
+.progress-row{display:grid;grid-template-columns:minmax(220px,1fr) minmax(280px,2fr) minmax(200px,1fr);gap:14px;align-items:stretch}
+@media(max-width:900px){.progress-row{grid-template-columns:1fr}}
+.vchip{display:flex;flex-direction:column;justify-content:center;gap:6px;padding:12px 14px;border-radius:12px;border:1px solid var(--line);backdrop-filter:blur(10px)}
+.vchip .vhead{font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.6px}
+.vchip .vtitle{font-size:17px;font-weight:700}
+.vchip .vgloss{font-size:12px;color:var(--muted)}
+.vchip .vsrc{font-size:10px;color:var(--dim);margin-top:2px}
+.vchip.green {background:linear-gradient(135deg,rgba(63,185,80,0.20),rgba(20,80,40,0.10));border-color:rgba(63,185,80,0.45)}
+.vchip.green .vtitle{color:var(--green)}
+.vchip.amber {background:linear-gradient(135deg,rgba(242,177,60,0.20),rgba(80,60,20,0.10));border-color:rgba(242,177,60,0.45)}
+.vchip.amber .vtitle{color:var(--amber)}
+.vchip.red   {background:linear-gradient(135deg,rgba(229,85,106,0.20),rgba(80,20,30,0.10));border-color:rgba(229,85,106,0.45)}
+.vchip.red   .vtitle{color:var(--red-soft)}
+.vchip.neutral{background:var(--panel2);border-color:var(--line2)}
+.vchip.neutral .vtitle{color:var(--muted)}
+
+.pbwrap{padding:12px 14px}
+.pblab{font-size:10.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px}
+.pbcount{font-size:18px;font-weight:700;margin-top:2px}
+.pbbar{position:relative;height:10px;border-radius:6px;background:rgba(255,255,255,0.06);overflow:visible;margin-top:8px}
+.pbbar > .pbfill{position:absolute;left:0;top:0;bottom:0;border-radius:6px;background:linear-gradient(90deg,var(--teal),#7FE0C6)}
+.pbbar > .pbfill.low{background:linear-gradient(90deg,var(--amber),#FFD07A)}
+.pbbar > .pbfill.mid{background:linear-gradient(90deg,var(--blue),var(--violet))}
+.pbtick{position:absolute;top:-4px;bottom:-4px;width:2px;background:var(--violet-soft);opacity:.85}
+.pbtick::after{content:attr(data-label);position:absolute;top:-16px;left:50%;transform:translateX(-50%);white-space:nowrap;font-size:9.5px;color:var(--violet-soft);letter-spacing:.3px}
+.pbraw{font-size:11px;color:var(--dim);margin-top:6px}
+.pbfoot{font-size:11px;color:var(--muted);margin-top:8px}
+
+.matbox{padding:12px 14px;display:flex;flex-direction:column;gap:4px;justify-content:center}
+.matline{font-size:12px;color:var(--muted)}
+.matline b{color:var(--txt)}
+.matdelta{display:inline-block;font-size:11px;font-weight:650;padding:2px 8px;border-radius:6px;margin-top:6px;width:fit-content}
+.matdelta.up{background:var(--teal-bg);color:var(--teal)}
+.matdelta.down{background:var(--amber-bg);color:var(--amber)}
+.matdelta.flat{background:rgba(255,255,255,0.05);color:var(--dim)}
+
+/* Universe pill strip in header */
+.upills{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.upill{font-size:11px;color:var(--muted);background:var(--panel2);border:1px solid var(--line);border-radius:999px;padding:3px 10px;backdrop-filter:blur(6px)}
+.upill b{color:var(--txt)}
+
+/* Shadow streak strip */
+.streakstrip{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
+.streak{font-size:11px;color:var(--muted);background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:5px 10px}
+.streak b{color:var(--txt)}
+.streak.warn{border-color:rgba(242,177,60,0.35);color:var(--amber)}
+
+/* Watchlist banner + per-card ribbon */
+.watchbanner{margin:10px 0 14px;padding:12px 16px;border-radius:12px;font-size:13px;font-weight:600;
+  background:linear-gradient(90deg,rgba(242,177,60,0.18),rgba(242,177,60,0.06));
+  border:1px solid rgba(242,177,60,0.45);border-left:4px solid var(--amber);color:var(--txt);backdrop-filter:blur(10px)}
+.card{position:relative;overflow:hidden}
+.ribbon{position:absolute;top:12px;right:-38px;transform:rotate(35deg);padding:3px 44px;font-size:10px;font-weight:800;letter-spacing:1.1px;color:#0B0B10;box-shadow:0 4px 12px -4px rgba(0,0,0,0.55);z-index:2}
+.ribbon.watch{background:linear-gradient(90deg,#E0A030,#F2B13C)}
+.ribbon.live {background:linear-gradient(90deg,#3FCBB8,#38BDB0)}
+
+/* Alpha zoo evidence table */
+.aztable{width:100%;border-collapse:collapse;font-size:12.5px}
+.aztable th{padding:6px 8px;text-align:left;color:var(--muted);border-bottom:1px solid var(--line);font-weight:600;font-size:10.5px;text-transform:uppercase;letter-spacing:.5px}
+.aztable td{padding:7px 8px;border-bottom:1px solid var(--line)}
+.aztable td.num{font-variant-numeric:tabular-nums;text-align:right}
+.azchip{display:inline-block;font-size:10px;font-weight:700;padding:2px 8px;border-radius:5px}
+.azchip.green{background:var(--green-bg);color:var(--green)}
+.azchip.amber{background:var(--amber-bg);color:var(--amber)}
+.azchip.red  {background:var(--red-bg);color:var(--red-soft)}
+.azchip.dim  {background:rgba(255,255,255,0.05);color:var(--dim)}
+.aznew{display:inline-block;font-size:9.5px;font-weight:700;padding:1px 7px;border-radius:5px;background:var(--teal-bg);color:var(--teal);margin-left:6px;letter-spacing:.3px}
+
+
 </style></head>
 <body>
 
 <h1>NSE Quant Evidence Review</h1>
 <div class="sub">Daily run &middot; Generated __GENERATED__ &middot; expanded NSE stock universe / NSE ETFs &middot; cross-sectional validation report is the authority</div>
+<div class="upills" id="universePills"></div>
+
+<h2>Progress to a verdict</h2>
+<div class="glass g-violet panel">
+  <div class="progress-row">
+    <div class="vchip neutral" id="verdictChip">
+      <div class="vhead">Validation Verdict</div>
+      <div class="vtitle" id="vTitle">&mdash;</div>
+      <div class="vgloss" id="vGloss">&mdash;</div>
+      <div class="vsrc" id="vSource"></div>
+    </div>
+    <div class="pbwrap" id="progressBar"></div>
+    <div class="matbox" id="maturationBox"></div>
+  </div>
+</div>
 
 <div class="bottomline" id="bottomline"></div>
 
 <div class="banner" id="banner"></div>
+
 
 <div id="marketCtxWrap" style="display:none">
   <h2>Market context</h2>
@@ -720,21 +1141,12 @@ canvas{margin-top:4px}
   </div>
 </div>
 
-<div class="grid twocol">
-  <div>
-    <h2>Universe composition</h2>
-    <div class="glass g-blue panel">
-      <canvas id="universeChart" height="126"></canvas>
-    </div>
-  </div>
-  <div>
-    <h2>Shadow vs Official &mdash; ranking overlap</h2>
-    <div class="glass g-blue panel">
-      <div class="evid" id="shadowCards" style="grid-template-columns:repeat(2,1fr);margin-bottom:10px"></div>
-      <canvas id="shadowBar" height="86"></canvas>
-      <div class="sub" id="shadowWarnings" style="margin-top:8px"></div>
-    </div>
-  </div>
+<h2>Shadow vs Official &mdash; running record</h2>
+<div class="glass g-blue panel">
+  <div class="streakstrip" id="streakStrip"></div>
+  <div class="evid" id="shadowCards" style="grid-template-columns:repeat(4,1fr);margin-bottom:10px"></div>
+  <canvas id="shadowBar" height="86"></canvas>
+  <div class="sub" id="shadowWarnings" style="margin-top:8px"></div>
 </div>
 
 <h2 id="quintileTitle">Quintile median net return</h2>
@@ -746,7 +1158,9 @@ canvas{margin-top:4px}
 
 
 <h2>Top 5 watchlist candidates &mdash; post-governance veto</h2>
+<div class="watchbanner" id="watchBanner" style="display:none">Reference levels only &mdash; not validated. Buy zones, stops, and targets below are mechanical outputs, not recommendations.</div>
 <div class="cards" id="cards"></div>
+
 
 <h2 id="corrTitle">Top-5 correlation &mdash; diversification check</h2>
 <div class="glass panel" id="corrPanel" style="display:none">
@@ -758,12 +1172,14 @@ canvas{margin-top:4px}
 </div>
 
 <div id="alphaZooWrap" style="display:none">
-  <h2>Alpha Zoo &mdash; surviving signals</h2>
+  <h2>Alpha Zoo &mdash; signal evidence</h2>
   <div class="glass panel">
     <div class="sub" id="alphaZooCaption" style="margin-bottom:10px"></div>
     <div id="alphaZooBody"></div>
+    <div class="sub" id="alphaZooFoot" style="margin-top:10px;font-size:11px"></div>
   </div>
 </div>
+
 
 <h2 id="shadowUniqueTitle">Shadow Top 5 unique candidates</h2>
 <div class="cards" id="shadowUniqueCards"></div>
@@ -772,11 +1188,14 @@ canvas{margin-top:4px}
   <b>Model edge/day</b> = measured expected edge after costs — blank ("&mdash;") until validation is positive. Adani group names are categorically vetoed before any scoring or watchlist inclusion.
 </div>
 
-<h2>Timing filter map &mdash; RSI vs 20-day volatility</h2>
-<div class="glass panel">
-  <canvas id="scatterChart" height="150"></canvas>
-  <div class="sub" style="margin-top:10px">RSI is a timing filter, not a valuation filter. Right of the dashed line (RSI ~ 70-73) = overbought entry risk; above the upper band (vol ~ 30%) = elevated volatility.</div>
-</div>
+<details id="scatterDetails" style="margin-top:22px">
+  <summary style="cursor:pointer;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:1.4px;color:var(--muted);padding:6px 0">Show RSI &times; volatility map</summary>
+  <div class="glass panel" style="margin-top:10px">
+    <canvas id="scatterChart" height="150"></canvas>
+    <div class="sub" style="margin-top:10px">RSI is a timing filter, not a valuation filter. Right of the dashed line (RSI ~ 70-73) = overbought entry risk; above the upper band (vol ~ 30%) = elevated volatility.</div>
+  </div>
+</details>
+
 
 <h2>Avoid / downgrade for now</h2>
 <div class="glass panel">
@@ -818,18 +1237,75 @@ const num = v => (v===null||v===undefined) ? "&mdash;" : Number(v).toLocaleStrin
 // bottom line + banner
 document.getElementById("bottomline").innerHTML = DATA.bottom_line;
 const vClass = DATA.verdict==="Validation Positive" ? "green"
-              : DATA.verdict.startsWith("Insufficient") ? "" : "amber";
+              : DATA.verdict==="Validation Negative" ? "amber"
+              : (DATA.verdict||"").startsWith("Insufficient") ? "" : "amber";
 document.getElementById("banner").innerHTML = `
  <div class="verdict ${vClass}">
    <div style="font-size:10.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.6px">Validation Verdict</div>
    <div class="v">${DATA.verdict}</div>
    <div style="font-size:12px;color:var(--muted);margin-top:2px">Evidence grade: ${DATA.grade}</div>
    <div class="pillrow">
-     <span class="pill"><b>${num(DATA.signal_count)}</b> signals maturing</span>
      <span class="pill">Market regime: <b>${DATA.regime}</b></span>
      <span class="pill">Mode: <b>${DATA.decision_use}</b></span>
    </div>
  </div>`;
+
+// ─── Progress to a verdict ────────────────────────────────────────────────
+(function renderProgress(){
+  const p = DATA.progress || {};
+  const state = p.state || "neutral";
+  const chip = document.getElementById("verdictChip");
+  chip.className = "vchip " + state;
+  document.getElementById("vTitle").textContent = p.verdict || "Verdict not yet available";
+  document.getElementById("vGloss").textContent = p.gloss || "";
+  const src = p.source && p.source !== "unavailable"
+    ? "Source: " + p.source
+    : "Source: not yet available";
+  document.getElementById("vSource").textContent = src;
+
+  // Progress bar (effective → CROSSVAL_MIN_EFFECTIVE_DATES, with adaptive tick)
+  const now = (p.effective_now==null) ? 0 : Number(p.effective_now);
+  const tgt = Math.max(1, Number(p.effective_target || 1));
+  const pct = Math.max(2, Math.min(100, Math.round(now / tgt * 100)));
+  const cls = now >= tgt ? "" : (now >= tgt * 0.5 ? "mid" : "low");
+  const tickPct = Math.min(100, Math.round(Number(p.adaptive_tick || 0) / tgt * 100));
+  const tickHtml = tickPct > 0 && tickPct <= 100
+    ? `<span class="pbtick" style="left:${tickPct}%" data-label="adaptive-weighting (${p.adaptive_tick})"></span>`
+    : "";
+  const rawTxt = (p.raw_now==null)
+    ? `raw dates: not yet available`
+    : `${p.raw_now} / ${p.raw_target} raw dates${Number(p.raw_now) >= p.raw_target ? " — clears breadth floor" : ""}`;
+  document.getElementById("progressBar").innerHTML = `
+    <div class="pblab">Effective validation dates</div>
+    <div class="pbcount">${p.effective_now==null ? '&mdash;' : Number(p.effective_now).toFixed(1)} / ${p.effective_target}</div>
+    <div class="pbbar"><div class="pbfill ${cls}" style="width:${pct}%"></div>${tickHtml}</div>
+    <div class="pbraw">${rawTxt}</div>
+    <div class="pbfoot">Verdict requires &ge; ${p.effective_target} effective dates plus spread, t-stat, and bootstrap gates. Adaptive weighting is a separate downstream gate — see tick.</div>`;
+
+  // Maturation summary + delta chip
+  let deltaHtml = "";
+  if (p.delta_matured !== null && p.delta_matured !== undefined) {
+    const d = Number(p.delta_matured);
+    if (d > 0) deltaHtml = `<span class="matdelta up">&#9650; +${d} since prior run</span>`;
+    else if (d < 0) deltaHtml = `<span class="matdelta down">&#9660; ${d} since prior run</span>`;
+    else deltaHtml = `<span class="matdelta flat">flat since prior run</span>`;
+  }
+  document.getElementById("maturationBox").innerHTML = `
+    <div class="pblab">Signal maturation (10-day)</div>
+    <div class="matline">Matured <b>${num(p.matured)}</b> &middot; Awaiting <b>${num(p.maturing)}</b></div>
+    <div class="matline">Total <b>${num(p.total)}</b></div>
+    ${deltaHtml}`;
+})();
+
+// Universe pill strip in the header (donut removed).
+(function renderUniversePills(){
+  const uni = DATA.universe || {};
+  const keys = Object.keys(uni);
+  if (!keys.length) return;
+  const el = document.getElementById("universePills");
+  el.innerHTML = keys.map(k => `<span class="upill">${k} &middot; <b>${uni[k]}</b></span>`).join("");
+})();
+
 
 // Readiness meter — replaces the 5D-vs-10D evidence tile row with a
 // horizontal progress-bar visual driven by the 10-day validation stats.
@@ -898,17 +1374,25 @@ document.getElementById("maturityCards").innerHTML = `
 
 
 
-// Universe composition donut — uses teal/blue/violet/amber, never crimson.
-const uni = DATA.universe || {};
-const uniLabels = Object.keys(uni);
-const uniVals   = uniLabels.map(k => uni[k]);
-safeChart("universeChart",{
-  type:"doughnut",
-  data:{labels:uniLabels, datasets:[{data:uniVals.length?uniVals:[1],
-    backgroundColor:["#38BDB0","#58A6FF","#A371F7","#F2B13C","#7FE0C6","#9CC6FF"].slice(0,Math.max(uniLabels.length,1)),
-    borderColor:"#0B0B0F", borderWidth:2}]},
-  options:{cutout:"62%", plugins:{legend:{position:"bottom",labels:{boxWidth:11,padding:12}}}}
-});
+// Universe donut removed — counts now live in the header pill strip above.
+
+// Shadow streak strip — running record of consecutive lead / verdict-positive runs.
+(function renderStreakStrip(){
+  const sh = DATA.shadow || {};
+  const h  = sh.history || {};
+  const strip = document.getElementById("streakStrip");
+  const leadCls = (h.lead_streak||0) >= (h.min_streak||8) ? "" : "warn";
+  const vposCls = (h.vpos_streak||0) >= (h.min_streak||8) ? "" : "warn";
+  const rows = [
+    `<span class="streak ${leadCls}">Shadow lead streak: <b>${h.lead_streak||0} run${(h.lead_streak||0)===1?'':'s'}</b></span>`,
+    `<span class="streak ${vposCls}">Verdict-positive streak: <b>${h.vpos_streak||0} run${(h.vpos_streak||0)===1?'':'s'}</b></span>`,
+    `<span class="streak">Green requires: &ge; <b>${h.min_streak||8}</b> consecutive leads <b>AND</b> verdict = Validation Positive <b>AND</b> shadow matured-independent obs &ge; <b>${h.min_matured_obs||6}</b></span>`,
+  ];
+  if (!h.available) {
+    rows.unshift(`<span class="streak warn">History not yet available &mdash; ledger will populate after next shadow_vs_official run.</span>`);
+  }
+  strip.innerHTML = rows.join("");
+})();
 
 // Shadow vs official — KPI cards + horizontal stacked bar (replaces crimson donut).
 const sh = DATA.shadow || {};
@@ -929,9 +1413,12 @@ safeChart("shadowBar",{
   options:{indexAxis:"y", plugins:{legend:{position:"bottom",labels:{boxWidth:10,padding:10}}},
     scales:{x:{stacked:true,grid:{color:"rgba(255,255,255,0.06)"}},y:{stacked:true,grid:{display:false}}}}
 });
+const _shadowReasonHtml = sh.reason ? `<div style="margin-bottom:6px">${sh.reason}</div>` : "";
 document.getElementById("shadowWarnings").innerHTML =
-  (sh.warnings && sh.warnings.length) ? "Shadow neutralizations: " + sh.warnings.map(w=>`<span class="pill">${w}</span>`).join(" ")
-                                      : "";
+  _shadowReasonHtml +
+  ((sh.warnings && sh.warnings.length) ? "Shadow neutralizations: " + sh.warnings.map(w=>`<span class="pill">${w}</span>`).join(" ")
+                                       : "");
+
 
 const qh = DATA.quintile_horizon;
 const qvals = qh ? (DATA.quintile[String(qh)] || []) : [];
@@ -977,18 +1464,31 @@ safeChart("scatterChart",{
 });
 
 
+// Watchlist banner + auto-open scatter based on verdict.
+const _isLive = DATA.verdict === "Validation Positive";
+{
+  const wb = document.getElementById("watchBanner");
+  if (wb) wb.style.display = _isLive ? "none" : "block";
+  const sd = document.getElementById("scatterDetails");
+  if (sd && _isLive) sd.open = true;
+}
+
 // candidate cards
 const dotc={red:"d-red",amber:"d-amber",green:"d-green",dim:"d-dim"};
+const _ribbon = _isLive
+  ? '<div class="ribbon live">LIVE</div>'
+  : '<div class="ribbon watch">WATCHLIST</div>';
 document.getElementById("cards").innerHTML = (DATA.cards||[]).map(c=>`
  <div class="card ${c.clean?'clean':''}">
+   ${_ribbon}
    <div class="top">
      <div><div class="sym">${c.sym}</div><div class="nm">${c.nm||''}</div></div>
      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
        <div class="px"><div class="lbl">Price</div><div class="p">&#8377;${num(c.px)}</div></div>
-       <span class="lblchip ${c.clean?'review':''}">${c.label}</span>
         ${c.in_shadow_top5 ? '<span class="lblchip shadow">Also in shadow Top 5</span>' : ''}
      </div>
    </div>
+
    <div class="levels">
      <div class="lv"><div class="l">Buy zone</div><div class="n">${num(c.bzl)}&ndash;${num(c.bzh)}</div></div>
      <div class="lv stop"><div class="l">Stop</div><div class="n">${num(c.stop)}</div></div>
@@ -1117,38 +1617,100 @@ document.getElementById("excel").textContent = DATA.excel;
   wrap.style.display="block";
 })();
 
-// ── Alpha-Zoo survivors tile (step 5) ──
-(function renderAlphaZoo(){
-  const z = DATA.alpha_zoo;
-  if(!z) return;
+// ── Alpha-Zoo evidence panel: standalone IC, residual IC, t-stat, verdict ──
+(function renderAlphaEvidence(){
+  const ev = DATA.alpha_evidence;
+  const legacy = DATA.alpha_zoo;
   const wrap = document.getElementById("alphaZooWrap");
-  const cap = document.getElementById("alphaZooCaption");
+  const cap  = document.getElementById("alphaZooCaption");
   const body = document.getElementById("alphaZooBody");
-  if(z.survivors && z.survivors.length){
-    cap.innerHTML = `<b>${z.count}</b> signal${z.count===1?'':'s'} independently predicted 5–21 day moves over the last ~12 months (IC≥${z.min_ic}, |t|≥${z.min_tstat}). Blend into scoring gated on ≥${z.min_for_tilt} survivors.`;
-    let html = '<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr>'
-      + ['Alpha','Horizon (d)','Mean IC','t-stat','Hit rate'].map(h=>`<th style="padding:6px 8px;text-align:left;color:var(--muted);border-bottom:1px solid var(--line);font-weight:500">${h}</th>`).join('')
-      + '</tr></thead><tbody>';
-    z.survivors.forEach(s=>{
-      html += `<tr><td style="padding:6px 8px">${s.alpha}</td><td style="padding:6px 8px">${s.horizon}</td><td style="padding:6px 8px">${(s.mean_IC>0?'+':'')+s.mean_IC.toFixed(3)}</td><td style="padding:6px 8px">${(s.t_stat==null?'—':s.t_stat.toFixed(2))}</td><td style="padding:6px 8px">${s.hit_rate==null?'—':(s.hit_rate*100).toFixed(0)+'%'}</td></tr>`;
-    });
-    html += '</tbody></table>';
-    body.innerHTML = html;
-  } else if(z.top_by_ic && z.top_by_ic.length){
-    cap.innerHTML = `No alpha cleared IC/t-stat thresholds yet — showing top 6 by |mean IC| for review. Scoring blend stays disabled.`;
-    let html = '<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr>'
-      + ['Alpha','Horizon (d)','Mean IC','t-stat'].map(h=>`<th style="padding:6px 8px;text-align:left;color:var(--muted);border-bottom:1px solid var(--line);font-weight:500">${h}</th>`).join('')
-      + '</tr></thead><tbody>';
-    z.top_by_ic.forEach(s=>{
-      html += `<tr><td style="padding:6px 8px">${s.alpha}</td><td style="padding:6px 8px">${s.horizon}</td><td style="padding:6px 8px">${Number(s.mean_IC||0).toFixed(3)}</td><td style="padding:6px 8px">${s.t_stat==null?'—':Number(s.t_stat).toFixed(2)}</td></tr>`;
-    });
-    html += '</tbody></table>';
-    body.innerHTML = html;
-  } else {
+  const foot = document.getElementById("alphaZooFoot");
+  if(!wrap) return;
+
+  // If neither the new evidence payload nor the legacy zoo payload exists,
+  // render an explicit "not yet available" panel — never hide the story.
+  if(!ev && !legacy){
+    cap.innerHTML = `<b>Not yet available.</b> Run the alpha_evaluator step to populate <code>alpha_promotion_log.json</code>, <code>alpha_zoo_ic_report.csv</code>, and <code>alpha_zoo_survivors.json</code>.`;
+    body.innerHTML = "";
+    foot.innerHTML = "";
+    wrap.style.display = "block";
     return;
   }
-  wrap.style.display="block";
+
+  if(ev && ev.rows && ev.rows.length){
+    const mIC = ev.min_ic==null ? "—" : Number(ev.min_ic).toFixed(3);
+    const mT  = ev.min_tstat==null ? "—" : Number(ev.min_tstat).toFixed(2);
+    const mR  = ev.min_residual_ic==null ? "—" : Number(ev.min_residual_ic).toFixed(3);
+    cap.innerHTML = `Survivor gate: IC &ge; <b>${mIC}</b>, t-stat &ge; <b>${mT}</b>, residual IC &ge; <b>${mR}</b>. New candidates enter live scoring only after clearing all three.`;
+    const newSet = new Set(["delivery_momentum","iv_rank"]);
+    const chipFor = (r) => {
+      if(r.promote === true) return '<span class="azchip green">Promoted</span>';
+      if(r.promote === false){
+        const belowResidual = r.residual_ic != null && ev.min_residual_ic != null && Math.abs(r.residual_ic) < ev.min_residual_ic;
+        if(belowResidual) return '<span class="azchip amber">Watch — below residual gate</span>';
+        return '<span class="azchip red">Rejected</span>';
+      }
+      return '<span class="azchip dim">Baseline (no eval)</span>';
+    };
+    const fmtIC = v => (v==null) ? '&mdash;' : (v>=0?'+':'') + Number(v).toFixed(3);
+    const fmtT  = v => (v==null) ? '&mdash;' : Number(v).toFixed(2);
+    let html = '<table class="aztable"><thead><tr>'
+      + ['Alpha','Standalone IC','Residual IC','t-stat','Windows','Verdict']
+        .map(h=>`<th>${h}</th>`).join('')
+      + '</tr></thead><tbody>';
+    ev.rows.forEach(r => {
+      const nameCell = `${r.alpha}${newSet.has(r.alpha) ? ' <span class="aznew">NEW CANDIDATE</span>' : ''}`;
+      const reason = r.reason ? `<div class="sub" style="font-size:10.5px;margin-top:2px">${r.reason}</div>` : '';
+      html += `<tr>
+        <td>${nameCell}${reason}</td>
+        <td class="num">${fmtIC(r.standalone_ic)}</td>
+        <td class="num">${fmtIC(r.residual_ic)}</td>
+        <td class="num">${fmtT(r.tstat)}</td>
+        <td class="num">${r.windows==null?'&mdash;':r.windows}</td>
+        <td>${chipFor(r)}</td>
+      </tr>`;
+    });
+    html += '</tbody></table>';
+    body.innerHTML = html;
+    const src = ev.sources || {};
+    const bits = [];
+    if(!src.promotion_log) bits.push("alpha_promotion_log.json not yet available");
+    if(!src.ic_report)     bits.push("alpha_zoo_ic_report.csv not yet available");
+    if(!src.survivors)     bits.push("alpha_zoo_survivors.json not yet available");
+    foot.innerHTML = bits.length ? "Partial sources: " + bits.join(" &middot; ") + "." : "";
+    wrap.style.display = "block";
+    return;
+  }
+
+  // Fall back to the legacy zoo payload when only IC/survivor data exists.
+  if(legacy){
+    if(legacy.survivors && legacy.survivors.length){
+      cap.innerHTML = `<b>${legacy.count}</b> signal${legacy.count===1?'':'s'} cleared IC/t-stat thresholds (IC&ge;${legacy.min_ic}, |t|&ge;${legacy.min_tstat}). Residual-IC evidence not yet available.`;
+      let html = '<table class="aztable"><thead><tr>'
+        + ['Alpha','Horizon (d)','Mean IC','t-stat','Hit rate'].map(h=>`<th>${h}</th>`).join('')
+        + '</tr></thead><tbody>';
+      legacy.survivors.forEach(s=>{
+        html += `<tr><td>${s.alpha}</td><td class="num">${s.horizon}</td><td class="num">${(s.mean_IC>0?'+':'')+Number(s.mean_IC).toFixed(3)}</td><td class="num">${s.t_stat==null?'—':Number(s.t_stat).toFixed(2)}</td><td class="num">${s.hit_rate==null?'—':(s.hit_rate*100).toFixed(0)+'%'}</td></tr>`;
+      });
+      body.innerHTML = html + '</tbody></table>';
+    } else if(legacy.top_by_ic && legacy.top_by_ic.length){
+      cap.innerHTML = `No alpha cleared IC/t-stat thresholds yet — top by |mean IC| for review. Scoring blend stays disabled.`;
+      let html = '<table class="aztable"><thead><tr>'
+        + ['Alpha','Horizon (d)','Mean IC','t-stat'].map(h=>`<th>${h}</th>`).join('')
+        + '</tr></thead><tbody>';
+      legacy.top_by_ic.forEach(s=>{
+        html += `<tr><td>${s.alpha}</td><td class="num">${s.horizon}</td><td class="num">${Number(s.mean_IC||0).toFixed(3)}</td><td class="num">${s.t_stat==null?'—':Number(s.t_stat).toFixed(2)}</td></tr>`;
+      });
+      body.innerHTML = html + '</tbody></table>';
+    } else {
+      cap.innerHTML = `<b>Not yet available.</b> No survivors or IC report to display.`;
+      body.innerHTML = "";
+    }
+    foot.innerHTML = "";
+    wrap.style.display = "block";
+  }
 })();
+
 </script>
 </body></html>
 """

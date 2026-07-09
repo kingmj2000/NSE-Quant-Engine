@@ -99,6 +99,52 @@ def build() -> dict:
     REPORT.write_text("\n".join(lines), encoding="utf-8")
     pd.DataFrame([summary]).to_csv(CSV, index=False)
     (OUT / "shadow_vs_official.json").write_text(json.dumps(summary, indent=2))
+
+    # ── append per-run ledger (fail-soft, idempotent by calendar date) ──
+    # Read by the dashboard's shadow streak strip. Never raise — a broken
+    # ledger append must not block the main report.
+    try:
+        from datetime import date as _date
+        HIST = OUT / "shadow_vs_official_history.csv"
+        rec_low = str(rec).lower()
+        beats = bool(
+            (not pd.isna(ev_sha.get("ev_per_day"))) and
+            (not pd.isna(ev_off.get("ev_per_day"))) and
+            (ev_sha["ev_per_day"] > ev_off["ev_per_day"])
+        )
+        shadow_state = (
+            "green" if "shadow leads" in rec_low or "switch to shadow" in rec_low
+            else "red" if "official still leads" in rec_low or "do not switch" in rec_low
+                      or v_off.get("verdict") == "Validation Negative"
+            else "amber"
+        )
+        matured_obs = None
+        try:
+            stats_sha = v_sha.get("stats") or {}
+            matured_obs = stats_sha.get("effective_validation_dates") \
+                          or stats_sha.get("validation_dates")
+        except Exception:
+            matured_obs = None
+        overlap_ct = len(top_off & top_sha)
+        today_str = _date.today().isoformat()
+        row = {
+            "date": today_str,
+            "verdict": v_off.get("verdict"),
+            "shadow_state": shadow_state,
+            "shadow_beats_official_net": beats,
+            "shadow_matured_obs": matured_obs,
+            "overlap": overlap_ct,
+        }
+        if HIST.exists():
+            hist = pd.read_csv(HIST)
+            hist = hist[hist["date"].astype(str) != today_str]
+            hist = pd.concat([hist, pd.DataFrame([row])], ignore_index=True)
+        else:
+            hist = pd.DataFrame([row])
+        hist.to_csv(HIST, index=False)
+    except Exception:
+        pass
+
     return summary
 
 

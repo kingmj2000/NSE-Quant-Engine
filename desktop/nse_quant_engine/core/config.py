@@ -224,6 +224,16 @@ ADAPTIVE_MAX_STEP           = _f("ADAPTIVE_MAX_STEP", 0.05)
 ADAPTIVE_MAX_TOTAL_DRIFT    = _f("ADAPTIVE_MAX_TOTAL_DRIFT", 0.30)
 ADAPTIVE_RIDGE_ALPHA        = _f("ADAPTIVE_RIDGE_ALPHA", 1.0)
 
+# ── Dashboard shadow-green gate ─────────────────────────────────────────────
+# Dashboard "GREEN" chip must not be easier to earn than the documented
+# six shadow-switch criteria. Green requires ALL of:
+#   1. official verdict = Validation Positive
+#   2. consecutive shadow-lead runs      >= SHADOW_GREEN_MIN_STREAK
+#   3. consecutive verdict-positive runs >= SHADOW_GREEN_MIN_STREAK
+#   4. shadow matured-independent obs    >= SHADOW_GREEN_MIN_MATURED_OBS
+SHADOW_GREEN_MIN_STREAK       = _i("SHADOW_GREEN_MIN_STREAK", 8)
+SHADOW_GREEN_MIN_MATURED_OBS  = _i("SHADOW_GREEN_MIN_MATURED_OBS", CROSSVAL_MIN_EFFECTIVE_DATES)
+
 # ── Validation-layer Bayesian shrinkage (protects ship/hold gate) ───────────
 # Separate from adaptive-weight shrinkage; always on unless explicitly disabled.
 VALIDATION_BAYES_SHRINK        = os.environ.get("VALIDATION_BAYES_SHRINK", "1") not in ("0", "false", "False")
