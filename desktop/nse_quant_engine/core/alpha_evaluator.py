@@ -199,12 +199,17 @@ def residual_ic(candidate: pd.Series,
         return float("nan")
     c = candidate.loc[idx].astype(float).to_numpy()
     S = survivors.loc[idx].astype(float).fillna(0.0).to_numpy()
-    # OLS: residual = c - S β̂
+    # Add intercept column so pure affine transforms of a survivor produce
+    # ≈zero residual variance (matches "redundant" intuition).
+    S_aug = np.hstack([S, np.ones((S.shape[0], 1))])
     try:
-        beta, *_ = np.linalg.lstsq(S, c, rcond=None)
-        resid = pd.Series(c - S @ beta, index=idx)
+        beta, *_ = np.linalg.lstsq(S_aug, c, rcond=None)
+        resid = pd.Series(c - S_aug @ beta, index=idx)
     except Exception:
         return float("nan")
+    # If the residual is numerically zero (perfect linear combo), IC is 0 by fiat.
+    if float(np.std(resid.to_numpy())) < 1e-9:
+        return 0.0
     return _spearman_ic(resid, fwd_return)
 
 
