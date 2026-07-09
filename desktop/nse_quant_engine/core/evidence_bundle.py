@@ -40,6 +40,13 @@ _CANDIDATE_FILES = [
     "cross_sectional_validation_report.md",
     "validation_status.json",
     "news_market_latest.csv",
+    # Part A (tightened plan) artifacts
+    "alpha_promotion_log.json",
+    "alpha_weights_current.json",
+    "scoring_sector_neutralization.csv",
+    # Part B (shadow-only) artifacts
+    "adaptive_weights_shadow.json",
+    "adaptive_weights_log.json",
 ]
 
 

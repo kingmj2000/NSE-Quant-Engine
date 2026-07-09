@@ -576,10 +576,181 @@ def test_bundle_includes_steps_14_16():
     _ok("evidence bundle wires steps 14–16 files")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Part A + Part B (tightened plan) tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_sector_neutralize_zero_mean_and_skips():
+    from core import sector_neutralize as sn
+    # 6 members in TECH (eligible), 3 in FMCG (skipped, size<5)
+    rows = []
+    for i, s in enumerate(["A", "B", "C", "D", "E", "F"]):
+        rows.append({"Symbol": s, "Sector": "TECH", "raw": 10 + i})
+    for i, s in enumerate(["X", "Y", "Z"]):
+        rows.append({"Symbol": s, "Sector": "FMCG", "raw": 100 + i})
+    df = pd.DataFrame(rows)
+    out, audit = sn.neutralize(df, ["raw"], "Sector", min_members=5)
+    tech_sz = audit[audit["Sector"] == "TECH"]["SectorZ_raw"].astype(float)
+    assert abs(tech_sz.mean()) < 1e-6, tech_sz.mean()
+    fmcg_skipped = audit[audit["Sector"] == "FMCG"]["Skipped"].iloc[0]
+    assert bool(fmcg_skipped) is True
+    _ok("sector_neutralize zero-mean per sector + skip small sectors")
+
+
+def test_alpha_weighting_survivor_ic_and_turnover_monotone():
+    from core import alpha_weighting as aw
+    base = {"a": 0.5, "b": 0.3, "c": 0.2}
+    ic = {"a": 0.04, "b": 0.04}          # c has no survivor IC → held at baseline
+    turn_low  = {"a": 0.0, "b": 0.0}
+    turn_high = {"a": 0.0, "b": 1.0}
+    w_low  = aw.compute_weights(base, ic, turn_low, lam=0.5)
+    w_high = aw.compute_weights(base, ic, turn_high, lam=0.5)
+    # higher turnover on b → b's weight drops
+    assert w_high["b"]["final_weight"] < w_low["b"]["final_weight"]
+    # c is held at baseline in both
+    assert w_low["c"]["gated"] is False and w_high["c"]["gated"] is False
+    # sums to ~1
+    for w in (w_low, w_high):
+        assert abs(sum(r["final_weight"] for r in w.values()) - 1.0) < 1e-4
+    _ok("alpha_weighting monotone in turnover + uses survivor IC only")
+
+
+def test_residual_ic_rejects_linear_combo():
+    from core import alpha_evaluator as ae
+    idx = pd.Index([f"S{i}" for i in range(20)], name="Symbol")
+    survivor_a = pd.Series(np.arange(20, dtype=float), index=idx)
+    # candidate is a pure scalar multiple of survivor → residual ≈ 0 → IC ≈ 0
+    candidate = survivor_a * 2.0 + 1.0
+    fwd = pd.Series(np.arange(20, dtype=float), index=idx)
+    r_ic = ae.residual_ic(candidate, pd.DataFrame({"a": survivor_a}), fwd)
+    assert abs(r_ic) < 0.15, r_ic
+    # a truly independent candidate should have non-zero residual IC
+    rng = np.random.default_rng(7)
+    indep = pd.Series(rng.normal(size=20), index=idx)
+    standalone = ae._spearman_ic(indep, fwd)  # sanity
+    r_ic2 = ae.residual_ic(indep, pd.DataFrame({"a": survivor_a}), fwd)
+    assert pd.notna(r_ic2)
+    _ok(f"residual_ic rejects linear combos (redundant={r_ic:.3f}, indep={r_ic2:.3f}, stand={standalone:.3f})")
+
+
+def test_adaptive_disabled_is_zero_effect():
+    from core import adaptive_weights as aw
+    log = aw.fit_adaptive_weights(
+        panel=pd.DataFrame({"Date": [], "Fwd_Return": [], "a": [], "b": []}),
+        baseline={"a": 0.5, "b": 0.5},
+        target_date=pd.Timestamp("2026-07-09"),
+        horizon=10,
+        enabled=False, n_effective_dates=999,
+        validation_verdict="Validation Positive",
+    )
+    assert log["dormant"] is True
+    assert log["shrunk_final"] == {"a": 0.5, "b": 0.5}
+    _ok("adaptive dormant when ADAPTIVE_ENABLED=False → zero effect")
+
+
+def test_adaptive_refuses_symbol_keyed_inputs():
+    from core import adaptive_weights as aw
+    bad = pd.DataFrame({"Date": [pd.Timestamp("2020-01-01")], "Symbol": ["X"],
+                        "Fwd_Return": [0.01], "a": [0.5]})
+    try:
+        aw.fit_adaptive_weights(
+            panel=bad, baseline={"a": 1.0},
+            target_date=pd.Timestamp("2026-07-09"), horizon=10,
+            enabled=True, n_effective_dates=200, min_dates=60,
+            validation_verdict="Validation Positive",
+        )
+    except ValueError as e:
+        assert "symbol" in str(e).lower()
+        _ok("adaptive refuses per-symbol inputs (guardrail #5)")
+        return
+    raise AssertionError("adaptive should have refused per-symbol keyed panel")
+
+
+def test_adaptive_refuses_look_ahead():
+    from core import adaptive_weights as aw
+    tgt = pd.Timestamp("2026-07-09")
+    # Row dated AFTER target - horizon → look-ahead
+    panel = pd.DataFrame({
+        "Date": [tgt - pd.Timedelta(days=1)] * 40,
+        "Fwd_Return": np.random.RandomState(1).randn(40) * 0.01,
+        "a": np.random.RandomState(2).randn(40),
+        "b": np.random.RandomState(3).randn(40),
+    })
+    try:
+        aw.fit_adaptive_weights(
+            panel=panel, baseline={"a": 0.5, "b": 0.5},
+            target_date=tgt, horizon=10,
+            enabled=True, n_effective_dates=200, min_dates=60,
+            validation_verdict="Validation Positive",
+        )
+    except ValueError as e:
+        assert "look-ahead" in str(e).lower()
+        _ok("adaptive refuses look-ahead rows (guardrail #1)")
+        return
+    raise AssertionError("adaptive should have refused look-ahead panel")
+
+
+def test_adaptive_total_drift_cap_forces_dormant():
+    from core import adaptive_weights as aw
+    # Construct panel where ridge will strongly prefer alpha 'a' (perfect signal)
+    n = 200
+    rng = np.random.default_rng(11)
+    a = rng.normal(size=n)
+    b = rng.normal(size=n)
+    fwd = 5.0 * a + 0.01 * rng.normal(size=n)   # a dominates → total drift high
+    tgt = pd.Timestamp("2026-07-09")
+    panel = pd.DataFrame({
+        "Date": [tgt - pd.Timedelta(days=30)] * n,
+        "Fwd_Return": fwd, "a": a, "b": b,
+    })
+    log = aw.fit_adaptive_weights(
+        panel=panel, baseline={"a": 0.5, "b": 0.5},
+        target_date=tgt, horizon=10,
+        enabled=True, n_effective_dates=200, min_dates=60,
+        validation_verdict="Validation Positive",
+        max_total_drift=0.10,        # tight cap → will trip
+        shrinkage_alpha=0.5,
+    )
+    assert log["dormant"] is True
+    assert "total drift" in (log["dormant_reason"] or "")
+    _ok("adaptive total-drift cap forces dormant when fitted drifts too far")
+
+
+def test_validation_bayes_shrinkage_moves_toward_prior():
+    from core import validation_status as vs
+    # small n, extreme hit rate → posterior should pull toward 0.5
+    p = vs.shrink_hit_rate(1.0, n_obs=1, prior_alpha=10, prior_beta=10)
+    assert 0.45 < p < 0.55, p
+    # large n → observed dominates
+    p2 = vs.shrink_hit_rate(0.7, n_obs=1000, prior_alpha=10, prior_beta=10)
+    assert 0.68 < p2 < 0.72, p2
+    # IC shrinkage
+    ic = vs.shrink_ic(0.10, n_obs=5, prior_n=20)
+    assert 0.0 < ic < 0.05, ic
+    _ok("validation Bayes shrinkage moves small samples toward prior")
+
+
+def test_optional_fetchers_have_delivery_and_iv_rank():
+    from core import optional_data_fetchers as odf
+    # smoke: the functions exist, refresh_all accepts them in `only`
+    assert hasattr(odf, "fetch_delivery_pct")
+    assert hasattr(odf, "fetch_iv_rank")
+    _ok("optional fetchers expose delivery_pct + iv_rank")
+
+
 if __name__ == "__main__":
     for _name in ("test_institutional_flow_optional_inputs",
                   "test_regime_tilt_report",
                   "test_rebalance_diff_first_and_second_run",
-                  "test_bundle_includes_steps_14_16"):
+                  "test_bundle_includes_steps_14_16",
+                  "test_sector_neutralize_zero_mean_and_skips",
+                  "test_alpha_weighting_survivor_ic_and_turnover_monotone",
+                  "test_residual_ic_rejects_linear_combo",
+                  "test_adaptive_disabled_is_zero_effect",
+                  "test_adaptive_refuses_symbol_keyed_inputs",
+                  "test_adaptive_refuses_look_ahead",
+                  "test_adaptive_total_drift_cap_forces_dormant",
+                  "test_validation_bayes_shrinkage_moves_toward_prior",
+                  "test_optional_fetchers_have_delivery_and_iv_rank"):
         globals()[_name]()
-    print("ALL STEP 14–16 TESTS PASSED")
+    print("ALL STEP 14–16 + PART A/B TESTS PASSED")

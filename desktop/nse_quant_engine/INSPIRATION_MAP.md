@@ -41,3 +41,13 @@ websockets, broker adapters, chat UI) or live-trading loops from Vibe
 Trading (execution, order routing, RL training). This project stays a
 decision-support research engine that hands a full evidence pack to a human
 + external LLM.
+
+
+## v4.4 additions (Fincept + Vibe-Trading)
+- **Delivery % overlay** (Fincept-style flow lens) → `alpha_delivery_momentum`, gated by `alpha_evaluator`.
+- **IV Rank overlay** (options-derived signal) → `alpha_iv_rank`, same gate.
+- **Sector-neutral scoring** (Vibe-Trading factor discipline) → `core/sector_neutralize.py`.
+- **Turnover-aware alpha weighting** (Vibe-Trading cost discipline) → `core/alpha_weighting.py`.
+- **Residual-IC promotion** (Vibe-Trading IC-decorrelation) → `alpha_evaluator.residual_ic`.
+- **Bayesian shrinkage on validation stats** (Vibe-Trading Bayesian discipline) → `validation_status.apply_bayes_shrink`.
+- **Guardrailed adaptive weighting, shadow-only** (Vibe-Trading online learning + safety rails) → `core/adaptive_weights.py`.

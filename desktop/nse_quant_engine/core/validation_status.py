@@ -31,6 +31,52 @@ VALID_VERDICTS = (
 )
 
 
+# ─── Bayesian shrinkage on validation stats (protects the ship/hold gate) ───
+
+def shrink_hit_rate(observed: float, n_obs: int,
+                    prior_alpha: float | None = None,
+                    prior_beta: float | None = None) -> float:
+    """Beta prior posterior mean on hit-rate. Small-sample-safe."""
+    if observed is None or (isinstance(observed, float) and (observed != observed)):
+        return float("nan")
+    a0 = float(prior_alpha if prior_alpha is not None else getattr(C, "VALIDATION_HITRATE_PRIOR_ALPHA", 10.0))
+    b0 = float(prior_beta  if prior_beta  is not None else getattr(C, "VALIDATION_HITRATE_PRIOR_BETA",  10.0))
+    n  = max(int(n_obs or 0), 0)
+    successes = float(observed) * n
+    return (a0 + successes) / (a0 + b0 + n)
+
+
+def shrink_ic(observed: float, n_obs: int, prior_n: int | None = None) -> float:
+    """Shrink IC toward 0 with weight = prior_n / (prior_n + n)."""
+    if observed is None or (isinstance(observed, float) and (observed != observed)):
+        return float("nan")
+    pn = int(prior_n if prior_n is not None else getattr(C, "VALIDATION_IC_PRIOR_N", 20))
+    n  = max(int(n_obs or 0), 0)
+    w_prior = pn / (pn + n) if (pn + n) > 0 else 1.0
+    return (1.0 - w_prior) * float(observed) + w_prior * 0.0
+
+
+def apply_bayes_shrink(stats: dict) -> dict:
+    """Return a new stats dict with `hit_rate` and `adj_tstat` shrunk toward
+    prior. Raw values are preserved under `*_raw` keys so the artifact stays
+    transparent. Safe on missing keys."""
+    if not getattr(C, "VALIDATION_BAYES_SHRINK", True):
+        return dict(stats)
+    out = dict(stats or {})
+    n_dates = int(out.get("effective_validation_dates") or out.get("validation_dates") or 0)
+    if "hit_rate" in out and out.get("hit_rate") is not None:
+        out["hit_rate_raw"] = out.get("hit_rate")
+        out["hit_rate"] = round(shrink_hit_rate(out["hit_rate"], n_dates), 6)
+    # Treat adjusted t-stat like an IC-scale quantity: shrink toward 0.
+    if "adj_tstat" in out and out.get("adj_tstat") is not None:
+        out["adj_tstat_raw"] = out.get("adj_tstat")
+        out["adj_tstat"] = round(shrink_ic(out["adj_tstat"], n_dates), 6)
+    if "spread" in out and out.get("spread") is not None:
+        out["spread_raw"] = out.get("spread")
+        out["spread"] = round(shrink_ic(out["spread"], n_dates), 6)
+    return out
+
+
 def decide_verdict(stats: dict) -> tuple[str, str]:
     """
     Apply the validation gates from config to the computed cross-sectional stats.

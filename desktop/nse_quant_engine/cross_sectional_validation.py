@@ -680,6 +680,10 @@ def _write_validation_status(spread_summary: pd.DataFrame, verdict: str, grade: 
                     "adj_tstat": float(r.get("Adjusted_TStat_TopMinusBottom", 0) or 0),
                     "bootstrap_prob": float(r.get("Bootstrap_Prob_Positive", 0) or 0),
                 }
+        try:
+            stats_payload = _vs.apply_bayes_shrink(stats_payload)
+        except Exception:
+            pass
         _vs.write_status(OUTPUT_DIR / "validation_status.json", verdict, grade, stats_payload, horizon=horizon)
         print("Saved: " + str(OUTPUT_DIR / "validation_status.json"))
     except Exception as _e:
