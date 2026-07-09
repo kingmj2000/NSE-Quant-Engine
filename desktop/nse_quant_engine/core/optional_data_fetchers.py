@@ -92,57 +92,121 @@ def _merge_dated(existing: Path, new_df: pd.DataFrame, date_col: str,
 # =========================================================================
 # 1) FII / DII daily flow — Moneycontrol table (pandas.read_html)
 # =========================================================================
+# ---------------------------------------------------------------------------
+# HTML parser helper — pandas.read_html needs a flavor. Try lxml first (fast),
+# then html5lib (tolerant of Moneycontrol's malformed markup), then bs4.
+# ---------------------------------------------------------------------------
+def _try_read_html(text: str) -> list[pd.DataFrame]:
+    last_exc: BaseException | None = None
+    for flavor in ("lxml", "html5lib", "bs4"):
+        try:
+            return pd.read_html(io.StringIO(text), flavor=flavor)
+        except Exception as e:  # ImportError, ValueError, XMLSyntaxError, ...
+            last_exc = e
+            continue
+    raise RuntimeError(f"no HTML parser succeeded: {last_exc}")
+
+
+def _normalize_flow_table(picked: pd.DataFrame) -> pd.DataFrame:
+    if isinstance(picked.columns, pd.MultiIndex):
+        picked.columns = [" ".join([str(x) for x in tup if str(x) != "nan"]).strip()
+                          for tup in picked.columns.to_list()]
+    cmap = {str(c).lower(): c for c in picked.columns}
+    def _find(*needles):
+        for c_lower, c_orig in cmap.items():
+            if all(n in c_lower for n in needles):
+                return c_orig
+        return None
+    date_c = _find("date")
+    fii_net_c = _find("fii", "net") or _find("fii")
+    dii_net_c = _find("dii", "net") or _find("dii")
+    if not (date_c and fii_net_c and dii_net_c):
+        raise RuntimeError(f"could not identify Date/FII/DII columns in {list(picked.columns)}")
+    return pd.DataFrame({
+        "Date": pd.to_datetime(picked[date_c], errors="coerce", dayfirst=True),
+        "FII_Net_INR_Cr": pd.to_numeric(
+            picked[fii_net_c].astype(str).str.replace(",", "").str.replace("−", "-"),
+            errors="coerce"),
+        "DII_Net_INR_Cr": pd.to_numeric(
+            picked[dii_net_c].astype(str).str.replace(",", "").str.replace("−", "-"),
+            errors="coerce"),
+    }).dropna(subset=["Date"])
+
+
+def _fii_dii_from_moneycontrol(sess) -> pd.DataFrame:
+    url = "https://www.moneycontrol.com/stocks/marketstats/fii_dii_activity/index.php"
+    r = sess.get(url, timeout=15)
+    r.raise_for_status()
+    tables = _try_read_html(r.text)
+    picked = None
+    for t in tables:
+        cols = " ".join(str(c) for c in t.columns).lower()
+        if "fii" in cols and "dii" in cols and "net" in cols:
+            picked = t
+            break
+    if picked is None or picked.empty:
+        raise RuntimeError("no FII/DII table found on Moneycontrol page")
+    return _normalize_flow_table(picked)
+
+
+def _fii_dii_from_groww(sess) -> pd.DataFrame:
+    # Groww's public FII/DII widget is a JSON endpoint used by their web page.
+    url = "https://groww.in/v1/api/stocks_data/v1/accord_points/exchange/NSE/type/index/BSEIndex_fii_dii"
+    r = sess.get(url, timeout=15)
+    r.raise_for_status()
+    payload = r.json()
+    rows = payload.get("data") or payload.get("results") or []
+    if not rows:
+        raise RuntimeError("groww returned no FII/DII rows")
+    df = pd.DataFrame(rows)
+    # heuristic mapping
+    cmap = {c.lower(): c for c in df.columns}
+    def pick(*names):
+        for n in names:
+            for k, v in cmap.items():
+                if n in k:
+                    return v
+        return None
+    date_c = pick("date")
+    fii_c = pick("fii_net", "fiinet", "fii")
+    dii_c = pick("dii_net", "diinet", "dii")
+    if not (date_c and fii_c and dii_c):
+        raise RuntimeError(f"groww: cannot map columns {list(df.columns)}")
+    return pd.DataFrame({
+        "Date": pd.to_datetime(df[date_c], errors="coerce"),
+        "FII_Net_INR_Cr": pd.to_numeric(df[fii_c], errors="coerce"),
+        "DII_Net_INR_Cr": pd.to_numeric(df[dii_c], errors="coerce"),
+    }).dropna(subset=["Date"])
+
+
+# =========================================================================
+# 1) FII / DII daily flow — Moneycontrol primary, Groww fallback
+# =========================================================================
 def fetch_fii_dii(data_dir: Path, keep_days: int = 90) -> bool:
     target = data_dir / "fii_dii_daily.csv"
     if _is_fresh(target, FRESH_FLOW_HOURS):
         _log(f"fii_dii_daily.csv fresh (<{FRESH_FLOW_HOURS}h) — skipping fetch")
         return True
-    url = "https://www.moneycontrol.com/stocks/marketstats/fii_dii_activity/index.php"
-    try:
-        sess = _requests_session()
-        r = sess.get(url, timeout=15)
-        r.raise_for_status()
-        tables = pd.read_html(io.StringIO(r.text))
-        # find the table with FII / DII columns
-        picked = None
-        for t in tables:
-            cols = " ".join(str(c) for c in t.columns).lower()
-            if "fii" in cols and "dii" in cols and "net" in cols:
-                picked = t
-                break
-        if picked is None or picked.empty:
-            raise RuntimeError("no FII/DII table found on Moneycontrol page")
-
-        # flatten multi-index headers if present
-        if isinstance(picked.columns, pd.MultiIndex):
-            picked.columns = [" ".join([str(x) for x in tup if str(x) != "nan"]).strip()
-                              for tup in picked.columns.to_list()]
-        # Heuristic column matching
-        cmap = {c.lower(): c for c in picked.columns}
-        def _find(*needles):
-            for c_lower, c_orig in cmap.items():
-                if all(n in c_lower for n in needles):
-                    return c_orig
-            return None
-        date_c = _find("date")
-        fii_net_c = _find("fii", "net") or _find("fii")
-        dii_net_c = _find("dii", "net") or _find("dii")
-        if not (date_c and fii_net_c and dii_net_c):
-            raise RuntimeError(f"could not identify Date/FII/DII columns in {list(picked.columns)}")
-
-        out = pd.DataFrame({
-            "Date": pd.to_datetime(picked[date_c], errors="coerce", dayfirst=True),
-            "FII_Net_INR_Cr": pd.to_numeric(picked[fii_net_c].astype(str).str.replace(",", "").str.replace("−", "-"), errors="coerce"),
-            "DII_Net_INR_Cr": pd.to_numeric(picked[dii_net_c].astype(str).str.replace(",", "").str.replace("−", "-"), errors="coerce"),
-        }).dropna(subset=["Date"])
-        merged = _merge_dated(target, out, "Date", keep_days)
-        data_dir.mkdir(parents=True, exist_ok=True)
-        merged.to_csv(target, index=False)
-        _log(f"fii_dii_daily.csv refreshed ({len(merged)} rows)")
-        return True
-    except Exception as e:
-        _warn("fii_dii (moneycontrol)", e)
-        return target.exists()
+    sess = _requests_session()
+    sources = [
+        ("moneycontrol", _fii_dii_from_moneycontrol),
+        ("groww",        _fii_dii_from_groww),
+    ]
+    for name, fn in sources:
+        try:
+            out = fn(sess)
+            if out.empty:
+                raise RuntimeError("empty result")
+            merged = _merge_dated(target, out, "Date", keep_days)
+            data_dir.mkdir(parents=True, exist_ok=True)
+            merged.to_csv(target, index=False)
+            _log(f"fii_dii_daily.csv refreshed via {name} ({len(merged)} rows)")
+            return True
+        except Exception as e:
+            _log(f"fii_dii source '{name}' failed: {type(e).__name__}: {e}")
+            continue
+    _warn("fii_dii (all sources)", RuntimeError("moneycontrol + groww both failed"))
+    return target.exists()
 
 
 # =========================================================================
