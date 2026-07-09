@@ -1023,6 +1023,77 @@ td .rsym{font-weight:640}
 .foot code{color:var(--txt);background:transparent}
 canvas{margin-top:4px}
 .chart-error{margin-top:10px;padding:12px;border:1px dashed rgba(255,255,255,.14);border-radius:10px;color:var(--amber);background:rgba(242,177,60,.08);font-size:12px}
+
+/* Progress-to-a-verdict section */
+.progress-row{display:grid;grid-template-columns:minmax(220px,1fr) minmax(280px,2fr) minmax(200px,1fr);gap:14px;align-items:stretch}
+@media(max-width:900px){.progress-row{grid-template-columns:1fr}}
+.vchip{display:flex;flex-direction:column;justify-content:center;gap:6px;padding:12px 14px;border-radius:12px;border:1px solid var(--line);backdrop-filter:blur(10px)}
+.vchip .vhead{font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.6px}
+.vchip .vtitle{font-size:17px;font-weight:700}
+.vchip .vgloss{font-size:12px;color:var(--muted)}
+.vchip .vsrc{font-size:10px;color:var(--dim);margin-top:2px}
+.vchip.green {background:linear-gradient(135deg,rgba(63,185,80,0.20),rgba(20,80,40,0.10));border-color:rgba(63,185,80,0.45)}
+.vchip.green .vtitle{color:var(--green)}
+.vchip.amber {background:linear-gradient(135deg,rgba(242,177,60,0.20),rgba(80,60,20,0.10));border-color:rgba(242,177,60,0.45)}
+.vchip.amber .vtitle{color:var(--amber)}
+.vchip.red   {background:linear-gradient(135deg,rgba(229,85,106,0.20),rgba(80,20,30,0.10));border-color:rgba(229,85,106,0.45)}
+.vchip.red   .vtitle{color:var(--red-soft)}
+.vchip.neutral{background:var(--panel2);border-color:var(--line2)}
+.vchip.neutral .vtitle{color:var(--muted)}
+
+.pbwrap{padding:12px 14px}
+.pblab{font-size:10.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px}
+.pbcount{font-size:18px;font-weight:700;margin-top:2px}
+.pbbar{position:relative;height:10px;border-radius:6px;background:rgba(255,255,255,0.06);overflow:visible;margin-top:8px}
+.pbbar > .pbfill{position:absolute;left:0;top:0;bottom:0;border-radius:6px;background:linear-gradient(90deg,var(--teal),#7FE0C6)}
+.pbbar > .pbfill.low{background:linear-gradient(90deg,var(--amber),#FFD07A)}
+.pbbar > .pbfill.mid{background:linear-gradient(90deg,var(--blue),var(--violet))}
+.pbtick{position:absolute;top:-4px;bottom:-4px;width:2px;background:var(--violet-soft);opacity:.85}
+.pbtick::after{content:attr(data-label);position:absolute;top:-16px;left:50%;transform:translateX(-50%);white-space:nowrap;font-size:9.5px;color:var(--violet-soft);letter-spacing:.3px}
+.pbraw{font-size:11px;color:var(--dim);margin-top:6px}
+.pbfoot{font-size:11px;color:var(--muted);margin-top:8px}
+
+.matbox{padding:12px 14px;display:flex;flex-direction:column;gap:4px;justify-content:center}
+.matline{font-size:12px;color:var(--muted)}
+.matline b{color:var(--txt)}
+.matdelta{display:inline-block;font-size:11px;font-weight:650;padding:2px 8px;border-radius:6px;margin-top:6px;width:fit-content}
+.matdelta.up{background:var(--teal-bg);color:var(--teal)}
+.matdelta.down{background:var(--amber-bg);color:var(--amber)}
+.matdelta.flat{background:rgba(255,255,255,0.05);color:var(--dim)}
+
+/* Universe pill strip in header */
+.upills{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.upill{font-size:11px;color:var(--muted);background:var(--panel2);border:1px solid var(--line);border-radius:999px;padding:3px 10px;backdrop-filter:blur(6px)}
+.upill b{color:var(--txt)}
+
+/* Shadow streak strip */
+.streakstrip{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
+.streak{font-size:11px;color:var(--muted);background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:5px 10px}
+.streak b{color:var(--txt)}
+.streak.warn{border-color:rgba(242,177,60,0.35);color:var(--amber)}
+
+/* Watchlist banner + per-card ribbon */
+.watchbanner{margin:10px 0 14px;padding:12px 16px;border-radius:12px;font-size:13px;font-weight:600;
+  background:linear-gradient(90deg,rgba(242,177,60,0.18),rgba(242,177,60,0.06));
+  border:1px solid rgba(242,177,60,0.45);border-left:4px solid var(--amber);color:var(--txt);backdrop-filter:blur(10px)}
+.card{position:relative;overflow:hidden}
+.ribbon{position:absolute;top:12px;right:-38px;transform:rotate(35deg);padding:3px 44px;font-size:10px;font-weight:800;letter-spacing:1.1px;color:#0B0B10;box-shadow:0 4px 12px -4px rgba(0,0,0,0.55);z-index:2}
+.ribbon.watch{background:linear-gradient(90deg,#E0A030,#F2B13C)}
+.ribbon.live {background:linear-gradient(90deg,#3FCBB8,#38BDB0)}
+
+/* Alpha zoo evidence table */
+.aztable{width:100%;border-collapse:collapse;font-size:12.5px}
+.aztable th{padding:6px 8px;text-align:left;color:var(--muted);border-bottom:1px solid var(--line);font-weight:600;font-size:10.5px;text-transform:uppercase;letter-spacing:.5px}
+.aztable td{padding:7px 8px;border-bottom:1px solid var(--line)}
+.aztable td.num{font-variant-numeric:tabular-nums;text-align:right}
+.azchip{display:inline-block;font-size:10px;font-weight:700;padding:2px 8px;border-radius:5px}
+.azchip.green{background:var(--green-bg);color:var(--green)}
+.azchip.amber{background:var(--amber-bg);color:var(--amber)}
+.azchip.red  {background:var(--red-bg);color:var(--red-soft)}
+.azchip.dim  {background:rgba(255,255,255,0.05);color:var(--dim)}
+.aznew{display:inline-block;font-size:9.5px;font-weight:700;padding:1px 7px;border-radius:5px;background:var(--teal-bg);color:var(--teal);margin-left:6px;letter-spacing:.3px}
+
+
 </style></head>
 <body>
 
