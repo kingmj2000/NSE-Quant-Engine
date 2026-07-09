@@ -1,0 +1,6 @@
+date,verdict,shadow_state,shadow_beats_official_net,shadow_matured_obs,overlap
+2026-07-05,Insufficient History,amber,False,4,15
+2026-07-06,Insufficient History,amber,False,4,15
+2026-07-07,Insufficient History,amber,True,4,15
+2026-07-08,Insufficient History,amber,True,4,15
+2026-07-09,Insufficient History,amber,True,4,15
