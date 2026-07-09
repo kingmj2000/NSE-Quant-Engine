@@ -79,10 +79,20 @@ def _gate_normal_scores_ready() -> tuple[bool, str]:
     return True, ""
 
 
+def _run_optional_feeds():
+    """Step 0.5 — refresh the 4 optional overlay CSVs from free public sources.
+    Always non-fatal: refresh_all() catches every exception internally."""
+    if str(BASE) not in sys.path:
+        sys.path.insert(0, str(BASE))
+    from core.optional_data_fetchers import refresh_all
+    refresh_all(BASE)
+
+
 def build_steps(include_shadow: bool = True, include_fetch: bool = True) -> list[Step]:
     steps: list[Step] = []
     if include_fetch:
         steps += [
+            Step("optional_data_fetchers",         _run_optional_feeds,                         network=True, skippable=True),
             Step("universe_builder",              _runpy("universe_builder.py"),              network=True),
             Step("etf_quality_builder (pass 1)",  _runpy("etf_quality_builder.py")),
             Step("etf_metadata_enricher (pass 1)", _runpy("etf_metadata_enricher.py"),         network=True),
