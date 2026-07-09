@@ -1462,18 +1462,31 @@ safeChart("scatterChart",{
 });
 
 
+// Watchlist banner + auto-open scatter based on verdict.
+const _isLive = DATA.verdict === "Validation Positive";
+{
+  const wb = document.getElementById("watchBanner");
+  if (wb) wb.style.display = _isLive ? "none" : "block";
+  const sd = document.getElementById("scatterDetails");
+  if (sd && _isLive) sd.open = true;
+}
+
 // candidate cards
 const dotc={red:"d-red",amber:"d-amber",green:"d-green",dim:"d-dim"};
+const _ribbon = _isLive
+  ? '<div class="ribbon live">LIVE</div>'
+  : '<div class="ribbon watch">WATCHLIST</div>';
 document.getElementById("cards").innerHTML = (DATA.cards||[]).map(c=>`
  <div class="card ${c.clean?'clean':''}">
+   ${_ribbon}
    <div class="top">
      <div><div class="sym">${c.sym}</div><div class="nm">${c.nm||''}</div></div>
      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
        <div class="px"><div class="lbl">Price</div><div class="p">&#8377;${num(c.px)}</div></div>
-       <span class="lblchip ${c.clean?'review':''}">${c.label}</span>
         ${c.in_shadow_top5 ? '<span class="lblchip shadow">Also in shadow Top 5</span>' : ''}
      </div>
    </div>
+
    <div class="levels">
      <div class="lv"><div class="l">Buy zone</div><div class="n">${num(c.bzl)}&ndash;${num(c.bzh)}</div></div>
      <div class="lv stop"><div class="l">Stop</div><div class="n">${num(c.stop)}</div></div>
