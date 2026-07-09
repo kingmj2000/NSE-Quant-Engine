@@ -15,9 +15,9 @@ pipeline stays dependency-light, deterministic, and safe to fail.
 | Source | Concept | Step | Module | Artifact in `output/` | How to activate / feed |
 |---|---|---|---|---|---|
 | Fincept | Macro regime dashboard | 4 | `core/regime.py`, `core/sentiment_overlay.py` | `macro_context.json` | Always on. Uses ^NSEI. |
-| Fincept | Sector & peer research desk | 10 | `core/sector_context.py` | `top5_sector_context.csv` | Always on. Richer if `data/fundamentals_latest.csv` is present. |
-| Fincept | Earnings / event calendar tab | 11 | `core/event_calendar.py` | `top5_events.csv` | Always on. Real earnings dates activate if `data/earnings_calendar.csv` (Symbol,Event_Date) is dropped in. |
-| Fincept | Institutional flow panel (FII/DII + bulk deals) | 14 | `core/institutional_flow.py` | `top5_institutional_flow.csv`, merged into `macro_context.json` | Drop `data/fii_dii_daily.csv` (Date,FII_Net_INR_Cr,DII_Net_INR_Cr) and `data/bulk_deals.csv` (Date,Symbol,Client,Buy_Sell,Qty,Price). Absent → `fii_regime=Unknown`. |
+| Fincept | Sector & peer research desk | 10 | `core/sector_context.py` | `top5_sector_context.csv` | Always on. `data/fundamentals_latest.csv` is now **auto-fetched via yfinance** at the start of every run (Step 0.5, `core/optional_data_fetchers.py`); drop your own CSV to override. |
+| Fincept | Earnings / event calendar tab | 11 | `core/event_calendar.py` | `top5_events.csv` | Always on. `data/earnings_calendar.csv` (`Symbol,Event_Date`) is **auto-fetched via `yfinance.Ticker.calendar`** at the start of every run; drop your own CSV to override. |
+| Fincept | Institutional flow panel (FII/DII + bulk deals) | 14 | `core/institutional_flow.py` | `top5_institutional_flow.csv`, merged into `macro_context.json` | Both `data/fii_dii_daily.csv` (Moneycontrol) and `data/bulk_deals.csv` (NSE JSON) are **auto-fetched at the start of every run**. Sources fail soft — if a public site is down the last-good cache is kept and `fii_regime` reads `Unknown`. |
 | Vibe | Multi-alpha "zoo" with IC survivorship | 5 | `core/alpha_zoo.py`, `core/alpha_evaluator.py` | `alpha_zoo_ic_report.csv`, `alpha_zoo_survivors.json` | Always on when history is long enough. |
 | Vibe | Risk-parity / vol-target sizing | 8 | `core/position_sizer.py` | `top5_position_sizing.csv` | Tune `PORTFOLIO_NAV_INR`, `PORTFOLIO_VOL_TARGET`, `MAX_WEIGHT`, `CASH_BUFFER` in `core/config.py`. |
 | Vibe | Walk-forward "style" backtest | 9 | `core/backtest_engine.py` | `backtest_scorecard.csv`, `backtest_equity_curve.csv` | Auto-runs when price history ≥ ~260 sessions. |
