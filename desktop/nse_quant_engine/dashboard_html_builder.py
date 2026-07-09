@@ -1141,21 +1141,12 @@ canvas{margin-top:4px}
   </div>
 </div>
 
-<div class="grid twocol">
-  <div>
-    <h2>Universe composition</h2>
-    <div class="glass g-blue panel">
-      <canvas id="universeChart" height="126"></canvas>
-    </div>
-  </div>
-  <div>
-    <h2>Shadow vs Official &mdash; ranking overlap</h2>
-    <div class="glass g-blue panel">
-      <div class="evid" id="shadowCards" style="grid-template-columns:repeat(2,1fr);margin-bottom:10px"></div>
-      <canvas id="shadowBar" height="86"></canvas>
-      <div class="sub" id="shadowWarnings" style="margin-top:8px"></div>
-    </div>
-  </div>
+<h2>Shadow vs Official &mdash; running record</h2>
+<div class="glass g-blue panel">
+  <div class="streakstrip" id="streakStrip"></div>
+  <div class="evid" id="shadowCards" style="grid-template-columns:repeat(4,1fr);margin-bottom:10px"></div>
+  <canvas id="shadowBar" height="86"></canvas>
+  <div class="sub" id="shadowWarnings" style="margin-top:8px"></div>
 </div>
 
 <h2 id="quintileTitle">Quintile median net return</h2>
@@ -1167,7 +1158,9 @@ canvas{margin-top:4px}
 
 
 <h2>Top 5 watchlist candidates &mdash; post-governance veto</h2>
+<div class="watchbanner" id="watchBanner" style="display:none">Reference levels only &mdash; not validated. Buy zones, stops, and targets below are mechanical outputs, not recommendations.</div>
 <div class="cards" id="cards"></div>
+
 
 <h2 id="corrTitle">Top-5 correlation &mdash; diversification check</h2>
 <div class="glass panel" id="corrPanel" style="display:none">
