@@ -17,6 +17,10 @@ echo Running NSE Quant Engine Stage 3.5.10.1 Merged Metadata Workflow...
 echo Using: %PYTHON_EXE%
 echo.
 
+echo Refreshing optional overlay feeds (FII/DII, bulk deals, fundamentals, earnings)...
+"%PYTHON_EXE%" -c "from core.optional_data_fetchers import refresh_all; refresh_all()"
+REM Non-fatal on purpose: pipeline continues even if a public source is down.
+
 "%PYTHON_EXE%" universe_builder.py
 if errorlevel 1 goto fail
 
