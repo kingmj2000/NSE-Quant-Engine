@@ -1976,11 +1976,28 @@ document.getElementById("excel").textContent = DATA.excel;
 def build() -> Path:
     OUT.mkdir(exist_ok=True)
     payload = _payload()
-    html = (_TEMPLATE
+    tpl = _TEMPLATE
+    # Wrap first occurrence of a few technical terms in static captions with
+    # plain-English tooltips. Kept in build() so the template file stays
+    # source-of-truth for structure; wraps are additive and fail-soft.
+    tpl = tpl.replace(
+        "<b>Target-per-day</b>",
+        f"<b>{_gloss('Target-per-day')}</b>", 1)
+    tpl = tpl.replace(
+        "<b>Model edge/day</b>",
+        f"<b>{_gloss('Model edge/day')}</b>", 1)
+    tpl = tpl.replace(
+        "RSI is a timing filter, not a valuation filter. Right of the dashed line (RSI ~ 70-73) = overbought entry risk; above the upper band (vol ~ 30%) = elevated volatility.",
+        f"{_gloss('RSI')} is a timing filter, not a valuation filter. Right of the dashed line (RSI ~ 70-73) = overbought entry risk; above the upper band (vol ~ 30%) = elevated {_gloss('volatility')}.",
+        1)
+    tpl = tpl.replace("Show RSI &times; volatility map",
+                      f"Show {_gloss('RSI')} &times; {_gloss('volatility')} map", 1)
+    html = (tpl
             .replace("__DATE__", payload["date"])
             .replace("__GENERATED__", payload["generated_at"])
             .replace("__CHART_JS__", _embedded_chart_js())
             .replace("__DATA__", json.dumps(payload, default=str)))
+
     latest = OUT / "dashboard_latest.html"
     dated = OUT / f"dashboard_{payload['date']}.html"
     latest.write_text(html, encoding="utf-8")
