@@ -1021,6 +1021,13 @@ def _payload() -> dict:
 
     alpha_evidence = _alpha_evidence_payload(OUT)
 
+    # Plain-English per-card "in plain words" line (deterministic, no new I/O)
+    _vstate = _verdict_state(verdict)
+    for _c in cards:
+        _c["plain"] = _plain_card_line(_c, _vstate)
+    for _c in shadow_unique_top5:
+        _c["plain"] = _plain_card_line(_c, _vstate)
+
     return {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "date": date_str,
@@ -1051,7 +1058,10 @@ def _payload() -> dict:
         "corr_matrix": corr_payload,
         "macro": macro_payload,
         "alpha_zoo": zoo_payload,
+        "plain_summary_html": _plain_summary_html(progress_payload),
+        "plain_disclaimer_html": _plain_disclaimer_html(),
     }
+
 
 
 
