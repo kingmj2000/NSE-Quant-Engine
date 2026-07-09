@@ -62,16 +62,15 @@ def neutralize(df: pd.DataFrame,
         raw = pd.to_numeric(out[col], errors="coerce")
         audit_cols[f"Raw_{col}"] = raw
 
-        # Per-sector z, only for sectors that clear the threshold.
-        neut = raw.copy()
+        neut = pd.to_numeric(raw, errors="coerce").astype(float).copy()
         for sec, g in out.groupby(sector_col):
             if sizes.loc[g.index].iloc[0] < min_members:
                 continue
-            neut.loc[g.index] = _zscore(raw.loc[g.index])
+            neut.loc[g.index] = _zscore(neut.loc[g.index]).astype(float)
 
         # Universe-wide re-standardization keeps skipped-sector symbols
         # comparable to neutralized ones.
-        neut = _zscore(neut)
+        neut = _zscore(neut).astype(float)
         out[col] = neut
         audit_cols[f"Neutralized_{col}"] = neut
 
