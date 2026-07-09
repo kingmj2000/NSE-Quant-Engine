@@ -530,7 +530,18 @@ def _payload() -> dict:
         "added_symbols": added,
         "dropped_symbols": dropped,
         "warnings": shadow_warnings,
+        "history": {
+            "available": shadow_history.get("available", False),
+            "lead_streak": lead_streak,
+            "vpos_streak": vpos_streak,
+            "latest_matured_obs": latest_obs,
+            "min_streak": min_streak,
+            "min_matured_obs": min_matured_obs,
+            "failed_checks": failed_checks,
+        },
     }
+    bottom_line = bottom_line + f" Shadow stays {shadow['chip']}."
+
 
     shadow_top5_symbols: set[str] = set()
     shadow_unique_top5 = []
