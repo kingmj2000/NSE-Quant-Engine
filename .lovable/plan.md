@@ -1,150 +1,101 @@
 
-# Dashboard actionability refinement (revised)
+# Plain-English layer for the dashboard
 
-Refinement pass on `desktop/nse_quant_engine/dashboard_html_builder.py` (plus one tiny append in `shadow_vs_official_report.py` to persist a run ledger, and one config constant). Keeps the black+crimson glassmorphic theme, glow system, and every honesty caption. No new computation in the dashboard layer, no LLM, no network. All new panels read existing `output/` files; missing files render "not yet available", never fabricated values.
+Purely additive pass on `desktop/nse_quant_engine/dashboard_html_builder.py`. No other files touched. No new computation, no LLM, no network. All new text is generated deterministically in Python from values already assembled in `_payload()` (verdict, `progress.effective_now/effective_target`, `progress.raw_now/raw_target`, `progress.matured/maturing/total`, top-5 rows, shadow state). If a value is missing the copy says "not yet available" in plain words — never a fabricated number, never softer than the underlying verdict.
 
-## 1. New top section — "Progress to a verdict"
+The existing glassmorphic theme, glow system, every honesty caption, verdict chip / progress bar / streak strip / watchlist ribbons / alpha evidence table / ETF gaps / scatter `<details>` all stay exactly as they are. This layer sits *around* them.
 
-Injected right after the header, above **Market context**. One `.g-violet` glass row with three glanceable elements.
+## 1. Top "Plain English summary" card
 
-### 1a. Verdict chip (color-coded, plain-English gloss)
+New `.g-violet` glass card injected as the **first** element inside `<main>`, above the existing header sub-line and above the Progress-to-a-verdict row. Renders 3–4 short sentences composed from a small template keyed on `payload.progress.state` (`green` / `amber` / `red` / `neutral`).
 
-Verdict source, in order:
-1. `output/validation_status.json → verdict`
-2. If missing/unreadable → parse `output/cross_sectional_validation_report.md` for one of the known verdict strings from `core/validation_status.py::VALID_VERDICTS` (first exact match on a line that starts with a verdict heading like `**Verdict:**`).
-3. If neither exists → neutral chip "Verdict not yet available" with gloss "Validation has not been run in this output directory." **Never** default to a positive verdict.
+Template family (values interpolated from payload — never hand-typed numbers):
 
-Gloss table (keyed off verdict string):
-- `Validation Positive` → "Edge confirmed — live mode."
-- `Insufficient History` / `Insufficient Independent History` / `Insufficient Statistical Evidence` / `Insufficient Breadth` → "Not enough evidence yet — watchlist only."
-- `No Proven Edge Yet` → "No measurable edge after costs yet — watchlist only."
-- `Validation Negative` → "Edge is negative after costs — do not act on picks."
-- unknown / missing → "Verdict not yet available."
+- **neutral / amber (Insufficient History, Insufficient Independent History, Insufficient Breadth, Insufficient Statistical Evidence, No Proven Edge Yet):**
+  "Today's result: no action. The tool is still learning whether its stock rankings actually work, and it doesn't have enough history yet ({effective_now} of ~{effective_target} independent days needed). Everything below is practice data for watching only — not advice to buy anything. Keep running it daily; it'll tell you when it has real evidence."
 
-Chip color: green for Positive, red for Negative, amber for the "insufficient / no proven edge" family, neutral (blue-grey) for missing/unknown.
+- **red (Validation Negative):**
+  "Today's result: do not act on the picks below. Over the days measured so far, the tool's rankings have not beaten costs — the edge is negative. Treat the lists below as a record of what the model *would* have picked, not as ideas to buy."
 
-### 1b. Progress bar — verdict-gate readiness
+- **green (Validation Positive):**
+  "Today's result: the tool's rankings have finally cleared their evidence bar ({effective_now} of {effective_target} independent days, plus the statistical checks). This still means 'worth a closer look,' not 'will make money.' Read the 'Before you ever act on this' panel at the bottom before doing anything with real money."
 
-**Primary track** is `effective_validation_dates` toward `CROSSVAL_MIN_EFFECTIVE_DATES` (the verdict gate). Rendered as the existing `.rbar` with label like "17 / 25 effective dates" (values pulled from `stats` and `core.config`).
+- **unavailable (both `validation_status.json` and the markdown report missing):**
+  "Today's result: verdict not yet available. The validation step hasn't run in this output folder, so the tool has no opinion to share yet. Run the workflow end-to-end, then reopen this page."
 
-**Secondary marker** on the same bar, drawn as a small labeled tick at the position `ADAPTIVE_MIN_DATES / CROSSVAL_MIN_EFFECTIVE_DATES` (clamped to ≤ 100%), captioned "adaptive-weighting readiness (60)". Explicitly kept visually separate so the two thresholds are never conflated — the primary bar fills toward the verdict gate; the tick only marks where the shadow adaptive layer would become eligible.
+When `progress.effective_now` or `progress.effective_target` is missing, the parenthetical becomes "(day count not yet available)" instead of a number. The card also includes one small caption underneath: "Plain-English summary — auto-generated from today's validation output. See the technical panels below for the numbers behind it."
 
-A one-line under-caption: "Verdict requires ≥ `CROSSVAL_MIN_EFFECTIVE_DATES` effective dates plus spread, t-stat, and bootstrap gates. Adaptive weighting is a separate downstream gate — see tick."
+## 2. Glossary tooltips on finance/stats terms
 
-Below the bar, a secondary line shows raw `validation_dates / CROSSVAL_MIN_DATES` in small text ("41 / 30 raw dates — clears breadth floor") so both counts stay visible without visually competing.
+Static Python dictionary `PLAIN_GLOSSARY` near the top of the file. One-sentence, plain-English definitions for the terms actually shown on the dashboard:
 
-### 1c. Maturation summary + delta chip
+- NAV, TER, tracking error, AUM
+- IC, residual IC, t-stat, bootstrap probability, spread, hit rate
+- momentum, quintile, drawdown, RSI, volatility, IV rank, delivery %
+- effective validation dates, raw validation dates, matured / maturing signals
+- shadow vs official, overlap, veto, regime
 
-- Count strip: "Matured **X** · Awaiting **Y** · Total **Z** (10-day slice)" — reuses the numbers already in `maturity`.
-- Delta chip logic:
-  - Read `output/score_history.csv`. Group by `Date`.
-  - Find the most-recent distinct date **strictly earlier than today's run date** (today = `datetime.now().date()` as string in the same format the history uses).
-  - Compute `delta_matured = matured_today − matured_that_prior_date`.
-  - Render chip: `▲ +N` (teal) / `▼ −N` (amber) / `flat` (dim).
-  - **Hide the chip entirely** when there is no strictly-prior distinct date (i.e. only same-calendar-day history exists, or history is empty/missing). No placeholder, no zero-delta.
+Example entries (final copy in the code, not here): "IC — how well the tool's ranking of stocks lined up with what actually happened next. 0 means no relationship; higher is better."; "t-stat — a rough measure of how unlikely the result is to be luck. Bigger numbers mean more convincing, not necessarily more profitable."; "effective validation dates — how many *independent* days of evidence the tool has, after removing days that overlap with each other."
 
-The existing "N signals maturing" pill inside the lower verdict banner is removed to avoid duplication.
+Rendering: a tiny helper `_gloss(term, label=None) -> str` returns
+`<span class="gloss" tabindex="0" aria-describedby="tt-{slug}">{label or term}<span class="tt" role="tooltip">{definition}</span></span>`.
+CSS (added to the existing `<style>` block, matching the current glass tokens): `.gloss` gets a dotted underline in the current muted color; `.tt` is absolutely positioned, hidden by default, revealed on `:hover`, `:focus-within`, and `.gloss:active .tt` (tap on touch). No JS — pure CSS hover/focus, keyboard-reachable via `tabindex="0"`, screen-reader-labeled via `aria-describedby`.
 
-### Payload additions in `_payload()`
+Wrapping pass: the existing headings and captions that mention any dictionary term (e.g. "IC ≥ min_ic", "t-stat", "effective validation dates", "tracking error", "NAV", "TER", "RSI × volatility map", "momentum", "quintile", "drawdown") are rewritten to use `_gloss(...)` for the first occurrence in each panel only, so tooltips are discoverable without visually peppering every line. Panel structure, order, and numeric values are unchanged.
 
-- `progress.verdict`, `progress.gloss`, `progress.state` (`green` / `amber` / `red` / `neutral`), `progress.source` (`validation_status.json` / `cross_sectional_validation_report.md` / `unavailable`)
-- `progress.effective_now`, `progress.effective_target` (= `CROSSVAL_MIN_EFFECTIVE_DATES`), `progress.adaptive_tick` (= `ADAPTIVE_MIN_DATES`), `progress.raw_now`, `progress.raw_target` (= `CROSSVAL_MIN_DATES`)
-- `progress.matured`, `progress.maturing`, `progress.total`, `progress.delta_matured` (null when hidden)
+## 3. Per-candidate "in plain words" line on Top-5 cards
 
-Config thresholds pulled via `getattr(C, name, default)` so a missing symbol never crashes the build.
+Inside the existing Top-5 card template, one extra `<p class="plain">` under the current body, above the existing "Also in shadow Top 5" chip when present. The sentence is composed by a small deterministic helper `_plain_card_line(row, verdict_state) -> str` from fields already on each card row — no new computation:
 
-## 2. Alpha Zoo → evidence panel
+Trend fragment (from momentum / trend rank if present, else RSI): "strong recent price trend" / "mixed recent price trend" / "weak recent price trend" / "recent price trend not yet available".
+Calm fragment (from volatility bucket if present): "calm price swings" / "moderate price swings" / "choppy price swings" / omitted if missing.
+News fragment (from sentiment/veto flags already on the row): "no bad news found" / "some negative news flagged" / "governance concern flagged — see veto note" / omitted if the field isn't present.
+Suffix (always, verdict-aware):
+- non-positive verdict: " — but this is a watch-only note, not a recommendation, because the tool hasn't proven its picks work yet."
+- Validation Positive: " — the tool's rankings have cleared their evidence bar, but this is still 'worth a closer look,' not a buy signal."
 
-Replaces the current survivor / top-by-IC block. Reads:
-- `output/alpha_promotion_log.json` — per candidate: standalone IC, residual IC, t-stat, promote/reject, reason
-- `output/alpha_zoo_ic_report.csv` — mean_IC, tstat, n windows for alphas already in the zoo
-- `output/alpha_zoo_survivors.json` — survivor flag + thresholds (already loaded)
+Missing fragments are dropped rather than filled with placeholders; if every fragment is missing, the line becomes: "Not enough plain-language signals to summarise this candidate yet — see the numeric fields above." The trailing watch-only / worth-a-look suffix is always appended.
 
-Rendered as a compact table inside the existing glass panel. Columns: **Alpha · Standalone IC · Residual IC · t-stat · Windows · Verdict**. Verdict cell is a chip:
-- green "Promoted"
-- amber "Watch — below residual gate"
-- red "Rejected"
-- dim "Baseline (no eval yet)"
+## 4. Permanent "Before you ever act on this" panel
 
-`delivery_momentum` and `iv_rank` rows get a `.lblchip.review` "New candidate" tag next to the name so they stand out. Caption above the table: "Survivor gate: IC ≥ `min_ic`, t-stat ≥ `min_tstat`, residual IC ≥ `ALPHA_INCREMENTAL_IC_MIN`. New candidates enter live scoring only after clearing all three."
+New `.g-amber` glass panel injected near the bottom of `<main>`, immediately above the existing footer / Excel-ready summary line. Renders **regardless of verdict** (positive or not — the copy adapts, the panel does not disappear). Five bullets, calm tone, no fine-print styling:
 
-Panel hides (as today) when none of the three source files exist.
+- This is a personal research tool, not financial advice.
+- It has never been proven to make money; it may never be.
+- Even a "positive" verdict means "worth a closer look," not "will profit."
+- Consult a SEBI-registered adviser before investing real money.
+- Never invest money you can't afford to lose.
 
-## 3. Shadow vs Official → running record
+Heading: "Before you ever act on this". Sub-caption: "Always visible. Read it every time — including the days the tool looks confident."
 
-The four KPI tiles (overlap / added / dropped / regime chip) stay. A **streak strip** is added above the horizontal stacked bar.
+## Implementation details (technical section)
 
-### Ledger (written by the report script, read by the dashboard)
+Single file: `desktop/nse_quant_engine/dashboard_html_builder.py`.
 
-Append-only `output/shadow_vs_official_history.csv` with columns:
-`date, verdict, shadow_state, shadow_beats_official_net, shadow_matured_obs, overlap`.
-
-Written by `shadow_vs_official_report.py` after it computes today's record, dedup by `date` (overwrite the row if today already exists — idempotent per calendar day). Fail-soft. The dashboard remains read-only.
-
-### Dashboard reads the last ~30 rows and computes
-
-- `consecutive_shadow_leads` — trailing run of `shadow_beats_official_net == True`
-- `consecutive_verdict_positive` — trailing run of `verdict == "Validation Positive"`
-- `latest_shadow_matured_obs` — from the newest row
-
-### Streak strip
-
-Three inline pills:
-- "Shadow lead streak: **N runs**"
-- "Verdict-positive streak: **N runs**"
-- "Green requires: ≥ `SHADOW_GREEN_MIN_STREAK` (8) consecutive leads **AND** verdict = Validation Positive **AND** shadow matured-independent obs ≥ `SHADOW_GREEN_MIN_MATURED_OBS` (default = `CROSSVAL_MIN_EFFECTIVE_DATES`, i.e. the standard floor)."
-
-### Tightened `shadow_state` logic in `_payload()`
-
-`shadow_state = "green"` **only if all four** hold:
-1. `verdict == "Validation Positive"`
-2. `consecutive_shadow_leads >= SHADOW_GREEN_MIN_STREAK`
-3. `consecutive_verdict_positive >= SHADOW_GREEN_MIN_STREAK`
-4. `latest_shadow_matured_obs >= SHADOW_GREEN_MIN_MATURED_OBS`
-
-Otherwise `red` when the report recommendation explicitly says "do not switch" / "official still leads" / verdict is Negative, else `amber`. The amber reason surfaces which of the four checks fell short (e.g. "Only 2 consecutive leads — 8 required"), so a one-day lead visibly cannot flip to green. This must not be easier to earn than the documented six shadow-switch criteria.
-
-### Config additions (in `core/config.py`)
-
-- `SHADOW_GREEN_MIN_STREAK = 8`
-- `SHADOW_GREEN_MIN_MATURED_OBS = CROSSVAL_MIN_EFFECTIVE_DATES` (or the numeric default if that constant is absent)
-
-Both read via `getattr` with the defaults above so missing symbols never crash.
-
-## 4. Watchlist-only visual dominance on Top-5 cards
-
-While `verdict != "Validation Positive"`:
-
-- Persistent full-width amber-bordered banner directly above `#cards`: "Reference levels only — not validated. Buy zones, stops, and targets below are mechanical outputs, not recommendations." Auto-hidden when verdict is positive.
-- Per-card diagonal ribbon in the top-right corner (CSS-only): amber "WATCHLIST" on non-positive verdict, teal "LIVE" on positive. Replaces the current small `.lblchip` label for that state (no double-badging). "Also in shadow Top 5" chip stays.
-- `Model_Edge_%_Per_Day` continues to render as `—` when blank, and the existing per-day / model-edge caption underneath the Shadow Unique block is preserved verbatim.
-
-## Clutter reduction
-
-- **Universe composition**: donut + `<h2>` removed. Replaced by a small pill-strip in the header sub-line: `Nifty50 · 50 | Next50 · 50 | Midcap150 · 150 | ETF · N` from the existing `universe_counts` payload.
-- **Timing filter map (RSI vs volatility scatter)**: wrapped in a `<details>` toggle "Show RSI × volatility map", collapsed by default while verdict is not positive, auto-`open` when positive. Chart and payload unchanged.
-
-## Preserved (unchanged)
-
-Glassmorphic theme + glow system, embedded Chart.js, `.bottomline` framing, "cross-sectional report is the authority" sub-header, every honesty caption (per-day ceiling, medians-not-means, veto, model-edge caption), governance-veto behavior, ETF gaps section, Excel-ready summary line, data-provenance sub-lines.
-
-## Files changed
-
-- `desktop/nse_quant_engine/dashboard_html_builder.py` — payload additions (`progress`, `alpha_evidence`, `shadow_history`, tightened `shadow_state`), new Progress-to-a-verdict section, rewritten Alpha Zoo panel, streak strip in shadow row, watchlist banner + card ribbon CSS + template, universe donut → header strip, scatter section wrapped in `<details>`.
-- `desktop/nse_quant_engine/shadow_vs_official_report.py` — append today's record to `output/shadow_vs_official_history.csv` (dedup by date). Fail-soft.
-- `desktop/nse_quant_engine/core/config.py` — add `SHADOW_GREEN_MIN_STREAK = 8` and `SHADOW_GREEN_MIN_MATURED_OBS` (defaulting to `CROSSVAL_MIN_EFFECTIVE_DATES`) with a comment tying them to the documented six shadow-switch criteria.
+- New module-level constants:
+  - `PLAIN_GLOSSARY: dict[str, str]` — term → one-sentence definition.
+  - `PLAIN_SUMMARY_TEMPLATES: dict[str, str]` — state → template string, with `{effective_now}` / `{effective_target}` placeholders and a "(day count not yet available)" fallback.
+  - `PLAIN_DISCLAIMER_BULLETS: tuple[str, ...]` — the five bullets above.
+- New helpers (module-level, pure functions of payload dicts, no I/O):
+  - `_plain_summary_html(progress: dict) -> str` — picks template by `progress.state`, formats safely (missing numbers → fallback phrase), returns full glass card HTML.
+  - `_gloss(term: str, label: str | None = None) -> str` — returns the inline span. Unknown term → returns the label/term unchanged (fail-soft, never raises).
+  - `_plain_card_line(row: dict, verdict_state: str) -> str` — composes the sentence from present fields only.
+  - `_plain_disclaimer_html() -> str` — renders the amber panel.
+- CSS additions in the existing `<style>` block: `.plain-summary`, `.gloss` (dotted underline, cursor help), `.tt` (absolute, hidden, revealed on `:hover`/`:focus-within`/`:active`, uses existing glass tokens for background/border), `.plain` (card sub-line styling), `.plain-disclaimer` (amber panel). No changes to existing selectors; only additions.
+- Template insertions in the HTML string:
+  1. Plain-English summary card → first child of `<main>`.
+  2. `_gloss(...)` wrap on first occurrence of each dictionary term per panel.
+  3. `<p class="plain">{_plain_card_line(row, state)}</p>` inside the Top-5 card template.
+  4. Permanent disclaimer panel → immediately above the footer / Excel-ready line.
+- No changes to `_payload()` shape, to file reads, or to any existing panel's structure, ordering, or captions beyond wrapping terms in `_gloss(...)`.
 
 ## Verification
 
-Render `dashboard_latest.html` from the current output directory (verdict = Insufficient History) and confirm:
-- Progress section shows amber verdict chip with the correct gloss, primary bar fills toward `CROSSVAL_MIN_EFFECTIVE_DATES` with the ADAPTIVE tick clearly labelled and visually separate.
-- Maturation delta chip is hidden when only today's date exists in `score_history.csv`, appears with correct sign when a prior distinct date exists.
-- Watchlist banner is visible; every card shows the amber WATCHLIST ribbon.
-- Shadow chip is not green (streak 0 or 1); amber reason names which of the four green-gate checks fell short.
-- Alpha Zoo table shows delivery_momentum / iv_rank tagged as new candidates when the promotion log has them; panel says "not yet available" if all three source files are absent.
+Render `dashboard_latest.html` from the current output folder (Insufficient History) and confirm:
+- Plain-English summary card is the first thing on the page and reads the "still learning" template with real `effective_now / effective_target` numbers pulled from the payload.
+- Every wrapped term shows a tooltip on hover, on keyboard focus (Tab), and on tap; the tooltip text matches the dictionary; the underlying number/heading is unchanged.
+- Each Top-5 card has one extra `<p class="plain">` line ending in the watch-only suffix.
+- The "Before you ever act on this" amber panel renders above the footer with all five bullets.
+- Existing sections (Progress to a verdict, Market context, Shadow vs Official streak strip, Alpha Zoo evidence table, ETF gaps, watchlist ribbons, scatter `<details>`) are visually and structurally unchanged.
 
-Then delete each of `validation_status.json`, `cross_sectional_validation_report.md`, `alpha_promotion_log.json`, `shadow_vs_official_history.csv`, `score_history.csv` in turn and reconfirm:
-- Missing both validation sources → neutral "Verdict not yet available" chip, never a default-positive.
-- Missing history → delta chip hidden and shadow streak pills read "0 runs".
-- Missing alpha files → Alpha Zoo panel says "not yet available".
-- No crashes, no fabricated values.
+Then delete `validation_status.json` and `cross_sectional_validation_report.md` and reconfirm: the summary card falls back to "verdict not yet available" copy, no fabricated day counts appear, the disclaimer panel is still there, and no panel crashes.

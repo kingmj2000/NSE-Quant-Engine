@@ -120,6 +120,197 @@ def _verdict_state(v: str | None) -> str:
     return "neutral"
 
 
+# ─── Plain-English layer (deterministic; no LLM, no network) ────────────────
+# One-sentence glosses for finance / stats terms actually shown on the dashboard.
+PLAIN_GLOSSARY: dict[str, str] = {
+    "IC": "How well the tool's ranking of stocks lined up with what actually happened next. 0 = no relationship; positive is better; realistic edges are small.",
+    "residual IC": "The extra ranking value a signal adds on top of signals already in use — not just correlation with existing survivors.",
+    "t-stat": "A rough measure of how unlikely the result is to be luck. Bigger numbers mean more convincing — not necessarily more profitable.",
+    "bootstrap probability": "Chance the measured edge is above zero after re-shuffling the data many times.",
+    "spread": "Difference between the average return of the top-ranked group of stocks and the bottom-ranked group.",
+    "hit rate": "Fraction of picks that ended up positive after costs.",
+    "NAV": "Net Asset Value — the per-unit market value of a fund or ETF.",
+    "TER": "Total Expense Ratio — the annual fee a fund charges; it comes out of your returns.",
+    "tracking error": "How closely an ETF follows its benchmark index. Smaller is better.",
+    "AUM": "Assets Under Management — how much money the fund holds. Larger usually means more stable.",
+    "momentum": "How strongly a stock's price has been trending up (or down) over recent weeks/months.",
+    "quintile": "One of five equal-sized groups. Q1 is the top-ranked fifth, Q5 the bottom fifth.",
+    "medians": "The middle value of a sorted list — less swayed by a few outliers than the average.",
+    "drawdown": "How far a stock or portfolio has fallen from its recent peak.",
+    "RSI": "Relative Strength Index — a 0–100 gauge of recent price momentum. Above ~70 is often overbought; below ~30 often oversold.",
+    "volatility": "How much a stock's price swings around. Higher = wilder ride, not automatically worse returns.",
+    "IV rank": "Where today's implied volatility sits inside its 1-year range (0% = 1-year low, 100% = 1-year high).",
+    "delivery %": "Fraction of a day's traded shares that were actually delivered to buyers (not intraday flips). Higher usually means real conviction.",
+    "effective validation dates": "Independent days of evidence the tool has, after removing overlapping days that would double-count.",
+    "raw validation dates": "Total calendar days with a validation observation, before removing overlaps.",
+    "matured signals": "Past picks where enough time has passed to measure how they actually did.",
+    "maturing signals": "Recent picks whose holding window has not finished — outcome unknown.",
+    "shadow": "A parallel run of the tool with experimental rules. Only used for comparison; never overrides the official picks.",
+    "overlap": "How many names the official Top-20 and the shadow Top-20 have in common.",
+    "veto": "A hard block on certain names (e.g. governance concerns) regardless of score.",
+    "regime": "The current market mood — risk-on (calm, rising), risk-off (nervous, falling), or neutral.",
+    "Model edge/day": "The tool's measured expected return per day after costs. Blank until validation is positive.",
+    "Target-per-day": "Best-case return per day IF the target is reached — a ceiling, not an expectation.",
+}
+
+PLAIN_DISCLAIMER_BULLETS: tuple[str, ...] = (
+    "This is a personal research tool, not financial advice.",
+    "It has never been proven to make money; it may never be.",
+    'Even a "positive" verdict means "worth a closer look," not "will profit."',
+    "Consult a SEBI-registered adviser before investing real money.",
+    "Never invest money you can't afford to lose.",
+)
+
+
+def _html_escape(s: str) -> str:
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            .replace('"', "&quot;"))
+
+
+def _gloss(term: str, label: str | None = None) -> str:
+    """Return an inline span that reveals a plain-English definition on hover /
+    focus / tap. Unknown terms fail soft — return the label/term unchanged."""
+    definition = PLAIN_GLOSSARY.get(term)
+    text = label or term
+    if not definition:
+        return text
+    safe_def = _html_escape(definition)
+    return (f'<span class="gloss" tabindex="0" role="button" '
+            f'aria-label="Definition: {safe_def}">{text}'
+            f'<span class="tt" role="tooltip">{safe_def}</span></span>')
+
+
+def _plain_summary_html(progress: dict | None) -> str:
+    """Top-of-page plain-English card. Copy is state-keyed; day counts come
+    from the payload, never hand-typed. Missing numbers → 'not yet available'."""
+    p = progress or {}
+    verdict = p.get("verdict") or "Verdict not yet available"
+    state = p.get("state") or "neutral"
+    now = p.get("effective_now")
+    tgt = p.get("effective_target")
+    if now is not None and tgt:
+        try:
+            now_txt = ("%g" % float(now))
+            frag = f"({now_txt} of ~{int(tgt)} independent {_gloss('effective validation dates', 'days')} needed)"
+        except Exception:
+            frag = "(day count not yet available)"
+    else:
+        frag = "(day count not yet available)"
+
+    if verdict == "Validation Positive":
+        body = (
+            f"Today's result: the tool's rankings have finally cleared their evidence bar "
+            f"{frag}, plus the statistical checks. This still means \u201cworth a closer look,\u201d not "
+            f"\u201cwill make money.\u201d Read the \u201cBefore you ever act on this\u201d panel at the bottom "
+            f"before doing anything with real money."
+        )
+    elif verdict == "Validation Negative":
+        body = (
+            "Today's result: do not act on the picks below. Over the days measured so far, "
+            f"the tool's rankings have not beaten costs \u2014 the {_gloss('spread', 'edge')} is negative. "
+            "Treat the lists below as a record of what the model <em>would</em> have picked, not as ideas to buy."
+        )
+    elif verdict == "Verdict not yet available":
+        body = (
+            "Today's result: verdict not yet available. The validation step hasn't run in this "
+            "output folder, so the tool has no opinion to share yet. Run the workflow end-to-end, "
+            "then reopen this page."
+        )
+    else:
+        # amber / neutral family — insufficient history / no proven edge yet
+        body = (
+            "Today's result: no action. The tool is still learning whether its stock rankings "
+            f"actually work, and it doesn't have enough history yet {frag}. Everything below is "
+            "practice data for watching only \u2014 not advice to buy anything. Keep running it daily; "
+            "it'll tell you when it has real evidence."
+        )
+
+    return (
+        '<div class="glass g-violet panel plain-summary">'
+        '<div class="ps-head">Plain English summary</div>'
+        f'<p class="ps-body">{body}</p>'
+        '<div class="ps-sub">Auto-generated from today\'s validation output. '
+        'See the technical panels below for the numbers behind it.</div>'
+        '</div>'
+    )
+
+
+def _plain_card_line(row: dict, verdict_state: str) -> str:
+    """One deterministic 'in plain words' sentence per Top-5 card, composed only
+    from fields already on the row. Missing fragments are dropped."""
+    frags: list[str] = []
+
+    # Trend / calm fragment inferred from the existing Technical flag we already
+    # attached in _payload() (which encodes RSI + vol into a color + short text).
+    tech = None
+    risk_text = None
+    for f in (row.get("flags") or []):
+        if not isinstance(f, (list, tuple)) or len(f) < 3:
+            continue
+        cat = f[1]
+        if cat == "Technical" and tech is None:
+            tech = (f[0], str(f[2] or "").lower())
+        elif cat == "Risk" and risk_text is None:
+            risk_text = str(f[2] or "").strip()
+
+    if tech:
+        _color, text = tech
+        if "clean" in text:
+            frags.append("recent price action looks calm")
+        elif "strongly overbought" in text:
+            frags.append("recent price trend is strong but stretched (overbought)")
+        elif "overbought" in text:
+            frags.append("recent price trend is strong; a pullback entry is preferred")
+        elif "elevated" in text or "vol" in text:
+            frags.append("recent price swings are on the wide side")
+
+    sent = row.get("sent") or {}
+    if sent:
+        try:
+            neg = float(sent.get("neg") or 0)
+            pos = float(sent.get("pos") or 0)
+            if neg >= 40:
+                frags.append("some negative news flagged in recent headlines")
+            elif pos >= 40:
+                frags.append("news tone is broadly positive")
+            else:
+                frags.append("no strong news signal either way")
+        except Exception:
+            pass
+
+    if risk_text and risk_text.lower() != "no major technical risk flagged":
+        frags.append(f"risk note: {risk_text.rstrip('.').lower()}")
+
+    if not frags:
+        body = ("Not enough plain-language signals to summarise this candidate yet "
+                "\u2014 see the numeric fields above")
+    else:
+        body = "In plain words: " + "; ".join(frags)
+
+    if verdict_state == "green":
+        suffix = (" \u2014 the tool's rankings have cleared their evidence bar, but this is "
+                  "still \u201cworth a closer look,\u201d not a buy signal.")
+    else:
+        suffix = (" \u2014 but this is a watch-only note, not a recommendation, because the "
+                  "tool hasn't proven its picks work yet.")
+    return body + suffix
+
+
+def _plain_disclaimer_html() -> str:
+    bullets = "".join(f"<li>{_html_escape(b)}</li>" for b in PLAIN_DISCLAIMER_BULLETS)
+    return (
+        '<div class="glass g-amber panel plain-disclaimer">'
+        '<div class="pd-head">Before you ever act on this</div>'
+        f'<ul>{bullets}</ul>'
+        '<div class="pd-sub">Always visible. Read it every time \u2014 '
+        'including the days the tool looks confident.</div>'
+        '</div>'
+    )
+
+
+
+
+
 def _verdict_from_markdown(md_path: Path) -> str | None:
     """Fallback verdict extractor. Looks for a line naming one of VALID_VERDICTS."""
     if not md_path.exists():
@@ -830,6 +1021,13 @@ def _payload() -> dict:
 
     alpha_evidence = _alpha_evidence_payload(OUT)
 
+    # Plain-English per-card "in plain words" line (deterministic, no new I/O)
+    _vstate = _verdict_state(verdict)
+    for _c in cards:
+        _c["plain"] = _plain_card_line(_c, _vstate)
+    for _c in shadow_unique_top5:
+        _c["plain"] = _plain_card_line(_c, _vstate)
+
     return {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "date": date_str,
@@ -860,7 +1058,10 @@ def _payload() -> dict:
         "corr_matrix": corr_payload,
         "macro": macro_payload,
         "alpha_zoo": zoo_payload,
+        "plain_summary_html": _plain_summary_html(progress_payload),
+        "plain_disclaimer_html": _plain_disclaimer_html(),
     }
+
 
 
 
@@ -1094,12 +1295,38 @@ canvas{margin-top:4px}
 .aznew{display:inline-block;font-size:9.5px;font-weight:700;padding:1px 7px;border-radius:5px;background:var(--teal-bg);color:var(--teal);margin-left:6px;letter-spacing:.3px}
 
 
+
+/* Plain-English layer — top summary card, per-card sub-line, disclaimer, glossary tooltips */
+.plain-summary{margin:6px 0 14px}
+.plain-summary .ps-head{font-size:10.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px}
+.plain-summary .ps-body{font-size:14.5px;line-height:1.55;color:var(--txt)}
+.plain-summary .ps-sub{font-size:11px;color:var(--muted);margin-top:8px}
+.plain{font-size:12px;color:var(--muted);margin-top:10px;padding:8px 10px;border-radius:8px;
+  background:rgba(255,255,255,0.03);border:1px dashed var(--line2);line-height:1.5}
+.plain-disclaimer{margin:22px 0 6px}
+.plain-disclaimer .pd-head{font-size:14px;font-weight:700;color:var(--amber);margin-bottom:8px}
+.plain-disclaimer ul{margin:0 0 6px 20px;padding:0;color:var(--txt);font-size:13px;line-height:1.6}
+.plain-disclaimer ul li{margin:3px 0}
+.plain-disclaimer .pd-sub{font-size:11px;color:var(--muted);margin-top:8px}
+.gloss{position:relative;border-bottom:1px dotted var(--muted);cursor:help;outline:none}
+.gloss:focus,.gloss:focus-within{border-bottom-color:var(--teal)}
+.gloss .tt{position:absolute;left:50%;bottom:calc(100% + 6px);transform:translateX(-50%);
+  min-width:200px;max-width:280px;background:rgba(14,16,26,0.97);color:var(--txt);
+  border:1px solid var(--line2);border-radius:8px;padding:8px 10px;font-size:11.5px;
+  line-height:1.45;text-transform:none;letter-spacing:normal;font-weight:400;
+  box-shadow:0 8px 24px -8px rgba(0,0,0,0.7);opacity:0;pointer-events:none;
+  transition:opacity .12s ease;z-index:50;white-space:normal}
+.gloss:hover .tt,.gloss:focus .tt,.gloss:focus-within .tt,.gloss:active .tt{opacity:1;pointer-events:auto}
 </style></head>
+
 <body>
 
 <h1>NSE Quant Evidence Review</h1>
 <div class="sub">Daily run &middot; Generated __GENERATED__ &middot; expanded NSE stock universe / NSE ETFs &middot; cross-sectional validation report is the authority</div>
 <div class="upills" id="universePills"></div>
+
+<div id="plainSummary"></div>
+
 
 <h2>Progress to a verdict</h2>
 <div class="glass g-violet panel">
@@ -1222,7 +1449,10 @@ canvas{margin-top:4px}
   </div>
 </div>
 
+<div id="plainDisclaimer"></div>
+
 <div class="foot">
+
   Excel-ready summary: <code id="excel"></code><br><br>
   Personal screening &amp; validation tool &mdash; <b>not financial advice</b> and not a substitute for a SEBI-registered adviser.
   All numbers pulled directly from the engine output files; nothing estimated.
@@ -1516,7 +1746,33 @@ document.getElementById("cards").innerHTML = (DATA.cards||[]).map(c=>`
     </div>${c.horizon.curve ? `<div class="sub" style="margin-top:4px;font-size:11px">Curve %: ${c.horizon.grid.map((h,i)=>`${h}d=${c.horizon.curve[i]==null?'—':c.horizon.curve[i]}`).join(' · ')}</div>` : ''}` : ''}
     ${c.sent ? `<div class="sub" style="margin-top:6px;font-size:11.5px">📰 ${c.sent.n} headlines · 🟢 ${c.sent.pos}% / 🔴 ${c.sent.neg}% · net=${fmt(c.sent.net,'',2)}</div>` : ''}
     <div class="flags">${(c.flags||[]).map(f=>`<div class="flag"><span class="fdot ${dotc[f[0]]||'d-dim'}"></span><b>${f[1]}:</b> ${f[2]}</div>`).join('')}</div>
+    ${c.plain ? `<div class="plain">${c.plain}</div>` : ''}
  </div>`).join("") || `<div class="glass panel"><div class="sub">No trade-plan output yet — run the pipeline.</div></div>`;
+
+// Plain-English summary card + permanent disclaimer panel — deterministic HTML built server-side.
+(function injectPlainLayer(){
+  const s = document.getElementById("plainSummary");
+  if (s && DATA.plain_summary_html) s.innerHTML = DATA.plain_summary_html;
+  const d = document.getElementById("plainDisclaimer");
+  if (d && DATA.plain_disclaimer_html) d.innerHTML = DATA.plain_disclaimer_html;
+})();
+
+// Also attach the plain-words line inside shadow-only cards.
+(function patchShadowUniquePlain(){
+  const host = document.getElementById("shadowUniqueCards");
+  if (!host) return;
+  const rows = DATA.shadow_unique_top5 || [];
+  const els = host.querySelectorAll(".card");
+  rows.forEach((c, i) => {
+    if (!c.plain) return;
+    const el = els[i]; if (!el) return;
+    const p = document.createElement("div");
+    p.className = "plain";
+    p.innerHTML = c.plain;
+    el.appendChild(p);
+  });
+})();
+
 
 // Correlation matrix tile
 (function renderCorr(){
@@ -1720,11 +1976,28 @@ document.getElementById("excel").textContent = DATA.excel;
 def build() -> Path:
     OUT.mkdir(exist_ok=True)
     payload = _payload()
-    html = (_TEMPLATE
+    tpl = _TEMPLATE
+    # Wrap first occurrence of a few technical terms in static captions with
+    # plain-English tooltips. Kept in build() so the template file stays
+    # source-of-truth for structure; wraps are additive and fail-soft.
+    tpl = tpl.replace(
+        "<b>Target-per-day</b>",
+        f"<b>{_gloss('Target-per-day')}</b>", 1)
+    tpl = tpl.replace(
+        "<b>Model edge/day</b>",
+        f"<b>{_gloss('Model edge/day')}</b>", 1)
+    tpl = tpl.replace(
+        "RSI is a timing filter, not a valuation filter. Right of the dashed line (RSI ~ 70-73) = overbought entry risk; above the upper band (vol ~ 30%) = elevated volatility.",
+        f"{_gloss('RSI')} is a timing filter, not a valuation filter. Right of the dashed line (RSI ~ 70-73) = overbought entry risk; above the upper band (vol ~ 30%) = elevated {_gloss('volatility')}.",
+        1)
+    tpl = tpl.replace("Show RSI &times; volatility map",
+                      f"Show {_gloss('RSI')} &times; {_gloss('volatility')} map", 1)
+    html = (tpl
             .replace("__DATE__", payload["date"])
             .replace("__GENERATED__", payload["generated_at"])
             .replace("__CHART_JS__", _embedded_chart_js())
             .replace("__DATA__", json.dumps(payload, default=str)))
+
     latest = OUT / "dashboard_latest.html"
     dated = OUT / f"dashboard_{payload['date']}.html"
     latest.write_text(html, encoding="utf-8")
