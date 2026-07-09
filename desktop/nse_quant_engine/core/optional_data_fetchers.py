@@ -92,112 +92,267 @@ def _merge_dated(existing: Path, new_df: pd.DataFrame, date_col: str,
 # =========================================================================
 # 1) FII / DII daily flow — Moneycontrol table (pandas.read_html)
 # =========================================================================
+# ---------------------------------------------------------------------------
+# HTML parser helper — pandas.read_html needs a flavor. Try lxml first (fast),
+# then html5lib (tolerant of Moneycontrol's malformed markup), then bs4.
+# ---------------------------------------------------------------------------
+def _try_read_html(text: str) -> list[pd.DataFrame]:
+    last_exc: BaseException | None = None
+    for flavor in ("lxml", "html5lib", "bs4"):
+        try:
+            return pd.read_html(io.StringIO(text), flavor=flavor)
+        except Exception as e:  # ImportError, ValueError, XMLSyntaxError, ...
+            last_exc = e
+            continue
+    raise RuntimeError(f"no HTML parser succeeded: {last_exc}")
+
+
+def _normalize_flow_table(picked: pd.DataFrame) -> pd.DataFrame:
+    if isinstance(picked.columns, pd.MultiIndex):
+        picked.columns = [" ".join([str(x) for x in tup if str(x) != "nan"]).strip()
+                          for tup in picked.columns.to_list()]
+    cmap = {str(c).lower(): c for c in picked.columns}
+    def _find(*needles):
+        for c_lower, c_orig in cmap.items():
+            if all(n in c_lower for n in needles):
+                return c_orig
+        return None
+    date_c = _find("date")
+    fii_net_c = _find("fii", "net") or _find("fii")
+    dii_net_c = _find("dii", "net") or _find("dii")
+    if not (date_c and fii_net_c and dii_net_c):
+        raise RuntimeError(f"could not identify Date/FII/DII columns in {list(picked.columns)}")
+    return pd.DataFrame({
+        "Date": pd.to_datetime(picked[date_c], errors="coerce", dayfirst=True),
+        "FII_Net_INR_Cr": pd.to_numeric(
+            picked[fii_net_c].astype(str).str.replace(",", "").str.replace("−", "-"),
+            errors="coerce"),
+        "DII_Net_INR_Cr": pd.to_numeric(
+            picked[dii_net_c].astype(str).str.replace(",", "").str.replace("−", "-"),
+            errors="coerce"),
+    }).dropna(subset=["Date"])
+
+
+def _fii_dii_from_moneycontrol(sess) -> pd.DataFrame:
+    url = "https://www.moneycontrol.com/stocks/marketstats/fii_dii_activity/index.php"
+    r = sess.get(url, timeout=15)
+    r.raise_for_status()
+    tables = _try_read_html(r.text)
+    picked = None
+    for t in tables:
+        cols = " ".join(str(c) for c in t.columns).lower()
+        if "fii" in cols and "dii" in cols and "net" in cols:
+            picked = t
+            break
+    if picked is None or picked.empty:
+        raise RuntimeError("no FII/DII table found on Moneycontrol page")
+    return _normalize_flow_table(picked)
+
+
+def _fii_dii_from_groww(sess) -> pd.DataFrame:
+    # Groww's public FII/DII widget is a JSON endpoint used by their web page.
+    url = "https://groww.in/v1/api/stocks_data/v1/accord_points/exchange/NSE/type/index/BSEIndex_fii_dii"
+    r = sess.get(url, timeout=15)
+    r.raise_for_status()
+    payload = r.json()
+    rows = payload.get("data") or payload.get("results") or []
+    if not rows:
+        raise RuntimeError("groww returned no FII/DII rows")
+    df = pd.DataFrame(rows)
+    # heuristic mapping
+    cmap = {c.lower(): c for c in df.columns}
+    def pick(*names):
+        for n in names:
+            for k, v in cmap.items():
+                if n in k:
+                    return v
+        return None
+    date_c = pick("date")
+    fii_c = pick("fii_net", "fiinet", "fii")
+    dii_c = pick("dii_net", "diinet", "dii")
+    if not (date_c and fii_c and dii_c):
+        raise RuntimeError(f"groww: cannot map columns {list(df.columns)}")
+    return pd.DataFrame({
+        "Date": pd.to_datetime(df[date_c], errors="coerce"),
+        "FII_Net_INR_Cr": pd.to_numeric(df[fii_c], errors="coerce"),
+        "DII_Net_INR_Cr": pd.to_numeric(df[dii_c], errors="coerce"),
+    }).dropna(subset=["Date"])
+
+
+# =========================================================================
+# 1) FII / DII daily flow — Moneycontrol primary, Groww fallback
+# =========================================================================
 def fetch_fii_dii(data_dir: Path, keep_days: int = 90) -> bool:
     target = data_dir / "fii_dii_daily.csv"
     if _is_fresh(target, FRESH_FLOW_HOURS):
         _log(f"fii_dii_daily.csv fresh (<{FRESH_FLOW_HOURS}h) — skipping fetch")
         return True
-    url = "https://www.moneycontrol.com/stocks/marketstats/fii_dii_activity/index.php"
-    try:
-        sess = _requests_session()
-        r = sess.get(url, timeout=15)
-        r.raise_for_status()
-        tables = pd.read_html(io.StringIO(r.text))
-        # find the table with FII / DII columns
-        picked = None
-        for t in tables:
-            cols = " ".join(str(c) for c in t.columns).lower()
-            if "fii" in cols and "dii" in cols and "net" in cols:
-                picked = t
-                break
-        if picked is None or picked.empty:
-            raise RuntimeError("no FII/DII table found on Moneycontrol page")
-
-        # flatten multi-index headers if present
-        if isinstance(picked.columns, pd.MultiIndex):
-            picked.columns = [" ".join([str(x) for x in tup if str(x) != "nan"]).strip()
-                              for tup in picked.columns.to_list()]
-        # Heuristic column matching
-        cmap = {c.lower(): c for c in picked.columns}
-        def _find(*needles):
-            for c_lower, c_orig in cmap.items():
-                if all(n in c_lower for n in needles):
-                    return c_orig
-            return None
-        date_c = _find("date")
-        fii_net_c = _find("fii", "net") or _find("fii")
-        dii_net_c = _find("dii", "net") or _find("dii")
-        if not (date_c and fii_net_c and dii_net_c):
-            raise RuntimeError(f"could not identify Date/FII/DII columns in {list(picked.columns)}")
-
-        out = pd.DataFrame({
-            "Date": pd.to_datetime(picked[date_c], errors="coerce", dayfirst=True),
-            "FII_Net_INR_Cr": pd.to_numeric(picked[fii_net_c].astype(str).str.replace(",", "").str.replace("−", "-"), errors="coerce"),
-            "DII_Net_INR_Cr": pd.to_numeric(picked[dii_net_c].astype(str).str.replace(",", "").str.replace("−", "-"), errors="coerce"),
-        }).dropna(subset=["Date"])
-        merged = _merge_dated(target, out, "Date", keep_days)
-        data_dir.mkdir(parents=True, exist_ok=True)
-        merged.to_csv(target, index=False)
-        _log(f"fii_dii_daily.csv refreshed ({len(merged)} rows)")
-        return True
-    except Exception as e:
-        _warn("fii_dii (moneycontrol)", e)
-        return target.exists()
+    sess = _requests_session()
+    sources = [
+        ("moneycontrol", _fii_dii_from_moneycontrol),
+        ("groww",        _fii_dii_from_groww),
+    ]
+    for name, fn in sources:
+        try:
+            out = fn(sess)
+            if out.empty:
+                raise RuntimeError("empty result")
+            merged = _merge_dated(target, out, "Date", keep_days)
+            data_dir.mkdir(parents=True, exist_ok=True)
+            merged.to_csv(target, index=False)
+            _log(f"fii_dii_daily.csv refreshed via {name} ({len(merged)} rows)")
+            return True
+        except Exception as e:
+            _log(f"fii_dii source '{name}' failed: {type(e).__name__}: {e}")
+            continue
+    _warn("fii_dii (all sources)", RuntimeError("moneycontrol + groww both failed"))
+    return target.exists()
 
 
 # =========================================================================
-# 2) NSE bulk deals — official JSON endpoint (needs cookie warmup)
+# 2) Bulk deals — NSE archives CSV (primary), NSE JSON API (fallback),
+#    BSE bulk deals JSON (last-resort cross-exchange fallback).
 # =========================================================================
+def _bulk_from_nse_archive(sess) -> pd.DataFrame:
+    """Static daily CSV — no cookie handshake required. Covers today only."""
+    url = "https://archives.nseindia.com/content/equities/bulk.csv"
+    r = sess.get(url, timeout=15, headers={"Referer": "https://www.nseindia.com/"})
+    r.raise_for_status()
+    df = pd.read_csv(io.StringIO(r.text))
+    cmap = {c.strip().lower(): c for c in df.columns}
+    def pick(*names):
+        for n in names:
+            for k, v in cmap.items():
+                if all(part in k for part in n.split()):
+                    return v
+        return None
+    out = pd.DataFrame({
+        "Date":     pd.to_datetime(df[pick("date")], errors="coerce", dayfirst=True),
+        "Symbol":   df[pick("symbol")].astype(str).str.strip(),
+        "Client":   df[pick("client")].astype(str).str.strip(),
+        "Buy_Sell": df[pick("buy")].astype(str).str.strip(),
+        "Qty":      pd.to_numeric(df[pick("quantity")].astype(str).str.replace(",", ""), errors="coerce"),
+        "Price":    pd.to_numeric(df[pick("price")].astype(str).str.replace(",", ""), errors="coerce"),
+    }).dropna(subset=["Date", "Symbol"])
+    if out.empty:
+        raise RuntimeError("NSE archive CSV parsed but empty")
+    return out
+
+
+def _bulk_from_nse_api(sess, days: int) -> pd.DataFrame:
+    api_headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://www.nseindia.com/report-detail/display-bulk-and-block-deals",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Dest": "empty",
+        "X-Requested-With": "XMLHttpRequest",
+    }
+    sess.get("https://www.nseindia.com/", timeout=15)
+    sess.get("https://www.nseindia.com/market-data/live-equity-market", timeout=15)
+    sess.get("https://www.nseindia.com/report-detail/display-bulk-and-block-deals", timeout=15)
+    end = datetime.now()
+    start = end - timedelta(days=days)
+    url = (f"https://www.nseindia.com/api/historical/bulk-deals"
+           f"?from={start.strftime('%d-%m-%Y')}&to={end.strftime('%d-%m-%Y')}")
+    last_exc: BaseException | None = None
+    payload = None
+    for _ in range(2):
+        try:
+            r = sess.get(url, timeout=20, headers=api_headers)
+            if r.status_code >= 500:
+                raise RuntimeError(f"HTTP {r.status_code}")
+            r.raise_for_status()
+            payload = r.json()
+            break
+        except Exception as e:
+            last_exc = e
+            time.sleep(2.0)
+    if payload is None:
+        raise RuntimeError(f"NSE JSON API failed after retry: {last_exc}")
+    rows = payload.get("data") or []
+    if not rows:
+        raise RuntimeError("NSE returned empty bulk-deals payload")
+    def _get(row, *keys, default=None):
+        for k in keys:
+            if k in row and row[k] not in (None, "", "-"):
+                return row[k]
+        return default
+    out = pd.DataFrame([{
+        "Date":     _get(r, "BD_DT_DATE", "date"),
+        "Symbol":   _get(r, "BD_SYMBOL", "symbol"),
+        "Client":   _get(r, "BD_CLIENT_NAME", "clientName"),
+        "Buy_Sell": _get(r, "BD_BUY_SELL", "buySell"),
+        "Qty":      _get(r, "BD_QTY_TRD", "quantityTraded"),
+        "Price":    _get(r, "BD_TP_WATP", "watp"),
+    } for r in rows])
+    out["Date"]  = pd.to_datetime(out["Date"], errors="coerce", dayfirst=True)
+    out = out.dropna(subset=["Date", "Symbol"])
+    out["Qty"]   = pd.to_numeric(out["Qty"].astype(str).str.replace(",", ""), errors="coerce")
+    out["Price"] = pd.to_numeric(out["Price"].astype(str).str.replace(",", ""), errors="coerce")
+    return out
+
+
+def _bulk_from_bse(sess) -> pd.DataFrame:
+    end = datetime.now()
+    start = end - timedelta(days=7)
+    url = ("https://api.bseindia.com/BseIndiaAPI/api/BulkDeals/w"
+           f"?Fdate={start.strftime('%Y-%m-%d')}&Tdate={end.strftime('%Y-%m-%d')}"
+           "&Bflag=B&pageno=1")
+    r = sess.get(url, timeout=15, headers={
+        "Referer": "https://www.bseindia.com/",
+        "Accept": "application/json, text/plain, */*",
+    })
+    r.raise_for_status()
+    payload = r.json()
+    rows = payload.get("Table") or payload.get("data") or []
+    if not rows:
+        raise RuntimeError("BSE returned empty bulk-deals payload")
+    df = pd.DataFrame(rows)
+    cmap = {c.lower(): c for c in df.columns}
+    def pick(*names):
+        for n in names:
+            for k, v in cmap.items():
+                if n in k:
+                    return v
+        return None
+    out = pd.DataFrame({
+        "Date":     pd.to_datetime(df[pick("date", "dt")], errors="coerce"),
+        "Symbol":   df[pick("scrip_name", "scripname", "symbol", "scrip")].astype(str).str.strip(),
+        "Client":   df[pick("client")].astype(str).str.strip(),
+        "Buy_Sell": df[pick("deal", "buy")].astype(str).str.strip().str[:1].str.upper(),
+        "Qty":      pd.to_numeric(df[pick("qty", "quantity")], errors="coerce"),
+        "Price":    pd.to_numeric(df[pick("price", "rate")], errors="coerce"),
+    }).dropna(subset=["Date", "Symbol"])
+    if out.empty:
+        raise RuntimeError("BSE parsed but empty")
+    return out
+
+
 def fetch_bulk_deals(data_dir: Path, days: int = 30, keep_days: int = 60) -> bool:
     target = data_dir / "bulk_deals.csv"
     if _is_fresh(target, FRESH_FLOW_HOURS):
         _log(f"bulk_deals.csv fresh (<{FRESH_FLOW_HOURS}h) — skipping fetch")
         return True
-    try:
-        sess = _requests_session()
-        # cookie warm-up — NSE rejects direct API hits without a session cookie
-        sess.get("https://www.nseindia.com/", timeout=15)
-        sess.get("https://www.nseindia.com/report-detail/display-bulk-and-block-deals", timeout=15)
-
-        end = datetime.now()
-        start = end - timedelta(days=days)
-        url = (f"https://www.nseindia.com/api/historical/bulk-deals"
-               f"?from={start.strftime('%d-%m-%Y')}&to={end.strftime('%d-%m-%Y')}")
-        r = sess.get(url, timeout=20)
-        r.raise_for_status()
-        payload = r.json()
-        rows = payload.get("data") or []
-        if not rows:
-            raise RuntimeError("NSE returned empty bulk-deals payload")
-
-        # Field names in NSE bulk-deals API (as observed): BD_DT_DATE, BD_SYMBOL,
-        # BD_CLIENT_NAME, BD_BUY_SELL, BD_QTY_TRD, BD_TP_WATP
-        def _get(row, *keys, default=None):
-            for k in keys:
-                if k in row and row[k] not in (None, "", "-"):
-                    return row[k]
-            return default
-
-        out = pd.DataFrame([{
-            "Date":    _get(r, "BD_DT_DATE", "date"),
-            "Symbol":  _get(r, "BD_SYMBOL", "symbol"),
-            "Client":  _get(r, "BD_CLIENT_NAME", "clientName"),
-            "Buy_Sell": _get(r, "BD_BUY_SELL", "buySell"),
-            "Qty":     _get(r, "BD_QTY_TRD", "quantityTraded"),
-            "Price":   _get(r, "BD_TP_WATP", "watp"),
-        } for r in rows])
-        out["Date"] = pd.to_datetime(out["Date"], errors="coerce", dayfirst=True)
-        out = out.dropna(subset=["Date", "Symbol"])
-        out["Qty"] = pd.to_numeric(out["Qty"].astype(str).str.replace(",", ""), errors="coerce")
-        out["Price"] = pd.to_numeric(out["Price"].astype(str).str.replace(",", ""), errors="coerce")
-        merged = _merge_dated(target, out, "Date", keep_days)
-        data_dir.mkdir(parents=True, exist_ok=True)
-        merged.to_csv(target, index=False)
-        _log(f"bulk_deals.csv refreshed ({len(merged)} rows)")
-        return True
-    except Exception as e:
-        _warn("bulk_deals (nseindia)", e)
-        return target.exists()
+    sess = _requests_session()
+    sources = [
+        ("nse-archives", lambda: _bulk_from_nse_archive(sess)),
+        ("nse-api",      lambda: _bulk_from_nse_api(sess, days)),
+        ("bse",          lambda: _bulk_from_bse(sess)),
+    ]
+    for name, fn in sources:
+        try:
+            out = fn()
+            merged = _merge_dated(target, out, "Date", keep_days)
+            data_dir.mkdir(parents=True, exist_ok=True)
+            merged.to_csv(target, index=False)
+            _log(f"bulk_deals.csv refreshed via {name} ({len(out)} new rows, {len(merged)} in cache)")
+            return True
+        except Exception as e:
+            _log(f"bulk_deals source '{name}' failed: {type(e).__name__}: {e}")
+            continue
+    _warn("bulk_deals (all sources)", RuntimeError("nse-archives + nse-api + bse all failed"))
+    return target.exists()
 
 
 # =========================================================================
