@@ -804,6 +804,32 @@ def _payload() -> dict:
     except Exception:
         macro_payload = None
 
+
+    # ── progress-to-a-verdict payload ──
+    effective_now = stats.get("effective_validation_dates") if stats else None
+    raw_now = stats.get("validation_dates") if stats else None
+    effective_target = int(_cfg("CROSSVAL_MIN_EFFECTIVE_DATES", 6))
+    raw_target = int(_cfg("CROSSVAL_MIN_DATES", 10))
+    adaptive_tick = int(_cfg("ADAPTIVE_MIN_DATES", 60))
+    delta_matured = _delta_matured_from_history(OUT / "score_history.csv", matured)
+    progress_payload = {
+        "verdict": verdict,
+        "gloss": _VERDICT_GLOSS.get(verdict, "Verdict not yet available."),
+        "state": _verdict_state(verdict),
+        "source": verdict_source,
+        "effective_now": _num(effective_now, 1) if effective_now is not None else None,
+        "effective_target": effective_target,
+        "adaptive_tick": adaptive_tick,
+        "raw_now": _num(raw_now, 0) if raw_now is not None else None,
+        "raw_target": raw_target,
+        "matured": matured,
+        "maturing": maturing,
+        "total": total_signals,
+        "delta_matured": delta_matured,
+    }
+
+    alpha_evidence = _alpha_evidence_payload(OUT)
+
     return {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "date": date_str,
@@ -816,6 +842,8 @@ def _payload() -> dict:
         "maturity": {"matured": matured, "maturing": maturing,
                      "total": total_signals, "rate": maturation_rate},
 
+        "progress": progress_payload,
+        "alpha_evidence": alpha_evidence,
         "evidence_10": evidence_10,
         "evidence_5": evidence_5,
         "quintile": quintile,
@@ -833,6 +861,7 @@ def _payload() -> dict:
         "macro": macro_payload,
         "alpha_zoo": zoo_payload,
     }
+
 
 
 # ---------------------------------------------------------------- template ----
