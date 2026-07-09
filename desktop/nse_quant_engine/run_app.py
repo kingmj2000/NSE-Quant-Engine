@@ -532,25 +532,57 @@ class Dashboard(QWidget):
         for i, (title, value, tone, subtitle) in enumerate(cards):
             self.grid.addWidget(_make_kpi_card(title, value, tone, subtitle), i // 4, i % 4)
 
-        # Activation checklist for optional inputs (drives Fincept/Vibe overlays)
+        # Activation checklist for optional inputs (drives Fincept/Vibe overlays).
+        # Files are auto-fetched at the start of every pipeline run by
+        # core.optional_data_fetchers.refresh_all(); user drops still win when newer.
         checklist = [
-            ("data/fii_dii_daily.csv",   "FII/DII flow (Step 14, Fincept)"),
-            ("data/bulk_deals.csv",      "Bulk deals (Step 14, Fincept)"),
-            ("data/fundamentals_latest.csv", "Fundamentals overlay (Step 6)"),
-            ("data/earnings_calendar.csv",   "Earnings calendar (Step 11, Fincept)"),
+            ("data/fii_dii_daily.csv",       "FII/DII flow (Step 14, Fincept · auto-fetched)"),
+            ("data/bulk_deals.csv",          "Bulk deals (Step 14, Fincept · auto-fetched)"),
+            ("data/fundamentals_latest.csv", "Fundamentals overlay (Step 6 · auto-fetched via yfinance)"),
+            ("data/earnings_calendar.csv",   "Earnings calendar (Step 11, Fincept · auto-fetched)"),
         ]
-        chk_head = QLabel("Overlay activation · drop optional CSVs into data/ to light these up")
+        chk_head = QLabel("Overlay activation · auto-refreshed each run · drop your own CSV in data/ to override")
         chk_head.setObjectName("Sub"); chk_head.setWordWrap(True)
         chk_head.setStyleSheet("font-size:11px;letter-spacing:1px;text-transform:uppercase;margin-top:10px;")
         self.grid.addWidget(chk_head, (len(cards) + 3) // 4, 0, 1, 4)
         base_row = (len(cards) + 3) // 4 + 1
+
+        def _fmt_age(mtime: float) -> str:
+            s = int(time.time() - mtime)
+            if s < 60:    return f"{s}s ago"
+            if s < 3600:  return f"{s//60}m ago"
+            if s < 86400: return f"{s//3600}h ago"
+            return f"{s//86400}d ago"
+
         for i, (rel, label) in enumerate(checklist):
-            present = (BASE / rel).exists()
-            mark = "✅" if present else "⚠️"
-            tone = "green" if present else "amber"
-            sub  = "present" if present else "missing — overlay will run quiet"
+            p = BASE / rel
+            if p.exists():
+                try:
+                    rows = sum(1 for _ in open(p, "r", encoding="utf-8", errors="ignore")) - 1
+                    rows = max(rows, 0)
+                except Exception:
+                    rows = 0
+                age_h = (time.time() - p.stat().st_mtime) / 3600.0
+                if age_h < 24:
+                    mark, tone = "✅", "green"
+                elif age_h < 24 * 7:
+                    mark, tone = "🟡", "amber"
+                else:
+                    mark, tone = "🟠", "amber"
+                sub = f"{rows} rows · updated {_fmt_age(p.stat().st_mtime)}"
+            else:
+                mark, tone = "⚠️", "amber"
+                sub = "missing — auto-fetch will try next run; overlay quiet meanwhile"
             self.grid.addWidget(_make_kpi_card(f"{mark}  {label}", rel, tone, sub),
                                 base_row + i // 4, i % 4)
+
+        # Refresh-now button lets the user re-pull the 4 feeds without a full run.
+        refresh_row = base_row + (len(checklist) + 3) // 4
+        btn = QPushButton("🔄 Refresh optional feeds now")
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setStyleSheet("padding:8px 14px;")
+        btn.clicked.connect(self._refresh_optional_feeds)
+        self.grid.addWidget(btn, refresh_row, 0, 1, 2)
 
         html = self._html_path()
         complete = manifest.get("completed_at") or "latest artifacts"
@@ -558,6 +590,31 @@ class Dashboard(QWidget):
             f"Last completed: {complete}. Interactive dashboard file: {html if html.exists() else 'not generated yet'}. "
             f"See INSPIRATION_MAP.md for what Fincept Terminal / Vibe Trading concepts each overlay borrows."
         )
+
+    def _refresh_optional_feeds(self):
+        """Fire the 4 optional-CSV fetchers in a background thread and reload the dashboard."""
+        self._emit_console("[fetch] manual refresh requested — running in background")
+        from PySide6.QtCore import QThread, Signal
+        parent = self
+
+        class _RefreshThread(QThread):
+            done_signal = Signal()
+            def run(self_inner):
+                try:
+                    if str(BASE) not in sys.path:
+                        sys.path.insert(0, str(BASE))
+                    from core.optional_data_fetchers import refresh_all
+                    refresh_all(BASE)
+                except Exception as e:
+                    print(f"[fetch] manual refresh failed: {e}", flush=True)
+                self_inner.done_signal.emit()
+
+        t = _RefreshThread(self)
+        t.done_signal.connect(lambda: (parent._emit_console("[fetch] manual refresh done"),
+                                       parent.load_last_run()))
+        # Keep a reference so Qt doesn't garbage-collect the thread mid-run.
+        self._refresh_thread = t
+        t.start()
 
 
 # ----------------------------- Run Drawer -----------------------------------
