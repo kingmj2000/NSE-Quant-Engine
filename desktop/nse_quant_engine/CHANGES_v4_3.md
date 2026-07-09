@@ -73,3 +73,90 @@ cash-market NSE brief the user set):
 - `optional_data_fetchers.fetch_fii_dii`: now tries `moneycontrol` (with lxml → html5lib → bs4 parser fallback) then `groww` public JSON; added `html5lib` to `requirements.txt` so `pandas.read_html` never fails on missing optional parser.
 - `optional_data_fetchers.fetch_bulk_deals`: replaced single NSE JSON call with `nse-archives` (static daily CSV, no cookie handshake) → `nse-api` (with stronger cookie chain + retry on 5xx) → `bse` JSON fallback for cross-exchange coverage.
 - Per-source failures now log `bulk_deals source 'X' failed: <err>` so the operator sees which fallback triggered.
+
+
+## v4.4 — Signal upgrades (Part A) + gated adaptive weighting (Part B, dormant)
+
+Follows the "tightened plan" the user approved: signal-quality upgrades ship
+live; adaptive weighting ships dormant with six mandatory guardrails until
+the shadow-vs-primary report justifies manual promotion.
+
+### Part A — Signal upgrades (LIVE)
+- **A2 · Sector-neutral scoring** — new `core/sector_neutralize.py`.
+  Per-sector z-score for sectors ≥ `SECTOR_NEUTRAL_MIN_MEMBERS` (default 5);
+  smaller sectors are left universe-standardized and logged as `Skipped`
+  in `output/scoring_sector_neutralization.csv`.
+- **A3 · Turnover-aware alpha weights** — new `core/alpha_weighting.py`.
+  `w_i ∝ IC_i / (1 + λ · turnover_i)`, `λ = TURNOVER_LAMBDA`. IC input is
+  **walk-forward survivor IC** from `alpha_evaluator` (matured windows only)
+  — never in-sample. Non-survivor alphas stay at baseline weight.
+  Artifact: `output/alpha_weights_current.json`.
+- **A4 · Delivery % candidate alpha** — `fetch_delivery_pct()` pulls NSE
+  bhavcopy `%DlyQtToTradedQty` per trading day; **append-only cache** with
+  backoff, dedupe on `(Date, Symbol)`, and **fail-soft** (a bad fetch never
+  wipes existing rows or blocks the pipeline). New `delivery_momentum`
+  alpha registered in `alpha_zoo`, gated by the evaluator + residual-IC.
+- **A5 · IV rank candidate alpha** — `fetch_iv_rank()` reads NSE
+  `option-chain-equities`, computes ATM IV percentile vs trailing 252
+  cached days. Same append + backoff + fail-soft discipline. New
+  `iv_rank` alpha registered in `alpha_zoo`.
+- **A6 · Incremental (residual) IC gate** — `alpha_evaluator.residual_ic()`
+  and `build_promotion_log()`. A candidate passes only if standalone IC/
+  t-stat clear the existing gates AND its **residual** IC (after regressing
+  out current survivors, with an intercept term) clears
+  `ALPHA_INCREMENTAL_IC_MIN`. Both standalone and residual IC are recorded
+  in `output/alpha_promotion_log.json`.
+
+### Validation-layer Bayesian shrinkage (always on)
+- New helpers in `core/validation_status.py`:
+  `shrink_hit_rate` (Beta prior toward 0.5), `shrink_ic` (toward 0), and
+  `apply_bayes_shrink` used by `cross_sectional_validation.py` before the
+  ship/hold gate. Raw values kept as `hit_rate_raw` / `spread_raw` /
+  `adj_tstat_raw` in `validation_status.json` for transparency.
+  Controlled by `VALIDATION_BAYES_SHRINK` / `VALIDATION_HITRATE_PRIOR_*`
+  / `VALIDATION_IC_PRIOR_N`.
+
+### Part B — Adaptive alpha weighting (DORMANT / shadow-only)
+- New `core/adaptive_weights.py` with six enforced guardrails:
+  (1) walk-forward only — refuses look-ahead rows;
+  (2) validation-gated — requires `verdict == "Validation Positive"` AND
+      **effective (overlap-adjusted) dates ≥ `ADAPTIVE_MIN_DATES` (default 60)**;
+  (3) shadow-first — writes only to `adaptive_weights_shadow.json` /
+      `adaptive_weights_log.json`, never the primary weight file;
+  (4) heavily regularized — shrinkage-alpha blend, per-weight `MAX_STEP`
+      cap, AND a new **total-drift cap `ADAPTIVE_MAX_TOTAL_DRIFT` (default 0.30)**;
+  (5) refuses per-symbol keyed inputs (asserts `Symbol`-like columns absent);
+  (6) `ADAPTIVE_ENABLED = False` by default — one env flag makes it inert.
+- Hook in `nse_quant_engine_v4_shadow.py::_run_adaptive_shadow()` runs every
+  shadow build; when dormant, log records the exact reason
+  (e.g. `"insufficient effective history (N_eff=…, need 60)"`).
+
+### Evidence bundle
+- `core/evidence_bundle.py` now also includes:
+  `alpha_promotion_log.json`, `alpha_weights_current.json`,
+  `scoring_sector_neutralization.csv`, `adaptive_weights_shadow.json`,
+  `adaptive_weights_log.json`.
+
+### Data / output additions
+- Data (fetched, cached, append-only):
+  `data/delivery_pct_daily.csv`, `data/iv_rank_daily.csv`.
+- Output: as listed above.
+
+### Config keys added
+```
+SECTOR_NEUTRAL, SECTOR_NEUTRAL_MIN_MEMBERS, TURNOVER_LAMBDA,
+ALPHA_INCREMENTAL_IC_MIN,
+ADAPTIVE_ENABLED (default False), ADAPTIVE_MIN_DATES (60, effective),
+ADAPTIVE_SHRINKAGE_ALPHA, ADAPTIVE_MAX_STEP, ADAPTIVE_MAX_TOTAL_DRIFT,
+ADAPTIVE_RIDGE_ALPHA,
+VALIDATION_BAYES_SHRINK, VALIDATION_HITRATE_PRIOR_ALPHA / _BETA,
+VALIDATION_IC_PRIOR_N.
+```
+
+### Tests
+`tests/test_new_modules.py` adds nine tests covering: per-sector zero-mean
++ skipped-sector flag; turnover-monotone weights with survivor-IC only;
+residual-IC rejects linear combos of survivors; adaptive dormant when
+disabled, refuses per-symbol input, refuses look-ahead rows, and force-
+dormants when total drift exceeds cap; Bayesian shrinkage moves small
+samples toward prior; and the new fetchers are exposed.
