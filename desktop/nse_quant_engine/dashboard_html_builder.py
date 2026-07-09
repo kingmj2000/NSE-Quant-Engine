@@ -1186,11 +1186,14 @@ canvas{margin-top:4px}
   <b>Model edge/day</b> = measured expected edge after costs — blank ("&mdash;") until validation is positive. Adani group names are categorically vetoed before any scoring or watchlist inclusion.
 </div>
 
-<h2>Timing filter map &mdash; RSI vs 20-day volatility</h2>
-<div class="glass panel">
-  <canvas id="scatterChart" height="150"></canvas>
-  <div class="sub" style="margin-top:10px">RSI is a timing filter, not a valuation filter. Right of the dashed line (RSI ~ 70-73) = overbought entry risk; above the upper band (vol ~ 30%) = elevated volatility.</div>
-</div>
+<details id="scatterDetails" style="margin-top:22px">
+  <summary style="cursor:pointer;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:1.4px;color:var(--muted);padding:6px 0">Show RSI &times; volatility map</summary>
+  <div class="glass panel" style="margin-top:10px">
+    <canvas id="scatterChart" height="150"></canvas>
+    <div class="sub" style="margin-top:10px">RSI is a timing filter, not a valuation filter. Right of the dashed line (RSI ~ 70-73) = overbought entry risk; above the upper band (vol ~ 30%) = elevated volatility.</div>
+  </div>
+</details>
+
 
 <h2>Avoid / downgrade for now</h2>
 <div class="glass panel">
