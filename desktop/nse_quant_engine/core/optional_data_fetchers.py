@@ -180,33 +180,163 @@ def _fii_dii_from_groww(sess) -> pd.DataFrame:
 
 
 # =========================================================================
-# 1) FII / DII daily flow — Moneycontrol primary, Groww fallback
+# 1) FII / DII daily flow — NSE official primary, then Moneycontrol/Groww
 # =========================================================================
+def _nse_warmup(sess) -> None:
+    """Prime cookies that NSE's JSON APIs require. Best-effort; ignores errors."""
+    for u in (
+        "https://www.nseindia.com/",
+        "https://www.nseindia.com/market-data/live-equity-market",
+        "https://www.nseindia.com/reports/fii-dii",
+    ):
+        try:
+            sess.get(u, timeout=15)
+        except Exception:
+            pass
+
+
+def _normalize_nse_fiidii_rows(rows: list) -> pd.DataFrame:
+    """Fold NSE fiidiiTradeReact rows into Date/FII_Net/DII_Net (INR crore).
+
+    NSE returns per-category per-date entries like:
+      {category: 'FII/FPI **', date: '09-Jul-2026', buyValue, sellValue, netValue}
+      {category: 'DII **',     date: '09-Jul-2026', ...}
+    We sum netValue per (date, side).
+    """
+    if not rows:
+        return pd.DataFrame(columns=["Date", "FII_Net_INR_Cr", "DII_Net_INR_Cr"])
+    df = pd.DataFrame(rows)
+    cmap = {str(c).lower(): c for c in df.columns}
+    def pick(*names):
+        for n in names:
+            for k, v in cmap.items():
+                if n == k or n in k:
+                    return v
+        return None
+    date_c = pick("date")
+    cat_c  = pick("category")
+    net_c  = pick("netvalue", "net_value", "netval", "net")
+    if not (date_c and cat_c and net_c):
+        raise RuntimeError(f"NSE FII/DII: cannot map columns in {list(df.columns)}")
+    df["_date"] = pd.to_datetime(df[date_c], errors="coerce", dayfirst=True)
+    df["_net"]  = pd.to_numeric(
+        df[net_c].astype(str).str.replace(",", "").str.replace("−", "-"),
+        errors="coerce",
+    )
+    df["_cat"] = df[cat_c].astype(str).str.upper()
+    df = df.dropna(subset=["_date"])
+    fii_mask = df["_cat"].str.contains("FII") | df["_cat"].str.contains("FPI")
+    dii_mask = df["_cat"].str.contains("DII")
+    fii = df[fii_mask].groupby("_date", as_index=False)["_net"].sum().rename(
+        columns={"_date": "Date", "_net": "FII_Net_INR_Cr"})
+    dii = df[dii_mask].groupby("_date", as_index=False)["_net"].sum().rename(
+        columns={"_date": "Date", "_net": "DII_Net_INR_Cr"})
+    out = pd.merge(fii, dii, on="Date", how="outer").sort_values("Date")
+    return out
+
+
+def _fii_dii_from_nse_api(sess) -> pd.DataFrame:
+    """NSE's live FII/DII trade activity JSON. Returns 1–2 most-recent trading days."""
+    _nse_warmup(sess)
+    url = "https://www.nseindia.com/api/fiidiiTradeReact"
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://www.nseindia.com/reports/fii-dii",
+        "X-Requested-With": "XMLHttpRequest",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Dest": "empty",
+    }
+    last_exc: BaseException | None = None
+    for _ in range(2):
+        try:
+            r = sess.get(url, timeout=20, headers=headers)
+            if r.status_code >= 500:
+                raise RuntimeError(f"HTTP {r.status_code}")
+            r.raise_for_status()
+            payload = r.json()
+            rows = payload if isinstance(payload, list) else (payload.get("data") or [])
+            out = _normalize_nse_fiidii_rows(rows)
+            if out.empty:
+                raise RuntimeError("NSE live API returned empty payload")
+            return out
+        except Exception as e:
+            last_exc = e
+            time.sleep(2.0)
+    raise RuntimeError(f"NSE live FII/DII failed after retry: {last_exc}")
+
+
+def _fii_dii_from_nse_archive(sess, days: int = 90) -> pd.DataFrame:
+    """NSE historical FII/DII endpoint — up to ~90 days in one shot."""
+    _nse_warmup(sess)
+    end = datetime.now()
+    start = end - timedelta(days=days)
+    url = ("https://www.nseindia.com/api/historical/fiidiiTradeReact"
+           f"?from={start.strftime('%d-%m-%Y')}&to={end.strftime('%d-%m-%Y')}")
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://www.nseindia.com/reports/fii-dii",
+        "X-Requested-With": "XMLHttpRequest",
+    }
+    last_exc: BaseException | None = None
+    for _ in range(2):
+        try:
+            r = sess.get(url, timeout=25, headers=headers)
+            if r.status_code >= 500:
+                raise RuntimeError(f"HTTP {r.status_code}")
+            r.raise_for_status()
+            payload = r.json()
+            rows = payload if isinstance(payload, list) else (payload.get("data") or [])
+            out = _normalize_nse_fiidii_rows(rows)
+            if out.empty:
+                raise RuntimeError("NSE historical API returned empty payload")
+            return out
+        except Exception as e:
+            last_exc = e
+            time.sleep(2.0)
+    raise RuntimeError(f"NSE historical FII/DII failed after retry: {last_exc}")
+
+
 def fetch_fii_dii(data_dir: Path, keep_days: int = 90) -> bool:
     target = data_dir / "fii_dii_daily.csv"
     if _is_fresh(target, FRESH_FLOW_HOURS):
         _log(f"fii_dii_daily.csv fresh (<{FRESH_FLOW_HOURS}h) — skipping fetch")
         return True
     sess = _requests_session()
+    # Order matters: NSE first (official + free). Union what we can — nse-api
+    # only returns 1–2 rows, nse-archive backfills ~90 days.
     sources = [
+        ("nse-api",      _fii_dii_from_nse_api),
+        ("nse-archive",  lambda s: _fii_dii_from_nse_archive(s, days=keep_days)),
         ("moneycontrol", _fii_dii_from_moneycontrol),
         ("groww",        _fii_dii_from_groww),
     ]
+    collected: list[pd.DataFrame] = []
+    used: list[str] = []
     for name, fn in sources:
         try:
             out = fn(sess)
-            if out.empty:
+            if out is None or out.empty:
                 raise RuntimeError("empty result")
-            merged = _merge_dated(target, out, "Date", keep_days)
-            data_dir.mkdir(parents=True, exist_ok=True)
-            merged.to_csv(target, index=False)
-            _log(f"fii_dii_daily.csv refreshed via {name} ({len(merged)} rows)")
-            return True
+            collected.append(out)
+            used.append(name)
+            _log(f"fii_dii source '{name}' ok ({len(out)} rows)")
+            # If archive succeeded we already have ~90 days; stop hammering fallbacks.
+            if name == "nse-archive":
+                break
         except Exception as e:
             _log(f"fii_dii source '{name}' failed: {type(e).__name__}: {e}")
             continue
-    _warn("fii_dii (all sources)", RuntimeError("moneycontrol + groww both failed"))
-    return target.exists()
+    if not collected:
+        _warn("fii_dii (all sources)",
+              RuntimeError("nse-api + nse-archive + moneycontrol + groww all failed"))
+        return target.exists()
+    union = pd.concat(collected, ignore_index=True)
+    merged = _merge_dated(target, union, "Date", keep_days)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    merged.to_csv(target, index=False)
+    _log(f"fii_dii_daily.csv refreshed via {'+'.join(used)} ({len(merged)} rows in cache)")
+    return True
 
 
 # =========================================================================
