@@ -84,6 +84,256 @@ def _norm_sym(sym: str) -> str:
     return str(sym or "").replace(".NS", "").upper().strip()
 
 
+def _cfg(name: str, default):
+    """Look up a core.config constant with a safe default. Never raises."""
+    try:
+        from core import config as _C
+        return getattr(_C, name, default)
+    except Exception:
+        return default
+
+
+# ─── verdict fallback + progress ──────────────────────────────────────────────
+_VALID_VERDICTS = (
+    "Validation Positive", "Validation Negative", "No Proven Edge Yet",
+    "Insufficient Statistical Evidence", "Insufficient Breadth",
+    "Insufficient Independent History", "Insufficient History",
+)
+_VERDICT_GLOSS = {
+    "Validation Positive": "Edge confirmed — live mode.",
+    "Validation Negative": "Edge is negative after costs — do not act on picks.",
+    "No Proven Edge Yet":  "No measurable edge after costs yet — watchlist only.",
+    "Insufficient History":              "Not enough evidence yet — watchlist only.",
+    "Insufficient Independent History":  "Not enough evidence yet — watchlist only.",
+    "Insufficient Statistical Evidence": "Not enough evidence yet — watchlist only.",
+    "Insufficient Breadth":              "Not enough evidence yet — watchlist only.",
+}
+
+
+def _verdict_state(v: str | None) -> str:
+    if v == "Validation Positive":
+        return "green"
+    if v == "Validation Negative":
+        return "red"
+    if v in _VERDICT_GLOSS:
+        return "amber"
+    return "neutral"
+
+
+def _verdict_from_markdown(md_path: Path) -> str | None:
+    """Fallback verdict extractor. Looks for a line naming one of VALID_VERDICTS."""
+    if not md_path.exists():
+        return None
+    try:
+        txt = md_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+    for line in txt.splitlines():
+        low = line.strip()
+        if not low:
+            continue
+        # Prefer lines that look like a verdict heading, but accept any exact match.
+        for v in _VALID_VERDICTS:
+            if v in line:
+                return v
+    return None
+
+
+def _delta_matured_from_history(history_csv: Path, matured_today: int) -> int | None:
+    """Diff matured count vs the most recent DISTINCT prior date in score_history.
+    Returns None when there is no strictly-prior distinct date (hides the chip)."""
+    if not history_csv.exists():
+        return None
+    try:
+        h = pd.read_csv(history_csv, usecols=lambda c: c in ("Date", "Net_Forward_Return", "Horizon_Days"))
+    except Exception:
+        try:
+            h = pd.read_csv(history_csv)
+        except Exception:
+            return None
+    if h.empty or "Date" not in h.columns:
+        return None
+    today_str = datetime.now().date().isoformat()
+    try:
+        dates = sorted({str(d) for d in h["Date"].dropna().astype(str).tolist()})
+    except Exception:
+        return None
+    prior = [d for d in dates if d < today_str]
+    if not prior:
+        return None
+    prior_date = prior[-1]
+    sub = h[h["Date"].astype(str) == prior_date]
+    if "Horizon_Days" in sub.columns:
+        try:
+            s10 = sub[sub["Horizon_Days"] == 10]
+            if not s10.empty:
+                sub = s10
+        except Exception:
+            pass
+    if "Net_Forward_Return" in sub.columns:
+        prior_matured = int(sub["Net_Forward_Return"].notna().sum())
+    else:
+        prior_matured = 0
+    return int(matured_today) - prior_matured
+
+
+def _trailing_run(seq, predicate) -> int:
+    n = 0
+    for x in reversed(list(seq)):
+        if predicate(x):
+            n += 1
+        else:
+            break
+    return n
+
+
+def _shadow_history_payload(hist_csv: Path) -> dict:
+    """Read shadow_vs_official_history.csv (written by shadow_vs_official_report)
+    and compute trailing streaks. Returns zeros when file is missing."""
+    empty = {
+        "available": False,
+        "consecutive_shadow_leads": 0,
+        "consecutive_verdict_positive": 0,
+        "latest_shadow_matured_obs": None,
+        "rows": 0,
+    }
+    if not hist_csv.exists():
+        return empty
+    try:
+        df = pd.read_csv(hist_csv)
+    except Exception:
+        return empty
+    if df.empty or "date" not in df.columns:
+        return empty
+    df = df.sort_values("date")
+    def _truthy(v):
+        s = str(v).strip().lower()
+        return s in ("true", "1", "yes", "y", "t")
+    leads = _trailing_run(df.get("shadow_beats_official_net", pd.Series(dtype=object)).tolist(),
+                          _truthy)
+    vpos = _trailing_run(df.get("verdict", pd.Series(dtype=str)).astype(str).tolist(),
+                         lambda v: v == "Validation Positive")
+    latest_obs = None
+    try:
+        latest_obs = df.iloc[-1].get("shadow_matured_obs")
+        if pd.isna(latest_obs):
+            latest_obs = None
+        else:
+            latest_obs = float(latest_obs)
+    except Exception:
+        latest_obs = None
+    return {
+        "available": True,
+        "consecutive_shadow_leads": int(leads),
+        "consecutive_verdict_positive": int(vpos),
+        "latest_shadow_matured_obs": latest_obs,
+        "rows": int(len(df)),
+    }
+
+
+def _alpha_evidence_payload(out_dir: Path) -> dict | None:
+    """Merge alpha_promotion_log.json + alpha_zoo_ic_report.csv + survivors.json
+    into a table-ready payload for the Alpha Zoo evidence panel.
+    Returns None when NONE of the three sources exist."""
+    plog_p = out_dir / "alpha_promotion_log.json"
+    ic_p = out_dir / "alpha_zoo_ic_report.csv"
+    surv_p = out_dir / "alpha_zoo_survivors.json"
+    if not (plog_p.exists() or ic_p.exists() or surv_p.exists()):
+        return None
+    plog = _safe_read_json(plog_p) or {}
+    ic_df = _safe_read_csv(ic_p)
+    surv = _safe_read_json(surv_p) or {}
+
+    min_ic = surv.get("threshold_ic") or plog.get("threshold_ic")
+    min_t  = surv.get("threshold_tstat") or plog.get("threshold_tstat")
+    inc_ic = _cfg("ALPHA_INCREMENTAL_IC_MIN", 0.015)
+
+    survivor_names = set()
+    for s in (surv.get("survivors") or []):
+        nm = s.get("alpha") if isinstance(s, dict) else str(s)
+        if nm:
+            survivor_names.add(str(nm))
+
+    # index IC report by alpha name (highest |mean_IC| row wins if duplicated by horizon)
+    ic_by_name: dict[str, dict] = {}
+    if not ic_df.empty and "alpha" in ic_df.columns:
+        try:
+            ic_df = ic_df.copy()
+            ic_df["_abs"] = pd.to_numeric(ic_df.get("mean_IC"), errors="coerce").abs()
+            ic_df = ic_df.sort_values("_abs", ascending=False)
+            for _, r in ic_df.iterrows():
+                nm = str(r.get("alpha"))
+                if nm and nm not in ic_by_name:
+                    ic_by_name[nm] = r.to_dict()
+        except Exception:
+            pass
+
+    # candidate records from promotion log
+    candidates = []
+    plog_entries = plog.get("candidates") or plog.get("entries") or []
+    if isinstance(plog_entries, dict):
+        plog_entries = [dict(v, alpha=k) for k, v in plog_entries.items()]
+    plog_names = set()
+    for e in plog_entries:
+        if not isinstance(e, dict):
+            continue
+        nm = str(e.get("alpha") or e.get("name") or "").strip()
+        if not nm:
+            continue
+        plog_names.add(nm)
+        promoted = e.get("promote")
+        if promoted is None:
+            promoted = e.get("promoted")
+        reason = str(e.get("reason") or e.get("verdict") or "").strip()
+        candidates.append({
+            "alpha": nm,
+            "standalone_ic": _num(e.get("standalone_ic") or e.get("mean_IC") or e.get("ic"), 4),
+            "residual_ic": _num(e.get("residual_ic"), 4),
+            "tstat": _num(e.get("t_stat") or e.get("tstat"), 2),
+            "windows": _num(e.get("windows") or e.get("n_windows"), 0),
+            "promote": promoted,
+            "reason": reason,
+            "in_zoo": nm in survivor_names,
+        })
+
+    # add zoo-only rows (already surviving, but not in this run's promotion log)
+    for nm, rec in ic_by_name.items():
+        if nm in plog_names:
+            continue
+        candidates.append({
+            "alpha": nm,
+            "standalone_ic": _num(rec.get("mean_IC"), 4),
+            "residual_ic": None,
+            "tstat": _num(rec.get("t_stat") or rec.get("tstat"), 2),
+            "windows": _num(rec.get("n_windows") or rec.get("windows"), 0),
+            "promote": True if nm in survivor_names else None,
+            "reason": "In zoo — baseline survivor" if nm in survivor_names else "Baseline (no eval this run)",
+            "in_zoo": nm in survivor_names,
+        })
+
+    # sort: promoted first, then by |standalone_ic| desc
+    def _rank(c):
+        p = 0 if c.get("promote") is True else (1 if c.get("promote") is None else 2)
+        ic = abs(c.get("standalone_ic") or 0.0)
+        return (p, -ic)
+    candidates.sort(key=_rank)
+
+    return {
+        "min_ic": min_ic,
+        "min_tstat": min_t,
+        "min_residual_ic": inc_ic,
+        "rows": candidates[:20],
+        "sources": {
+            "promotion_log": plog_p.exists(),
+            "ic_report": ic_p.exists(),
+            "survivors": surv_p.exists(),
+        },
+    }
+
+
+
+
+
 # ---------------------------------------------------------------- payload ----
 def _payload() -> dict:
     val = _safe_read_json(OUT / "validation_status.json")
