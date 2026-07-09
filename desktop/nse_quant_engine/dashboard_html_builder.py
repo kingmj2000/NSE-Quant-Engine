@@ -1449,7 +1449,10 @@ canvas{margin-top:4px}
   </div>
 </div>
 
+<div id="plainDisclaimer"></div>
+
 <div class="foot">
+
   Excel-ready summary: <code id="excel"></code><br><br>
   Personal screening &amp; validation tool &mdash; <b>not financial advice</b> and not a substitute for a SEBI-registered adviser.
   All numbers pulled directly from the engine output files; nothing estimated.
