@@ -1682,6 +1682,12 @@ class MainWindow(QMainWindow):
                 self.dashboard.refresh()
             except Exception as e:
                 _log_crash(f"Dashboard refresh failed: {e}")
+            # Auto-reload embedded HTML dashboard if enabled.
+            if getattr(self, "tab_html", None) is not None:
+                try:
+                    self.tab_html.reload()
+                except Exception as e:
+                    _log_crash(f"HTML dashboard reload failed: {e}")
             return
 
         # tabs (CSV / text)
