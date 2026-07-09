@@ -210,58 +210,149 @@ def fetch_fii_dii(data_dir: Path, keep_days: int = 90) -> bool:
 
 
 # =========================================================================
-# 2) NSE bulk deals — official JSON endpoint (needs cookie warmup)
+# 2) Bulk deals — NSE archives CSV (primary), NSE JSON API (fallback),
+#    BSE bulk deals JSON (last-resort cross-exchange fallback).
 # =========================================================================
+def _bulk_from_nse_archive(sess) -> pd.DataFrame:
+    """Static daily CSV — no cookie handshake required. Covers today only."""
+    url = "https://archives.nseindia.com/content/equities/bulk.csv"
+    r = sess.get(url, timeout=15, headers={"Referer": "https://www.nseindia.com/"})
+    r.raise_for_status()
+    df = pd.read_csv(io.StringIO(r.text))
+    cmap = {c.strip().lower(): c for c in df.columns}
+    def pick(*names):
+        for n in names:
+            for k, v in cmap.items():
+                if all(part in k for part in n.split()):
+                    return v
+        return None
+    out = pd.DataFrame({
+        "Date":     pd.to_datetime(df[pick("date")], errors="coerce", dayfirst=True),
+        "Symbol":   df[pick("symbol")].astype(str).str.strip(),
+        "Client":   df[pick("client")].astype(str).str.strip(),
+        "Buy_Sell": df[pick("buy")].astype(str).str.strip(),
+        "Qty":      pd.to_numeric(df[pick("quantity")].astype(str).str.replace(",", ""), errors="coerce"),
+        "Price":    pd.to_numeric(df[pick("price")].astype(str).str.replace(",", ""), errors="coerce"),
+    }).dropna(subset=["Date", "Symbol"])
+    if out.empty:
+        raise RuntimeError("NSE archive CSV parsed but empty")
+    return out
+
+
+def _bulk_from_nse_api(sess, days: int) -> pd.DataFrame:
+    api_headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://www.nseindia.com/report-detail/display-bulk-and-block-deals",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Dest": "empty",
+        "X-Requested-With": "XMLHttpRequest",
+    }
+    sess.get("https://www.nseindia.com/", timeout=15)
+    sess.get("https://www.nseindia.com/market-data/live-equity-market", timeout=15)
+    sess.get("https://www.nseindia.com/report-detail/display-bulk-and-block-deals", timeout=15)
+    end = datetime.now()
+    start = end - timedelta(days=days)
+    url = (f"https://www.nseindia.com/api/historical/bulk-deals"
+           f"?from={start.strftime('%d-%m-%Y')}&to={end.strftime('%d-%m-%Y')}")
+    last_exc: BaseException | None = None
+    payload = None
+    for _ in range(2):
+        try:
+            r = sess.get(url, timeout=20, headers=api_headers)
+            if r.status_code >= 500:
+                raise RuntimeError(f"HTTP {r.status_code}")
+            r.raise_for_status()
+            payload = r.json()
+            break
+        except Exception as e:
+            last_exc = e
+            time.sleep(2.0)
+    if payload is None:
+        raise RuntimeError(f"NSE JSON API failed after retry: {last_exc}")
+    rows = payload.get("data") or []
+    if not rows:
+        raise RuntimeError("NSE returned empty bulk-deals payload")
+    def _get(row, *keys, default=None):
+        for k in keys:
+            if k in row and row[k] not in (None, "", "-"):
+                return row[k]
+        return default
+    out = pd.DataFrame([{
+        "Date":     _get(r, "BD_DT_DATE", "date"),
+        "Symbol":   _get(r, "BD_SYMBOL", "symbol"),
+        "Client":   _get(r, "BD_CLIENT_NAME", "clientName"),
+        "Buy_Sell": _get(r, "BD_BUY_SELL", "buySell"),
+        "Qty":      _get(r, "BD_QTY_TRD", "quantityTraded"),
+        "Price":    _get(r, "BD_TP_WATP", "watp"),
+    } for r in rows])
+    out["Date"]  = pd.to_datetime(out["Date"], errors="coerce", dayfirst=True)
+    out = out.dropna(subset=["Date", "Symbol"])
+    out["Qty"]   = pd.to_numeric(out["Qty"].astype(str).str.replace(",", ""), errors="coerce")
+    out["Price"] = pd.to_numeric(out["Price"].astype(str).str.replace(",", ""), errors="coerce")
+    return out
+
+
+def _bulk_from_bse(sess) -> pd.DataFrame:
+    end = datetime.now()
+    start = end - timedelta(days=7)
+    url = ("https://api.bseindia.com/BseIndiaAPI/api/BulkDeals/w"
+           f"?Fdate={start.strftime('%Y-%m-%d')}&Tdate={end.strftime('%Y-%m-%d')}"
+           "&Bflag=B&pageno=1")
+    r = sess.get(url, timeout=15, headers={
+        "Referer": "https://www.bseindia.com/",
+        "Accept": "application/json, text/plain, */*",
+    })
+    r.raise_for_status()
+    payload = r.json()
+    rows = payload.get("Table") or payload.get("data") or []
+    if not rows:
+        raise RuntimeError("BSE returned empty bulk-deals payload")
+    df = pd.DataFrame(rows)
+    cmap = {c.lower(): c for c in df.columns}
+    def pick(*names):
+        for n in names:
+            for k, v in cmap.items():
+                if n in k:
+                    return v
+        return None
+    out = pd.DataFrame({
+        "Date":     pd.to_datetime(df[pick("date", "dt")], errors="coerce"),
+        "Symbol":   df[pick("scrip_name", "scripname", "symbol", "scrip")].astype(str).str.strip(),
+        "Client":   df[pick("client")].astype(str).str.strip(),
+        "Buy_Sell": df[pick("deal", "buy")].astype(str).str.strip().str[:1].str.upper(),
+        "Qty":      pd.to_numeric(df[pick("qty", "quantity")], errors="coerce"),
+        "Price":    pd.to_numeric(df[pick("price", "rate")], errors="coerce"),
+    }).dropna(subset=["Date", "Symbol"])
+    if out.empty:
+        raise RuntimeError("BSE parsed but empty")
+    return out
+
+
 def fetch_bulk_deals(data_dir: Path, days: int = 30, keep_days: int = 60) -> bool:
     target = data_dir / "bulk_deals.csv"
     if _is_fresh(target, FRESH_FLOW_HOURS):
         _log(f"bulk_deals.csv fresh (<{FRESH_FLOW_HOURS}h) — skipping fetch")
         return True
-    try:
-        sess = _requests_session()
-        # cookie warm-up — NSE rejects direct API hits without a session cookie
-        sess.get("https://www.nseindia.com/", timeout=15)
-        sess.get("https://www.nseindia.com/report-detail/display-bulk-and-block-deals", timeout=15)
-
-        end = datetime.now()
-        start = end - timedelta(days=days)
-        url = (f"https://www.nseindia.com/api/historical/bulk-deals"
-               f"?from={start.strftime('%d-%m-%Y')}&to={end.strftime('%d-%m-%Y')}")
-        r = sess.get(url, timeout=20)
-        r.raise_for_status()
-        payload = r.json()
-        rows = payload.get("data") or []
-        if not rows:
-            raise RuntimeError("NSE returned empty bulk-deals payload")
-
-        # Field names in NSE bulk-deals API (as observed): BD_DT_DATE, BD_SYMBOL,
-        # BD_CLIENT_NAME, BD_BUY_SELL, BD_QTY_TRD, BD_TP_WATP
-        def _get(row, *keys, default=None):
-            for k in keys:
-                if k in row and row[k] not in (None, "", "-"):
-                    return row[k]
-            return default
-
-        out = pd.DataFrame([{
-            "Date":    _get(r, "BD_DT_DATE", "date"),
-            "Symbol":  _get(r, "BD_SYMBOL", "symbol"),
-            "Client":  _get(r, "BD_CLIENT_NAME", "clientName"),
-            "Buy_Sell": _get(r, "BD_BUY_SELL", "buySell"),
-            "Qty":     _get(r, "BD_QTY_TRD", "quantityTraded"),
-            "Price":   _get(r, "BD_TP_WATP", "watp"),
-        } for r in rows])
-        out["Date"] = pd.to_datetime(out["Date"], errors="coerce", dayfirst=True)
-        out = out.dropna(subset=["Date", "Symbol"])
-        out["Qty"] = pd.to_numeric(out["Qty"].astype(str).str.replace(",", ""), errors="coerce")
-        out["Price"] = pd.to_numeric(out["Price"].astype(str).str.replace(",", ""), errors="coerce")
-        merged = _merge_dated(target, out, "Date", keep_days)
-        data_dir.mkdir(parents=True, exist_ok=True)
-        merged.to_csv(target, index=False)
-        _log(f"bulk_deals.csv refreshed ({len(merged)} rows)")
-        return True
-    except Exception as e:
-        _warn("bulk_deals (nseindia)", e)
-        return target.exists()
+    sess = _requests_session()
+    sources = [
+        ("nse-archives", lambda: _bulk_from_nse_archive(sess)),
+        ("nse-api",      lambda: _bulk_from_nse_api(sess, days)),
+        ("bse",          lambda: _bulk_from_bse(sess)),
+    ]
+    for name, fn in sources:
+        try:
+            out = fn()
+            merged = _merge_dated(target, out, "Date", keep_days)
+            data_dir.mkdir(parents=True, exist_ok=True)
+            merged.to_csv(target, index=False)
+            _log(f"bulk_deals.csv refreshed via {name} ({len(out)} new rows, {len(merged)} in cache)")
+            return True
+        except Exception as e:
+            _log(f"bulk_deals source '{name}' failed: {type(e).__name__}: {e}")
+            continue
+    _warn("bulk_deals (all sources)", RuntimeError("nse-archives + nse-api + bse all failed"))
+    return target.exists()
 
 
 # =========================================================================
