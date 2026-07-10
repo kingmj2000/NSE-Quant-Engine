@@ -180,7 +180,64 @@ def _gloss(term: str, label: str | None = None) -> str:
             f'<span class="tt" role="tooltip">{safe_def}</span></span>')
 
 
-def _plain_summary_html(progress: dict | None) -> str:
+FEED_TO_ALPHAS = {
+    "delivery_pct": "delivery_momentum",
+    "iv_rank": "iv_rank",
+    "fii_dii": "institutional_flow",
+    "bulk_deals": "institutional_flow",
+    "fundamentals": "fundamental_factor",
+    "earnings": "event_calendar",
+}
+
+FEED_PRETTY = {
+    "delivery_pct": "delivery %",
+    "iv_rank": "IV rank",
+    "fii_dii": "FII/DII flow",
+    "bulk_deals": "bulk deals",
+    "fundamentals": "fundamentals",
+    "earnings": "earnings calendar",
+    "price": "price cache",
+    "amfi_nav": "AMFI NAV/AUM",
+    "amfi_ter": "AMFI TER/tracking",
+    "news": "news feed",
+}
+
+
+def _health_payload() -> dict:
+    """Read data/data_health.json. Returns {} on missing/corrupt."""
+    p = DATA / "data_health.json"
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _inactive_feeds_note(health: dict) -> str:
+    """Sentence appended to the plain-English summary when any feed the score
+    actually uses is RED/AMBER. Deterministic, drops if nothing to report."""
+    feeds = (health or {}).get("feeds") or {}
+    inactive = []
+    for feed, meta in feeds.items():
+        if feed not in FEED_TO_ALPHAS:
+            continue
+        status = (meta or {}).get("status")
+        if status in ("red", "amber"):
+            inactive.append(FEED_PRETTY.get(feed, feed))
+    if not inactive:
+        return ""
+    if len(inactive) == 1:
+        pretty = inactive[0]
+    elif len(inactive) == 2:
+        pretty = f"{inactive[0]} and {inactive[1]}"
+    else:
+        pretty = ", ".join(inactive[:-1]) + f", and {inactive[-1]}"
+    return (f" Note: {pretty} data feeds are not updating right now, so those "
+            "signals are currently inactive.")
+
+
+def _plain_summary_html(progress: dict | None, health: dict | None = None) -> str:
     """Top-of-page plain-English card. Copy is state-keyed; day counts come
     from the payload, never hand-typed. Missing numbers → 'not yet available'."""
     p = progress or {}
@@ -217,13 +274,14 @@ def _plain_summary_html(progress: dict | None) -> str:
             "then reopen this page."
         )
     else:
-        # amber / neutral family — insufficient history / no proven edge yet
         body = (
             "Today's result: no action. The tool is still learning whether its stock rankings "
             f"actually work, and it doesn't have enough history yet {frag}. Everything below is "
             "practice data for watching only \u2014 not advice to buy anything. Keep running it daily; "
             "it'll tell you when it has real evidence."
         )
+
+    body += _inactive_feeds_note(health or {})
 
     return (
         '<div class="glass g-violet panel plain-summary">'
@@ -233,6 +291,63 @@ def _plain_summary_html(progress: dict | None) -> str:
         'See the technical panels below for the numbers behind it.</div>'
         '</div>'
     )
+
+
+def _data_health_html(health: dict | None) -> str:
+    """Compact data-health table. If snapshot missing → single amber row."""
+    if not health or not health.get("feeds"):
+        return (
+            '<div class="glass g-amber panel data-health">'
+            '<div class="dh-head">Data health</div>'
+            '<div class="sub">Data health snapshot not yet available. '
+            'Run the pipeline to populate <code>data/data_health.json</code>.</div>'
+            '</div>'
+        )
+    feeds = health.get("feeds") or {}
+    gen_at = health.get("generated_at") or "unknown"
+    order = ["price", "amfi_nav", "amfi_ter", "fii_dii", "bulk_deals",
+             "fundamentals", "earnings", "delivery_pct", "iv_rank", "news"]
+    seen = set()
+    rows = []
+    def _row(feed: str, meta: dict) -> str:
+        status = str(meta.get("status") or "red").lower()
+        dot = {"green": "d-good", "amber": "d-warn", "red": "d-bad"}.get(status, "d-dim")
+        chip = {"green": "GREEN", "amber": "AMBER", "red": "RED"}.get(status, status.upper())
+        pretty = FEED_PRETTY.get(feed, feed)
+        last = meta.get("last_date") or "\u2014"
+        rows_ct = meta.get("rows")
+        rows_txt = "\u2014" if rows_ct in (None, "None") else f"{rows_ct}"
+        note = meta.get("note") or ""
+        return (
+            f'<tr><td><b>{pretty}</b></td>'
+            f'<td><span class="fdot {dot}"></span> {chip}</td>'
+            f'<td>{last}</td><td style="text-align:right">{rows_txt}</td>'
+            f'<td class="sub" style="font-size:11.5px">{note}</td></tr>'
+        )
+    for feed in order:
+        if feed in feeds:
+            rows.append(_row(feed, feeds[feed] or {}))
+            seen.add(feed)
+    for feed, meta in feeds.items():
+        if feed not in seen:
+            rows.append(_row(feed, meta or {}))
+    body = "".join(rows) or '<tr><td colspan="5" class="sub">No feeds reported.</td></tr>'
+    return (
+        '<div class="glass g-blue panel data-health">'
+        '<div class="dh-head">Data health</div>'
+        '<table class="dh-table" style="width:100%;border-collapse:collapse;font-size:12.5px">'
+        '<thead><tr>'
+        '<th style="text-align:left;padding:6px 8px;color:var(--muted);font-weight:500">Feed</th>'
+        '<th style="text-align:left;padding:6px 8px;color:var(--muted);font-weight:500">Status</th>'
+        '<th style="text-align:left;padding:6px 8px;color:var(--muted);font-weight:500">Last date</th>'
+        '<th style="text-align:right;padding:6px 8px;color:var(--muted);font-weight:500">Rows</th>'
+        '<th style="text-align:left;padding:6px 8px;color:var(--muted);font-weight:500">Note</th>'
+        '</tr></thead>'
+        f'<tbody>{body}</tbody></table>'
+        f'<div class="sub" style="margin-top:8px">A dead feed shows RED here — it will not hide behind an overall "N/M feeds" summary. Snapshot generated {gen_at}.</div>'
+        '</div>'
+    )
+
 
 
 def _plain_card_line(row: dict, verdict_state: str) -> str:
