@@ -863,16 +863,56 @@ def fetch_delivery_pct(data_dir: Path, days: int = 5, keep_days: int = 365) -> b
 # =========================================================================
 # 6) IV Rank daily (NSE option-chain-equities) — appended cache, fail-soft
 # =========================================================================
+def _nse_browser_session():
+    """Full browser-style session — NSE JSON APIs refuse anything less."""
+    import requests
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/124.0.0.0 Safari/537.36"),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                  "image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-IN,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    })
+    return s
+
+
+def _nse_option_chain_warmup(sess) -> None:
+    """Prime cookies for the option-chain JSON API. Best-effort."""
+    for u in (
+        "https://www.nseindia.com/",
+        "https://www.nseindia.com/option-chain",
+        "https://www.nseindia.com/market-data/live-equity-market",
+    ):
+        try:
+            sess.get(u, timeout=15)
+            time.sleep(0.4)
+        except Exception:
+            pass
+
+
 def _iv_rank_from_option_chain(sess, symbol: str) -> float | None:
     url = f"https://www.nseindia.com/api/option-chain-equities?symbol={symbol}"
     last_exc: BaseException | None = None
-    for attempt in range(2):
+    backoffs = [1.0, 3.0, 7.0]
+    for attempt in range(3):
         try:
-            r = sess.get(url, timeout=15, headers={
+            r = sess.get(url, timeout=20, headers={
                 "Accept": "application/json, text/plain, */*",
-                "Referer": f"https://www.nseindia.com/option-chain?symbol={symbol}",
+                "Referer": "https://www.nseindia.com/option-chain",
+                "Sec-Fetch-Site": "same-origin",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Dest": "empty",
                 "X-Requested-With": "XMLHttpRequest",
             })
+            if r.status_code in (401, 403, 429):
+                raise RuntimeError(f"blocked HTTP {r.status_code}")
             if r.status_code >= 500:
                 raise RuntimeError(f"HTTP {r.status_code}")
             r.raise_for_status()
@@ -882,7 +922,6 @@ def _iv_rank_from_option_chain(sess, symbol: str) -> float | None:
             data = rec.get("data") or []
             if underlying <= 0 or not data:
                 return None
-            # Pick ATM strike (closest to spot), take max IV of CE/PE.
             atm = min(data, key=lambda row: abs(float(row.get("strikePrice", 0)) - underlying))
             ce_iv = float(((atm.get("CE") or {}).get("impliedVolatility")) or 0)
             pe_iv = float(((atm.get("PE") or {}).get("impliedVolatility")) or 0)
@@ -890,8 +929,8 @@ def _iv_rank_from_option_chain(sess, symbol: str) -> float | None:
             return iv if iv > 0 else None
         except Exception as e:
             last_exc = e
-            time.sleep(2.0 * (attempt + 1))
-    raise RuntimeError(f"option-chain {symbol} failed: {last_exc}")
+            time.sleep(backoffs[attempt])
+    raise RuntimeError(f"option-chain {symbol} failed after 3 tries: {last_exc}")
 
 
 def _iv_rank_percentile(series: pd.Series, current: float, lookback: int = 252) -> float:
@@ -904,22 +943,27 @@ def _iv_rank_percentile(series: pd.Series, current: float, lookback: int = 252) 
 def fetch_iv_rank(data_dir: Path, base: Path, cap: int = 60,
                   keep_days: int = 400) -> bool:
     """Fetch today's ATM IV per shortlisted F&O name; append to cache.
-    A failed run NEVER wipes cached data.
-    """
+    A failed run NEVER wipes cached data."""
     target = data_dir / "iv_rank_daily.csv"
     if _is_fresh(target, FRESH_FLOW_HOURS):
         _log(f"iv_rank_daily.csv fresh (<{FRESH_FLOW_HOURS}h) — skipping fetch")
+        _write_health_row(data_dir, "iv_rank",
+                          _health_status_from_age(_cache_last_date(target)),
+                          _cache_row_count(target), _cache_last_date(target),
+                          "cache fresh, skipped fetch")
         return True
 
     symbols = _shortlist_symbols(base, cap=cap)
-    # bhavcopy symbols are NSE tickers without .NS suffix; strip if present
     symbols = [s.replace(".NS", "").strip().upper() for s in symbols if s]
     if not symbols:
         _log("iv_rank: no shortlist yet — skipping")
+        _write_health_row(data_dir, "iv_rank", "amber", 0, None,
+                          "no shortlist yet — run scoring first")
         return target.exists()
 
-    sess = _requests_session()
-    _nse_warmup(sess)
+    sess = _nse_browser_session()
+    _nse_option_chain_warmup(sess)
+    time.sleep(1.0)
 
     today = pd.Timestamp.now().normalize()
     old = pd.DataFrame()
@@ -932,6 +976,7 @@ def fetch_iv_rank(data_dir: Path, base: Path, cap: int = 60,
 
     rows: list[dict] = []
     hit = miss = 0
+    rewarmed = False
     for sym in symbols:
         try:
             iv = _iv_rank_from_option_chain(sess, sym)
@@ -946,12 +991,24 @@ def fetch_iv_rank(data_dir: Path, base: Path, cap: int = 60,
         except Exception as e:
             miss += 1
             _log(f"iv_rank {sym} failed: {type(e).__name__}: {e}")
+            if not rewarmed and hit == 0 and miss >= 3:
+                _log("iv_rank: re-warming NSE session after early failures")
+                _nse_option_chain_warmup(sess)
+                time.sleep(1.0)
+                rewarmed = True
             continue
-        time.sleep(0.2)  # be polite to NSE
+        time.sleep(0.6)  # polite pacing
 
     if not rows:
         _warn("iv_rank (option-chain)",
-              RuntimeError(f"no symbols returned IV ({miss} misses)"))
+              RuntimeError(f"no symbols returned IV ({miss} misses) — NSE likely blocked the session"))
+        last = _cache_last_date(target)
+        if last:
+            _log(f"reused cached iv_rank ({_cache_row_count(target)} rows, last={last})")
+        _write_health_row(data_dir, "iv_rank",
+                          "red" if not last else _health_status_from_age(last),
+                          _cache_row_count(target), last,
+                          f"NSE option-chain blocked ({miss} misses)")
         return target.exists()
 
     new_df = pd.DataFrame(rows)
@@ -963,9 +1020,14 @@ def fetch_iv_rank(data_dir: Path, base: Path, cap: int = 60,
     merged = merged[merged["Date"] >= cutoff].sort_values(["Date", "Symbol"])
     merged["Date"] = merged["Date"].dt.strftime("%Y-%m-%d")
     data_dir.mkdir(parents=True, exist_ok=True)
-    merged.to_csv(target, index=False)
+    merged.to_csv(target, index=False)  # NEVER overwrite good cache on failure
     _log(f"iv_rank_daily.csv refreshed (hit={hit} miss={miss}, {len(merged)} rows in cache)")
+    _write_health_row(data_dir, "iv_rank",
+                      "green" if hit >= max(1, len(symbols) // 4) else "amber",
+                      len(merged), _cache_last_date(target),
+                      f"today hit={hit} miss={miss}")
     return True
+
 
 
 # =========================================================================
