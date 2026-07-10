@@ -703,53 +703,95 @@ def fetch_earnings_calendar(data_dir: Path, base: Path, cap: int = 120,
 # =========================================================================
 # 5) Delivery % daily (NSE sec_bhavdata_full) — appended cache, fail-soft
 # =========================================================================
-def _bhavcopy_url(d: datetime) -> str:
-    # historical bhavcopy path — daily CSV with %DlyQtToTradedQty
-    return ("https://archives.nseindia.com/products/content/"
-            f"sec_bhavdata_full_{d.strftime('%d%m%Y')}.csv")
+def _bhavcopy_urls(d: datetime) -> list[str]:
+    """Current NSE archive host first, legacy host as fallback."""
+    dd = d.strftime("%d%m%Y")
+    return [
+        f"https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_{dd}.csv",
+        f"https://archives.nseindia.com/products/content/sec_bhavdata_full_{dd}.csv",
+    ]
+
+
+def parse_delivery_bhavcopy(text: str) -> pd.DataFrame:
+    """Parse NSE sec_bhavdata_full CSV text into (Date, Symbol, Delivery_Pct).
+    Header detection is whitespace/case/punctuation-insensitive so a future
+    rename degrades gracefully instead of hard-failing. Exposed for tests."""
+    df = pd.read_csv(io.StringIO(text))
+    # NSE headers ship with leading spaces: ' SYMBOL', ' SERIES', ' DATE1'
+    df.columns = [str(c).strip() for c in df.columns]
+    nmap: dict[str, str] = {}
+    for c in df.columns:
+        nmap[_norm_header(c)] = c
+
+    def pick(*keys: str) -> str | None:
+        for k in keys:
+            nk = _norm_header(k)
+            if nk in nmap:
+                return nmap[nk]
+        # loose contains match on normalized keys
+        for k in keys:
+            nk = _norm_header(k)
+            for nh, orig in nmap.items():
+                if nk and nk in nh:
+                    return orig
+        return None
+
+    sym_c   = pick("symbol")
+    ser_c   = pick("series")
+    date_c  = pick("date1", "date")
+    # deliverable percentage — several historical spellings
+    dely_c  = pick("delivper", "dlyqttotradedqty", "delivperc", "percdlyqt")
+    if not (sym_c and date_c):
+        raise RuntimeError(f"bhavcopy: missing SYMBOL/DATE columns in {list(df.columns)[:16]}")
+    if not dely_c:
+        # Fallback: compute from DELIV_QTY / TTL_TRD_QNTY when % column absent
+        num_c = pick("delivqty", "delivqty")
+        den_c = pick("ttltrdqnty", "ttltrdqty", "totaltradedquantity")
+        if not (num_c and den_c):
+            raise RuntimeError(f"bhavcopy: missing DELIV_PER and DELIV_QTY/TTL_TRD_QNTY in {list(df.columns)[:16]}")
+        num = pd.to_numeric(df[num_c].astype(str).str.replace(",", ""), errors="coerce")
+        den = pd.to_numeric(df[den_c].astype(str).str.replace(",", ""), errors="coerce")
+        deliv = (num / den.replace(0, pd.NA)) * 100.0
+    else:
+        deliv = pd.to_numeric(
+            df[dely_c].astype(str).str.replace("%", "").str.strip(),
+            errors="coerce")
+
+    out = pd.DataFrame({
+        "Date":   pd.to_datetime(df[date_c].astype(str).str.strip(), errors="coerce", dayfirst=True),
+        "Symbol": df[sym_c].astype(str).str.strip(),
+        "Series": df[ser_c].astype(str).str.strip() if ser_c else "",
+        "Delivery_Pct": deliv,
+    }).dropna(subset=["Date", "Symbol", "Delivery_Pct"])
+    if ser_c:
+        out = out[out["Series"].astype(str).str.strip().isin(["EQ", "BE", ""])]
+    return out.drop(columns=["Series"], errors="ignore").reset_index(drop=True)
 
 
 def _fetch_delivery_pct_day(sess, d: datetime) -> pd.DataFrame:
-    url = _bhavcopy_url(d)
     last_exc: BaseException | None = None
-    for attempt in range(2):
-        try:
-            r = sess.get(url, timeout=20, headers={"Referer": "https://www.nseindia.com/"})
-            if r.status_code == 404:
-                raise RuntimeError("404 (holiday / not yet published)")
-            if r.status_code >= 500:
-                raise RuntimeError(f"HTTP {r.status_code}")
-            r.raise_for_status()
-            df = pd.read_csv(io.StringIO(r.text))
-            df.columns = [str(c).strip() for c in df.columns]
-            cmap = {c.lower(): c for c in df.columns}
-            def pick(*names):
-                for n in names:
-                    for k, v in cmap.items():
-                        if n in k:
-                            return v
-                return None
-            sym_c   = pick("symbol")
-            ser_c   = pick("series")
-            date_c  = pick("date")
-            dely_c  = pick("dlyqttotradedqty", "deliv_qty%", "%dlyqt")
-            if not (sym_c and date_c and dely_c):
-                raise RuntimeError(f"bhavcopy: missing columns {list(df.columns)[:12]}")
-            out = pd.DataFrame({
-                "Date":   pd.to_datetime(df[date_c], errors="coerce", dayfirst=True),
-                "Symbol": df[sym_c].astype(str).str.strip(),
-                "Series": df[ser_c].astype(str).str.strip() if ser_c else "",
-                "Delivery_Pct": pd.to_numeric(
-                    df[dely_c].astype(str).str.replace("%", "").str.strip(),
-                    errors="coerce"),
-            }).dropna(subset=["Date", "Symbol", "Delivery_Pct"])
-            if ser_c:
-                out = out[out["Series"].isin(["EQ", "BE", ""])]
-            return out.drop(columns=["Series"], errors="ignore")
-        except Exception as e:
-            last_exc = e
-            time.sleep(2.0 * (attempt + 1))
-    raise RuntimeError(f"bhavcopy {d:%d-%m-%Y} failed after retry: {last_exc}")
+    headers = {
+        "Accept": "text/csv, text/plain, */*",
+        "Accept-Language": "en-IN,en;q=0.9",
+        "Referer": "https://www.nseindia.com/all-reports",
+        "Sec-Fetch-Site": "same-site",
+        "Sec-Fetch-Mode": "no-cors",
+        "Sec-Fetch-Dest": "empty",
+    }
+    for url in _bhavcopy_urls(d):
+        for attempt in range(2):
+            try:
+                r = sess.get(url, timeout=25, headers=headers)
+                if r.status_code == 404:
+                    raise RuntimeError("404 (holiday / not yet published)")
+                if r.status_code >= 500:
+                    raise RuntimeError(f"HTTP {r.status_code}")
+                r.raise_for_status()
+                return parse_delivery_bhavcopy(r.text)
+            except Exception as e:
+                last_exc = e
+                time.sleep(1.5 * (attempt + 1))
+    raise RuntimeError(f"bhavcopy {d:%d-%m-%Y} failed on both hosts: {last_exc}")
 
 
 def fetch_delivery_pct(data_dir: Path, days: int = 5, keep_days: int = 365) -> bool:
@@ -757,12 +799,15 @@ def fetch_delivery_pct(data_dir: Path, days: int = 5, keep_days: int = 365) -> b
     target = data_dir / "delivery_pct_daily.csv"
     if _is_fresh(target, FRESH_FLOW_HOURS):
         _log(f"delivery_pct_daily.csv fresh (<{FRESH_FLOW_HOURS}h) — skipping fetch")
+        _write_health_row(data_dir, "delivery_pct",
+                          _health_status_from_age(_cache_last_date(target)),
+                          _cache_row_count(target), _cache_last_date(target),
+                          "cache fresh, skipped fetch")
         return True
     sess = _requests_session()
     _nse_warmup(sess)
 
     collected: list[pd.DataFrame] = []
-    # walk back N calendar days; skip weekends (bhavcopy is trading-day only)
     end = datetime.now()
     for i in range(1, days + 1):
         d = end - timedelta(days=i)
@@ -772,17 +817,25 @@ def fetch_delivery_pct(data_dir: Path, days: int = 5, keep_days: int = 365) -> b
             df = _fetch_delivery_pct_day(sess, d)
             if not df.empty:
                 collected.append(df)
-                _log(f"delivery% for {d:%Y-%m-%d}: {len(df)} rows")
+                _log(f"delivery% for {d:%Y-%m-%d}: {len(df)} symbols")
         except Exception as e:
             _log(f"delivery% {d:%Y-%m-%d} skipped: {type(e).__name__}: {e}")
             continue
 
     if not collected:
         _warn("delivery_pct (bhavcopy)", RuntimeError("no trading days fetched"))
+        last = _cache_last_date(target)
+        if last:
+            _log(f"reused cached delivery_pct ({_cache_row_count(target)} rows, last={last})")
+        _write_health_row(data_dir, "delivery_pct",
+                          _health_status_from_age(last),
+                          _cache_row_count(target), last,
+                          "fresh fetch failed — bhavcopy unreachable" if not last
+                          else "fresh fetch failed — using cached data")
         return target.exists()
 
     new_df = pd.concat(collected, ignore_index=True)
-    # append + dedupe on (Date, Symbol); NEVER wipe on read error
+    # append + dedupe on (Date, Symbol); NEVER overwrite good cache on failure
     if target.exists():
         try:
             old = pd.read_csv(target)
@@ -798,9 +851,13 @@ def fetch_delivery_pct(data_dir: Path, days: int = 5, keep_days: int = 365) -> b
     merged = merged[merged["Date"] >= cutoff].sort_values(["Date", "Symbol"])
     merged["Date"] = merged["Date"].dt.strftime("%Y-%m-%d")
     data_dir.mkdir(parents=True, exist_ok=True)
-    merged.to_csv(target, index=False)
+    merged.to_csv(target, index=False)  # NEVER overwrite good cache on failure
     _log(f"delivery_pct_daily.csv refreshed ({len(merged)} rows in cache)")
+    _write_health_row(data_dir, "delivery_pct", "green",
+                      len(merged), _cache_last_date(target),
+                      f"{len(new_df)} new rows from {len(collected)} trading day(s)")
     return True
+
 
 
 # =========================================================================
