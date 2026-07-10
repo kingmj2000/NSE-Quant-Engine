@@ -1462,6 +1462,9 @@ canvas{margin-top:4px}
 
 <div class="banner" id="banner"></div>
 
+<h2>Data health</h2>
+<div id="dataHealth"></div>
+
 
 <div id="marketCtxWrap" style="display:none">
   <h2>Market context</h2>
