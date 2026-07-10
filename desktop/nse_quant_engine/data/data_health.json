@@ -1,0 +1,29 @@
+{
+  "generated_at": "2026-07-10T06:25:13",
+  "feeds": {
+    "delivery_pct": {
+      "status": "red",
+      "rows": 0,
+      "last_date": null,
+      "note": "NSE bhavcopy unreachable"
+    },
+    "iv_rank": {
+      "status": "red",
+      "rows": 0,
+      "last_date": null,
+      "note": "NSE option-chain blocked (60 misses)"
+    },
+    "fii_dii": {
+      "status": "green",
+      "rows": 88,
+      "last_date": "2026-07-08",
+      "note": "nse-archive ok"
+    },
+    "fundamentals": {
+      "status": "amber",
+      "rows": 120,
+      "last_date": null,
+      "note": "yfinance empty for NSE tickers"
+    }
+  }
+}
