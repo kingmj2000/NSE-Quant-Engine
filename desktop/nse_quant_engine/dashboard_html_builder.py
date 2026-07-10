@@ -1874,6 +1874,8 @@ document.getElementById("cards").innerHTML = (DATA.cards||[]).map(c=>`
   if (s && DATA.plain_summary_html) s.innerHTML = DATA.plain_summary_html;
   const d = document.getElementById("plainDisclaimer");
   if (d && DATA.plain_disclaimer_html) d.innerHTML = DATA.plain_disclaimer_html;
+  const dh = document.getElementById("dataHealth");
+  if (dh && DATA.data_health_html) dh.innerHTML = DATA.data_health_html;
 })();
 
 // Also attach the plain-words line inside shadow-only cards.
