@@ -120,8 +120,8 @@ def build_core_input(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     out["RSI"] = numeric_series(out, ["RSI", "RSI_14", "RSI14"])
 
     price_col = first_col(out, ["Price", "Close", "Last_Close", "Current_Price", "Adj_Close"])
-    ma50_col = first_col(out, ["MA50", "SMA50", "Moving_Avg_50", "Price_MA50"])
-    ma200_col = first_col(out, ["MA200", "SMA200", "Moving_Avg_200", "Price_MA200"])
+    ma50_col = first_col(out, ["MA50", "SMA50", "Moving_Avg_50", "Price_MA50", "MA_50D", "MA_50"])
+    ma200_col = first_col(out, ["MA200", "SMA200", "Moving_Avg_200", "Price_MA200", "MA_200D", "MA_200"])
 
     if price_col and ma50_col:
         out["Price"] = pd.to_numeric(out[price_col], errors="coerce")

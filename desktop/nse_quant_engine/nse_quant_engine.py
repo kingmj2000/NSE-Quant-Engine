@@ -909,6 +909,12 @@ def save_outputs(scored: pd.DataFrame, failed_symbols: List[str], config: pd.Dat
         "RSI_14", "ATR_14", "Avg_Traded_Value_20D", "Zero_Volume_Days_60D", "Beta_252D",
         "NAV", "NAV_Date", "NAV_Premium_Discount", "AUM_Cr", "TER", "Tracking_Error",
         "Tracking_Difference", "ETF_Tracking_Quality_Metric", "ETF_Tracking_Quality_Mode", "Benchmark_Index", "Mapping_Status", "ETF_Quality_Data_Flag", "ETF_Quality_Source",
+        # --- Trend / relative-strength inputs consumed by the shadow engine ---
+        "MA_10D", "MA_20D", "MA_50D", "MA_100D", "MA_200D",
+        "Above_10DMA", "Above_20DMA", "Above_50DMA", "Above_100DMA", "Above_200DMA",
+        "Benchmark_Return_5D", "Benchmark_Return_10D", "Benchmark_Return_21D",
+        "Benchmark_Return_63D", "Relative_Strength_5D", "Relative_Strength_10D",
+        "Relative_Strength_21D", "Relative_Strength_63D",
         "Entry_Zone", "Stop_Level", "Target_Zone", "ATR_Stop_Level", "ATR_Target_1", "ATR_Target_2", "Risk_Reward_Ratio_2",
         "Upside_Range_Low", "Upside_Range_High", "Suggested_Hold_Days",
         "Bucket", "Reason", "Key_Risk", "Risk_Flag",
