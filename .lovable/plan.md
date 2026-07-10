@@ -1,101 +1,99 @@
 
-# Plain-English layer for the dashboard
+# Fix silent feed failures, expose data health, repair shadow inputs
 
-Purely additive pass on `desktop/nse_quant_engine/dashboard_html_builder.py`. No other files touched. No new computation, no LLM, no network. All new text is generated deterministically in Python from values already assembled in `_payload()` (verdict, `progress.effective_now/effective_target`, `progress.raw_now/raw_target`, `progress.matured/maturing/total`, top-5 rows, shadow state). If a value is missing the copy says "not yet available" in plain words — never a fabricated number, never softer than the underlying verdict.
+Priority-ordered. Parts 1–3 are wiring/data fixes; Part 4 is a small UI addition. No LLM. All new UI reads existing output files. Missing data → "not yet available"/RED, never fabricated.
 
-The existing glassmorphic theme, glow system, every honesty caption, verdict chip / progress bar / streak strip / watchlist ribbons / alpha evidence table / ETF gaps / scatter `<details>` all stay exactly as they are. This layer sits *around* them.
+## PART 1 — Fix broken fetchers (`core/optional_data_fetchers.py`)
 
-## 1. Top "Plain English summary" card
+### 1a. `fetch_delivery_pct` — new NSE bhavdata URL + resilient header detection
 
-New `.g-violet` glass card injected as the **first** element inside `<main>`, above the existing header sub-line and above the Progress-to-a-verdict row. Renders 3–4 short sentences composed from a small template keyed on `payload.progress.state` (`green` / `amber` / `red` / `neutral`).
+- Replace `_bhavcopy_url` to use current archive path:
+  `https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_{DDMMYYYY}.csv`
+  Keep the old `archives.nseindia.com` URL as fallback (try new first, then old).
+- Warm cookies via `_nse_warmup(sess)` before each day's GET; send full browser headers (UA, Accept, Accept-Language, Referer=`https://www.nseindia.com/`, `Sec-Fetch-*`).
+- Robust header detection: strip whitespace from every column name (existing code does this but the real file has leading spaces in headers like ` SERIES`, ` DATE1`, ` DELIV_PER`). Rewrite the column picker to:
+  - Normalize each header via `re.sub(r"[^a-z0-9]", "", c.lower())`.
+  - Map: symbol→`symbol`, series→`series`, date→`date1` or `date`, deliv%→any of `delivper`, `dlyqttotradedqty`, `delivqty` (percentage variant preferred).
+  - If deliv% column missing, look for both `deliv_qty` and `ttl_trd_qnty` and compute `100 * deliv/ttl` as fallback.
+- Filter series to `{EQ, BE, ""}` as today.
+- On success: print `"delivery% for YYYY-MM-DD: N symbols"` (already done).
+- Append-only cache preserved.
 
-Template family (values interpolated from payload — never hand-typed numbers):
+### 1b. `fetch_iv_rank` — browser session, backoff, polite pacing
 
-- **neutral / amber (Insufficient History, Insufficient Independent History, Insufficient Breadth, Insufficient Statistical Evidence, No Proven Edge Yet):**
-  "Today's result: no action. The tool is still learning whether its stock rankings actually work, and it doesn't have enough history yet ({effective_now} of ~{effective_target} independent days needed). Everything below is practice data for watching only — not advice to buy anything. Keep running it daily; it'll tell you when it has real evidence."
+- Introduce `_nse_browser_session()` returning a `requests.Session` with full browser headers (`User-Agent`, `Accept`, `Accept-Language: en-IN,en;q=0.9`, `Accept-Encoding: gzip, deflate, br`, `Connection: keep-alive`, `Upgrade-Insecure-Requests: 1`).
+- Warmup sequence before any option-chain call: GET `https://www.nseindia.com/` → GET `https://www.nseindia.com/option-chain` → sleep 1s. Reuse the same session across all symbols.
+- Per-symbol request: set `Referer=https://www.nseindia.com/option-chain`, `Sec-Fetch-Site=same-origin`, `Sec-Fetch-Mode=cors`, `Sec-Fetch-Dest=empty`. On 401/403/429 or empty payload, exponential backoff (1s → 3s → 7s), max 3 attempts; if still blocked, re-run warmup once and retry once more.
+- Polite pacing: `time.sleep(0.6)` between symbols (up from 0.2).
+- Preserve cache-append-only semantics (unchanged block).
 
-- **red (Validation Negative):**
-  "Today's result: do not act on the picks below. Over the days measured so far, the tool's rankings have not beaten costs — the edge is negative. Treat the lists below as a record of what the model *would* have picked, not as ideas to buy."
+### 1c. Cache-append-safety audit (both fetchers)
 
-- **green (Validation Positive):**
-  "Today's result: the tool's rankings have finally cleared their evidence bar ({effective_now} of {effective_target} independent days, plus the statistical checks). This still means 'worth a closer look,' not 'will make money.' Read the 'Before you ever act on this' panel at the bottom before doing anything with real money."
+Confirm and document: on any failure path, both functions `return target.exists()` without writing. Existing code already does this — add a comment `# NEVER overwrite good cache on failure` at each write site, and add a `[fetch] reused cached delivery_pct (N rows, last=YYYY-MM-DD)` log when a fresh fetch fails but cache exists.
 
-- **unavailable (both `validation_status.json` and the markdown report missing):**
-  "Today's result: verdict not yet available. The validation step hasn't run in this output folder, so the tool has no opinion to share yet. Run the workflow end-to-end, then reopen this page."
+### 1d. Write `data/data_health.json`
 
-When `progress.effective_now` or `progress.effective_target` is missing, the parenthetical becomes "(day count not yet available)" instead of a number. The card also includes one small caption underneath: "Plain-English summary — auto-generated from today's validation output. See the technical panels below for the numbers behind it."
+Add `_write_health_row(feed, status, rows, last_date, note)` and call it at the end of every fetcher (fii_dii, bulk_deals, fundamentals, earnings, delivery_pct, iv_rank). Also seed rows for `price` (from `data/price_cache_meta.json` or newest file in `data/prices/`) and `amfi_nav`/`amfi_aum`/`amfi_ter` (from existing standardized CSVs' mtime) and `news` (from `output/news_market_context.md` mtime) inside `refresh_all`. Schema:
 
-## 2. Glossary tooltips on finance/stats terms
+```
+{
+  "generated_at": "2026-07-09T14:22:00",
+  "feeds": {
+    "delivery_pct":  {"status": "green|amber|red", "rows": 4823, "last_date": "2026-07-08", "note": "..."},
+    "iv_rank":       {"status": "red", "rows": 0,   "last_date": null,        "note": "60 misses — NSE blocked"},
+    ...
+  }
+}
+```
 
-Static Python dictionary `PLAIN_GLOSSARY` near the top of the file. One-sentence, plain-English definitions for the terms actually shown on the dashboard:
+Status rules: green = fetched today/yesterday; amber = 2–7 days stale OR yfinance returned empty for NSE tickers; red = >7 days stale or never fetched.
 
-- NAV, TER, tracking error, AUM
-- IC, residual IC, t-stat, bootstrap probability, spread, hit rate
-- momentum, quintile, drawdown, RSI, volatility, IV rank, delivery %
-- effective validation dates, raw validation dates, matured / maturing signals
-- shadow vs official, overlap, veto, regime
+## PART 2 — "Data health" panel + inactive-signal note (`dashboard_html_builder.py`)
 
-Example entries (final copy in the code, not here): "IC — how well the tool's ranking of stocks lined up with what actually happened next. 0 means no relationship; higher is better."; "t-stat — a rough measure of how unlikely the result is to be luck. Bigger numbers mean more convincing, not necessarily more profitable."; "effective validation dates — how many *independent* days of evidence the tool has, after removing days that overlap with each other."
+### 2a. Data health panel
 
-Rendering: a tiny helper `_gloss(term, label=None) -> str` returns
-`<span class="gloss" tabindex="0" aria-describedby="tt-{slug}">{label or term}<span class="tt" role="tooltip">{definition}</span></span>`.
-CSS (added to the existing `<style>` block, matching the current glass tokens): `.gloss` gets a dotted underline in the current muted color; `.tt` is absolutely positioned, hidden by default, revealed on `:hover`, `:focus-within`, and `.gloss:active .tt` (tap on touch). No JS — pure CSS hover/focus, keyboard-reachable via `tabindex="0"`, screen-reader-labeled via `aria-describedby`.
+New glass card, injected between the "Progress to a verdict" section and "Market context". Reads `data/data_health.json`. Renders a compact table: feed name • chip (●green/●amber/●red styled with existing tokens) • last successful date • rows fetched • one-line note. If `data_health.json` is missing, panel shows a single amber row "Data health snapshot not yet available."
 
-Wrapping pass: the existing headings and captions that mention any dictionary term (e.g. "IC ≥ min_ic", "t-stat", "effective validation dates", "tracking error", "NAV", "TER", "RSI × volatility map", "momentum", "quintile", "drawdown") are rewritten to use `_gloss(...)` for the first occurrence in each panel only, so tooltips are discoverable without visually peppering every line. Panel structure, order, and numeric values are unchanged.
+### 2b. Plain-English inactivity note
 
-## 3. Per-candidate "in plain words" line on Top-5 cards
+In `_plain_summary_html`, after the main sentence(s), append one extra sentence when any RED/AMBER feed is one the score currently uses. Score-consuming feeds map: `delivery_pct → delivery_momentum`, `iv_rank → iv_rank`, `fii_dii → institutional_flow`, `fundamentals → fundamental_factor`, `bulk_deals → institutional_flow`, `earnings → event_calendar`. Sentence template:
 
-Inside the existing Top-5 card template, one extra `<p class="plain">` under the current body, above the existing "Also in shadow Top 5" chip when present. The sentence is composed by a small deterministic helper `_plain_card_line(row, verdict_state) -> str` from fields already on each card row — no new computation:
+> "Note: {feeds_pretty} data feeds are not updating right now, so those signals are currently inactive."
 
-Trend fragment (from momentum / trend rank if present, else RSI): "strong recent price trend" / "mixed recent price trend" / "weak recent price trend" / "recent price trend not yet available".
-Calm fragment (from volatility bucket if present): "calm price swings" / "moderate price swings" / "choppy price swings" / omitted if missing.
-News fragment (from sentiment/veto flags already on the row): "no bad news found" / "some negative news flagged" / "governance concern flagged — see veto note" / omitted if the field isn't present.
-Suffix (always, verdict-aware):
-- non-positive verdict: " — but this is a watch-only note, not a recommendation, because the tool hasn't proven its picks work yet."
-- Validation Positive: " — the tool's rankings have cleared their evidence bar, but this is still 'worth a closer look,' not a buy signal."
+Deterministic; drops when no relevant RED/AMBER feeds present.
 
-Missing fragments are dropped rather than filled with placeholders; if every fragment is missing, the line becomes: "Not enough plain-language signals to summarise this candidate yet — see the numeric fields above." The trailing watch-only / worth-a-look suffix is always appended.
+## PART 3 — Shadow wiring fixes (`nse_quant_engine.py` write path)
 
-## 4. Permanent "Before you ever act on this" panel
+Investigate `nse_quant_engine.py` to confirm `latest_scores.csv` columns, then:
 
-New `.g-amber` glass panel injected near the bottom of `<main>`, immediately above the existing footer / Excel-ready summary line. Renders **regardless of verdict** (positive or not — the copy adapts, the panel does not disappear). Five bullets, calm tone, no fine-print styling:
+- Ensure the following columns are always written to `output/latest_scores.csv`: `Price`, `MA_20`, `MA_50`, `MA_200`, `Trend_Rank`, `Return_21D`, `Benchmark_Return_21D`, `Rel_Strength_21D`. These are the inputs `nse_quant_engine_v4_shadow.py` needs; missing them is why shadow neutralizes trend + RS.
+- Ensure `data/fundamentals_latest.csv` is written by `fetch_fundamentals` with header `Symbol,Fundamental_Score,...` (currently the file lacks `Symbol` and `Fundamental_Score` — likely writing raw yfinance rows). Compute `Fundamental_Score` inside `core/fundamental_factor.py`'s existing scorer during the fetch step (or a thin wrapper), and write `Symbol` + `Fundamental_Score` + the raw component columns.
+- If yfinance returns empty for NSE tickers, still write the file with `Symbol` populated from the shortlist and `Fundamental_Score=NaN`, and mark `fundamentals` as AMBER in `data_health.json` with note "yfinance empty for NSE tickers".
 
-- This is a personal research tool, not financial advice.
-- It has never been proven to make money; it may never be.
-- Even a "positive" verdict means "worth a closer look," not "will profit."
-- Consult a SEBI-registered adviser before investing real money.
-- Never invest money you can't afford to lose.
+## PART 4 — Light UI refinement
 
-Heading: "Before you ever act on this". Sub-caption: "Always visible. Read it every time — including the days the tool looks confident."
+- Data Health panel exposes fundamentals AMBER state per Part 3.
+- No new tabs beyond Data health.
+- No visual changes to candidate cards while verdict = Insufficient History.
 
-## Implementation details (technical section)
+## Verification (must show in final output)
 
-Single file: `desktop/nse_quant_engine/dashboard_html_builder.py`.
+1. Run `python -c "from core.optional_data_fetchers import fetch_delivery_pct, fetch_iv_rank; from pathlib import Path; fetch_delivery_pct(Path('data')); fetch_iv_rank(Path('data'), Path('.'))"` on the dev machine and paste the `[fetch] delivery%…` and `[fetch] iv_rank_daily.csv refreshed (hit=… miss=…)` log lines showing non-zero row counts for a real recent trading day. If the sandbox cannot reach `nseindia.com`, run against a saved fixture CSV under `tests/fixtures/sec_bhavdata_full_sample.csv` and note it explicitly.
+2. Show `data/data_health.json` contents after the run.
+3. Render `dashboard_latest.html`, screenshot the new Data health panel and confirm the plain-English inactivity note appears iff a used feed is RED/AMBER.
+4. Run the shadow pipeline; confirm `latest_scores.csv` has the 8 new columns and `fundamentals_latest.csv` has `Symbol,Fundamental_Score`. Confirm shadow log no longer says "neutralized trend/RS" or "0 fundamentals scored".
 
-- New module-level constants:
-  - `PLAIN_GLOSSARY: dict[str, str]` — term → one-sentence definition.
-  - `PLAIN_SUMMARY_TEMPLATES: dict[str, str]` — state → template string, with `{effective_now}` / `{effective_target}` placeholders and a "(day count not yet available)" fallback.
-  - `PLAIN_DISCLAIMER_BULLETS: tuple[str, ...]` — the five bullets above.
-- New helpers (module-level, pure functions of payload dicts, no I/O):
-  - `_plain_summary_html(progress: dict) -> str` — picks template by `progress.state`, formats safely (missing numbers → fallback phrase), returns full glass card HTML.
-  - `_gloss(term: str, label: str | None = None) -> str` — returns the inline span. Unknown term → returns the label/term unchanged (fail-soft, never raises).
-  - `_plain_card_line(row: dict, verdict_state: str) -> str` — composes the sentence from present fields only.
-  - `_plain_disclaimer_html() -> str` — renders the amber panel.
-- CSS additions in the existing `<style>` block: `.plain-summary`, `.gloss` (dotted underline, cursor help), `.tt` (absolute, hidden, revealed on `:hover`/`:focus-within`/`:active`, uses existing glass tokens for background/border), `.plain` (card sub-line styling), `.plain-disclaimer` (amber panel). No changes to existing selectors; only additions.
-- Template insertions in the HTML string:
-  1. Plain-English summary card → first child of `<main>`.
-  2. `_gloss(...)` wrap on first occurrence of each dictionary term per panel.
-  3. `<p class="plain">{_plain_card_line(row, state)}</p>` inside the Top-5 card template.
-  4. Permanent disclaimer panel → immediately above the footer / Excel-ready line.
-- No changes to `_payload()` shape, to file reads, or to any existing panel's structure, ordering, or captions beyond wrapping terms in `_gloss(...)`.
+## Tests to add/extend
 
-## Verification
+- `tests/test_optional_data_fetchers.py` (new or extended):
+  - `test_delivery_pct_header_detection_current_format` — fixture CSV with `SYMBOL, SERIES, DATE1, DELIV_PER` headers (leading spaces).
+  - `test_delivery_pct_header_detection_legacy_format` — fixture with `%DlyQtToTradedQty`.
+  - `test_delivery_pct_missing_percent_falls_back_to_ratio` — fixture with only `DELIV_QTY, TTL_TRD_QNTY`.
+  - `test_iv_rank_session_warmup_called` — monkeypatch `requests.Session.get` to record URL order; asserts homepage + option-chain page hit before any `api/option-chain-equities` call.
+  - `test_cache_not_wiped_on_failure` — pre-seed cache, make fetcher raise, assert file unchanged.
+- `tests/test_shadow_wiring.py` (new):
+  - After a mocked `nse_quant_engine` run, assert `latest_scores.csv` contains the 8 required columns and `fundamentals_latest.csv` has `Symbol, Fundamental_Score`.
 
-Render `dashboard_latest.html` from the current output folder (Insufficient History) and confirm:
-- Plain-English summary card is the first thing on the page and reads the "still learning" template with real `effective_now / effective_target` numbers pulled from the payload.
-- Every wrapped term shows a tooltip on hover, on keyboard focus (Tab), and on tap; the tooltip text matches the dictionary; the underlying number/heading is unchanged.
-- Each Top-5 card has one extra `<p class="plain">` line ending in the watch-only suffix.
-- The "Before you ever act on this" amber panel renders above the footer with all five bullets.
-- Existing sections (Progress to a verdict, Market context, Shadow vs Official streak strip, Alpha Zoo evidence table, ETF gaps, watchlist ribbons, scatter `<details>`) are visually and structurally unchanged.
+## Guardrails (unchanged)
 
-Then delete `validation_status.json` and `cross_sectional_validation_report.md` and reconfirm: the summary card falls back to "verdict not yet available" copy, no fabricated day counts appear, the disclaimer panel is still there, and no panel crashes.
+Glassmorphic theme, honesty captions, watchlist-only framing, dormant adaptive layer, "cross-sectional report is the authority" wording, plain-English disclaimer panel — all preserved. No candidate card looks more actionable. No new computation in the dashboard layer.
