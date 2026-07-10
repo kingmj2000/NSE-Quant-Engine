@@ -599,46 +599,76 @@ def fetch_fundamentals(data_dir: Path, base: Path, cap: int = 120) -> bool:
     target = data_dir / "fundamentals_latest.csv"
     if _is_fresh(target, FRESH_FUND_HOURS):
         _log(f"fundamentals_latest.csv fresh (<{FRESH_FUND_HOURS}h) — skipping fetch")
+        _write_health_row(data_dir, "fundamentals",
+                          _health_status_from_age(_cache_last_date(target, "Date")
+                                                   or datetime.now().strftime("%Y-%m-%d"),
+                                                   warn_days=8, fail_days=30),
+                          _cache_row_count(target), None,
+                          "cache fresh, skipped fetch")
         return True
     symbols = _shortlist_symbols(base, cap=cap)
     if not symbols:
         _log("fundamentals: no shortlist yet — will populate on next run after scoring")
+        _write_health_row(data_dir, "fundamentals", "amber", 0, None,
+                          "no shortlist yet — run scoring first")
         return target.exists()
     try:
-        # Reuse the tested wrapper in core.fundamental_factor.
-        from core.fundamental_factor import fetch_fundamentals as _yf_fetch
+        from core.fundamental_factor import fetch_fundamentals as _yf_fetch, build_quality_score
         _log(f"fundamentals: yfinance fetch for {len(symbols)} symbols (~1s each, be patient)")
         raw = _yf_fetch(symbols, sleep=0.15)
-        if raw.empty:
-            raise RuntimeError("yfinance returned no rows (network / rate-limit?)")
-        # Map raw -> schema fundamentals_overlay.py expects
+        # If yfinance returned nothing usable, still emit a Symbol/Fundamental_Score
+        # scaffold so the shadow engine and downstream code find the expected shape.
+        if raw is None or raw.empty:
+            scaffold = pd.DataFrame({
+                "Symbol": [str(s) for s in symbols],
+                "Fundamental_Score": [pd.NA] * len(symbols),
+                "Fundamental_Coverage": [0.0] * len(symbols),
+            })
+            data_dir.mkdir(parents=True, exist_ok=True)
+            scaffold.to_csv(target, index=False)
+            _log(f"fundamentals_latest.csv scaffold written ({len(scaffold)} symbols, all NaN)")
+            _write_health_row(data_dir, "fundamentals", "amber",
+                              len(scaffold), None,
+                              "yfinance returned empty for NSE tickers")
+            return True
+        scored = build_quality_score(raw)
+        # Keep raw component columns alongside the score for transparency.
+        merged_cols = scored.merge(
+            raw[[c for c in ("Symbol", "PE", "ROE", "DebtToEquity",
+                             "EarningsGrowth", "ProfitMargin") if c in raw.columns]],
+            on="Symbol", how="left", suffixes=("", "_raw"))
+        # Alias to overlay schema (fundamentals_overlay.py expects these names).
         out = pd.DataFrame({
-            "Symbol":            raw["Symbol"].astype(str),
-            "ROE_TTM":           pd.to_numeric(raw.get("ROE"), errors="coerce"),
-            "DebtToEquity":      pd.to_numeric(raw.get("DebtToEquity"), errors="coerce"),
-            "EPS_Growth_YoY":    pd.to_numeric(raw.get("EarningsGrowth"), errors="coerce"),
-            "PE_TTM":            pd.to_numeric(raw.get("PE"), errors="coerce"),
+            "Symbol":            merged_cols["Symbol"].astype(str),
+            "Fundamental_Score": pd.to_numeric(merged_cols.get("Fundamental_Score"), errors="coerce"),
+            "Fundamental_Coverage": pd.to_numeric(merged_cols.get("Fundamental_Coverage"), errors="coerce"),
+            "ROE_TTM":           pd.to_numeric(merged_cols.get("ROE"), errors="coerce"),
+            "DebtToEquity":      pd.to_numeric(merged_cols.get("DebtToEquity"), errors="coerce"),
+            "EPS_Growth_YoY":    pd.to_numeric(merged_cols.get("EarningsGrowth"), errors="coerce"),
+            "PE_TTM":            pd.to_numeric(merged_cols.get("PE"), errors="coerce"),
             "PEG":               pd.NA,
-            "ProfitMargin":      pd.to_numeric(raw.get("ProfitMargin"), errors="coerce"),
+            "ProfitMargin":      pd.to_numeric(merged_cols.get("ProfitMargin"), errors="coerce"),
             "PromoterPledgePct": pd.NA,
             "PE_Self_Median_3Y": pd.NA,
-        })
-        # If a user file already exists, prefer user values where present per symbol.
-        if target.exists():
-            try:
-                prev = pd.read_csv(target)
-                merged = pd.concat([prev, out], ignore_index=True)
-                merged = merged.drop_duplicates(subset=["Symbol"], keep="first")
-                out = merged
-            except Exception:
-                pass
+        }).drop_duplicates(subset=["Symbol"], keep="last")
         data_dir.mkdir(parents=True, exist_ok=True)
         out.to_csv(target, index=False)
-        _log(f"fundamentals_latest.csv refreshed ({len(out)} rows, coverage varies per symbol)")
+        scored_ct = int(out["Fundamental_Score"].notna().sum())
+        _log(f"fundamentals_latest.csv refreshed ({len(out)} rows, {scored_ct} scored)")
+        status = "green" if scored_ct >= max(5, len(out) // 4) else "amber"
+        _write_health_row(data_dir, "fundamentals", status,
+                          len(out), datetime.now().strftime("%Y-%m-%d"),
+                          f"{scored_ct}/{len(out)} symbols scored"
+                          + ("" if scored_ct else " — yfinance empty for NSE tickers"))
         return True
     except Exception as e:
         _warn("fundamentals (yfinance)", e)
+        _write_health_row(data_dir, "fundamentals",
+                          "red" if not target.exists() else "amber",
+                          _cache_row_count(target), None,
+                          f"fetch failed: {type(e).__name__}")
         return target.exists()
+
 
 
 # =========================================================================
