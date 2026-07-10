@@ -1097,6 +1097,61 @@ def refresh_all(base: Path | None = None, only: Iterable[str] | None = None) -> 
         except Exception as e:
             _warn("iv_rank", e)
             status["iv_rank"] = (data_dir / "iv_rank_daily.csv").exists()
+    # Health rows for feeds that fetch above but don't self-report; and for
+    # non-optional feeds that live outside this module (price cache, AMFI, news).
+    try:
+        if "fii_dii" in wanted:
+            p = data_dir / "fii_dii_daily.csv"
+            _write_health_row(data_dir, "fii_dii",
+                              _health_status_from_age(_cache_last_date(p)),
+                              _cache_row_count(p), _cache_last_date(p),
+                              "" if status.get("fii_dii") else "fetch failed — cache reused if present")
+        if "bulk_deals" in wanted:
+            p = data_dir / "bulk_deals.csv"
+            _write_health_row(data_dir, "bulk_deals",
+                              _health_status_from_age(_cache_last_date(p)),
+                              _cache_row_count(p), _cache_last_date(p),
+                              "" if status.get("bulk_deals") else "fetch failed — cache reused if present")
+        if "earnings" in wanted:
+            p = data_dir / "earnings_calendar.csv"
+            _write_health_row(data_dir, "earnings",
+                              _health_status_from_age(_cache_last_date(p, "Event_Date"),
+                                                       warn_days=14, fail_days=60),
+                              _cache_row_count(p),
+                              _cache_last_date(p, "Event_Date"),
+                              "" if status.get("earnings") else "fetch failed — cache reused if present")
+        # ── seed feeds this module does not fetch ──
+        # Price cache
+        price_meta = data_dir / "price_cache_meta.json"
+        raw_prices = data_dir / "raw_prices_latest.csv"
+        if price_meta.exists() or raw_prices.exists():
+            src = price_meta if price_meta.exists() else raw_prices
+            last = datetime.fromtimestamp(src.stat().st_mtime).strftime("%Y-%m-%d")
+            _write_health_row(data_dir, "price",
+                              _health_status_from_age(last),
+                              _cache_row_count(raw_prices), last,
+                              f"from {src.name}")
+        # AMFI standardized imports
+        for feed, fname in (
+            ("amfi_nav", "amfi_aum_source_standardized.csv"),
+            ("amfi_ter", "amfi_ter_tracking_source_standardized.csv"),
+        ):
+            p = data_dir / fname
+            if p.exists():
+                last = datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d")
+                _write_health_row(data_dir, feed,
+                                  _health_status_from_age(last, warn_days=7, fail_days=30),
+                                  _cache_row_count(p), last, f"from {fname}")
+        # News
+        news = base / "output" / "news_market_context.md"
+        if news.exists():
+            last = datetime.fromtimestamp(news.stat().st_mtime).strftime("%Y-%m-%d")
+            _write_health_row(data_dir, "news",
+                              _health_status_from_age(last),
+                              None, last, "news_market_context.md mtime")
+    except Exception as e:
+        _warn("data_health seeding", e)
+
     ok = sum(1 for v in status.values() if v)
     _log(f"done — {ok}/{len(status)} feeds available (missing feeds keep the pipeline running quiet)")
     return status
