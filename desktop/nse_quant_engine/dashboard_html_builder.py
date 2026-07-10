@@ -1173,8 +1173,9 @@ def _payload() -> dict:
         "corr_matrix": corr_payload,
         "macro": macro_payload,
         "alpha_zoo": zoo_payload,
-        "plain_summary_html": _plain_summary_html(progress_payload),
+        "plain_summary_html": _plain_summary_html(progress_payload, _health_payload()),
         "plain_disclaimer_html": _plain_disclaimer_html(),
+        "data_health_html": _data_health_html(_health_payload()),
     }
 
 
