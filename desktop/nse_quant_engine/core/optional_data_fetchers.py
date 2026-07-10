@@ -22,12 +22,97 @@ Design rules (non-negotiable, matches plan .lovable/plan.md):
 from __future__ import annotations
 
 import io
+import json
+import re
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
+
+
+# --------- data health snapshot --------------------------------------------
+HEALTH_FILE_NAME = "data_health.json"
+
+
+def _norm_header(s: str) -> str:
+    """Normalize a CSV header for case/whitespace/punctuation-insensitive match."""
+    return re.sub(r"[^a-z0-9]", "", str(s).lower())
+
+
+def _health_load(data_dir: Path) -> dict:
+    p = data_dir / HEALTH_FILE_NAME
+    if not p.exists():
+        return {"generated_at": None, "feeds": {}}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {"generated_at": None, "feeds": {}}
+
+
+def _health_write(data_dir: Path, doc: dict) -> None:
+    try:
+        data_dir.mkdir(parents=True, exist_ok=True)
+        doc["generated_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        (data_dir / HEALTH_FILE_NAME).write_text(
+            json.dumps(doc, indent=2, default=str), encoding="utf-8")
+    except Exception as e:
+        print(f"[fetch][warn] health-write: {e}", flush=True)
+
+
+def _health_status_from_age(last_date: str | None, warn_days: int = 2,
+                            fail_days: int = 7) -> str:
+    if not last_date:
+        return "red"
+    try:
+        d = pd.to_datetime(last_date).normalize()
+        age = (pd.Timestamp.now().normalize() - d).days
+    except Exception:
+        return "red"
+    if age <= warn_days:
+        return "green"
+    if age <= fail_days:
+        return "amber"
+    return "red"
+
+
+def _write_health_row(data_dir: Path, feed: str, status: str,
+                      rows: int | None, last_date: str | None,
+                      note: str = "") -> None:
+    """Update one feed entry in data_health.json. Fail-soft, never raises."""
+    try:
+        doc = _health_load(data_dir)
+        feeds = doc.setdefault("feeds", {})
+        feeds[feed] = {
+            "status": status,
+            "rows": int(rows) if rows is not None else None,
+            "last_date": last_date,
+            "note": str(note or ""),
+        }
+        _health_write(data_dir, doc)
+    except Exception as e:
+        print(f"[fetch][warn] health-row {feed}: {e}", flush=True)
+
+
+def _cache_last_date(csv_path: Path, col: str = "Date") -> str | None:
+    try:
+        if not csv_path.exists():
+            return None
+        df = pd.read_csv(csv_path, usecols=[col])
+        d = pd.to_datetime(df[col], errors="coerce").dropna().max()
+        return None if pd.isna(d) else d.strftime("%Y-%m-%d")
+    except Exception:
+        return None
+
+
+def _cache_row_count(csv_path: Path) -> int:
+    try:
+        if not csv_path.exists():
+            return 0
+        return int(sum(1 for _ in csv_path.open("r", encoding="utf-8")) - 1)
+    except Exception:
+        return 0
 
 
 # --------- freshness windows (hours) ----------------------------------------
