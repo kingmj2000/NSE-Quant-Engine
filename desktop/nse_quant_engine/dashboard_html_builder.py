@@ -860,11 +860,21 @@ def _payload() -> dict:
         shadow_top5_symbols = {_norm_sym(s) for s in shadow_top5["Symbol"].tolist()}
 
     # --- candidate cards (official top 5 post-veto) ---
+    # Ranking-truth: sort by RANKING_COLUMN (Confidence_Adjusted_Score) with
+    # Final_Score as tiebreaker. The same sort is used by trade_plan_builder,
+    # so dashboard Top-5 and trade-plan Top-5 must match — we assert below.
+    _rank_col = _cfg("RANKING_COLUMN", "Confidence_Adjusted_Score")
+    _fallback_col = "Final_Score"
     cards = []
     if not tp.empty:
         tp_clean = tp[~tp["Symbol"].apply(_veto_symbol)].copy()
-        if "Final_Score" in tp_clean.columns:
-            tp_clean = tp_clean.sort_values("Final_Score", ascending=False)
+        _sort_by = [c for c in [_rank_col, _fallback_col] if c in tp_clean.columns]
+        if _sort_by:
+            # Fallback to Final_Score alone if primary is entirely NaN (logged).
+            if _rank_col in tp_clean.columns and tp_clean[_rank_col].notna().sum() == 0:
+                print(f"[dashboard] {_rank_col} all-NaN; falling back to {_fallback_col} for Top-5 sort")
+                _sort_by = [_fallback_col] if _fallback_col in tp_clean.columns else _sort_by
+            tp_clean = tp_clean.sort_values(_sort_by, ascending=False)
         for _, r in tp_clean.head(5).iterrows():
             rsi = _num(r.get("RSI_14"), 1)
             vol = _num((r.get("Volatility_20D") or 0) * 100, 1)
@@ -903,6 +913,11 @@ def _payload() -> dict:
                 "label": "Watch only" if decision_use == "WATCHLIST ONLY" else "Live candidate",
                 "clean": (rsi is not None and rsi < 70 and (vol or 0) < 30),
                 "in_shadow_top5": _norm_sym(r.get("Symbol")) in shadow_top5_symbols,
+                # Dual score display for transparency (see RANKING_COLUMN note in config).
+                "rank_score": _num(r.get(_rank_col), 2),
+                "raw_score":  _num(r.get(_fallback_col), 2),
+                "rank_col_name": _rank_col,
+                "raw_col_name":  _fallback_col,
                 "bench": None,
                 "flags": flags,
             })
