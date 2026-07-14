@@ -1182,6 +1182,8 @@ def _payload() -> dict:
         "shadow": shadow,
         "universe": universe_counts,
         "cards": cards,
+        "top5_alignment": top5_alignment,
+        "ranking_column": _rank_col,
         "shadow_unique_top5": shadow_unique_top5,
         "scatter": scatter,
         "avoid": avoid,
