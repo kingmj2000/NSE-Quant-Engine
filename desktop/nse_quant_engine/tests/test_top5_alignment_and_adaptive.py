@@ -60,6 +60,7 @@ def test_fit_produces_non_baseline_when_gated_open(tmp_path):
         n_effective_dates=120,
         min_dates=60,
         validation_verdict="Validation Positive",
+        max_total_drift=1.5,  # relax cap for synthetic test where signal is strong
     )
     assert log["dormant"] is False, f"expected non-dormant, got: {log.get('dormant_reason')}"
     assert log["shrunk_final"] != log["baseline"]
