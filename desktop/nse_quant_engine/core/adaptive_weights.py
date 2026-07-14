@@ -76,12 +76,6 @@ def fit_adaptive_weights(panel: pd.DataFrame,
                          max_total_drift: float = 0.30,
                          ridge_alpha: float = 1.0,
                          max_alpha_corr: float = 0.8) -> dict:
-                         min_dates: int = 60,
-                         validation_verdict: str = "",
-                         shrinkage_alpha: float = 0.20,
-                         max_step: float = 0.05,
-                         max_total_drift: float = 0.30,
-                         ridge_alpha: float = 1.0) -> dict:
     """Fit shrunk adaptive weights, then log every guardrail decision.
 
     `panel` columns must include ONE `Date` column, a `Fwd_Return` column,
