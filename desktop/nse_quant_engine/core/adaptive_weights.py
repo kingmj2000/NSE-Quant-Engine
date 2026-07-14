@@ -149,6 +149,28 @@ def fit_adaptive_weights(panel: pd.DataFrame,
         log["shrunk_final"] = dict(log["baseline"])
         return log
 
+    # Guardrail #4c — collinearity cap on the alpha panel. Two alphas whose
+    # pairwise |corr| exceeds max_alpha_corr are effectively the same signal;
+    # feeding both to ridge re-introduces the triple-count problem.
+    if len(alpha_cols) >= 2:
+        corr_df = sub[alpha_cols].corr(method="pearson").fillna(0.0)
+        log["alpha_corr_matrix"] = {
+            r: {c: round(float(corr_df.loc[r, c]), 4) for c in alpha_cols}
+            for r in alpha_cols
+        }
+        worst_pair = None
+        worst_val = 0.0
+        for i, a in enumerate(alpha_cols):
+            for b in alpha_cols[i + 1:]:
+                v = abs(float(corr_df.loc[a, b]))
+                if v > worst_val:
+                    worst_val, worst_pair = v, (a, b)
+        if worst_pair is not None and worst_val > float(max_alpha_corr):
+            log["dormant_reason"] = (f"alpha collinearity {worst_pair[0]}~{worst_pair[1]}="
+                                     f"{worst_val:.3f} exceeds cap {max_alpha_corr:.3f}")
+            log["shrunk_final"] = dict(log["baseline"])
+            return log
+
     X = sub[alpha_cols].to_numpy(dtype=float)
     y = sub["Fwd_Return"].to_numpy(dtype=float)
     beta = _ridge(X, y, ridge=ridge_alpha)
