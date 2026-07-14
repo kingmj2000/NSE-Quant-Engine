@@ -256,3 +256,10 @@ VALIDATION_BAYES_SHRINK        = os.environ.get("VALIDATION_BAYES_SHRINK", "1") 
 VALIDATION_HITRATE_PRIOR_ALPHA = _f("VALIDATION_HITRATE_PRIOR_ALPHA", 10.0)
 VALIDATION_HITRATE_PRIOR_BETA  = _f("VALIDATION_HITRATE_PRIOR_BETA", 10.0)
 VALIDATION_IC_PRIOR_N          = _i("VALIDATION_IC_PRIOR_N", 20)
+
+# ── Output retention ────────────────────────────────────────────────────────
+# Retention for accumulating dated artifacts (dashboards, dated score snapshots,
+# enricher backups, TER debug xlsx). Keeps the most recent N per pattern.
+# Set to 0 to disable pruning entirely (safety escape hatch).
+# Never applies to PROTECTED_FILES / rolling history CSVs.
+RETENTION_KEEP_N = _i("RETENTION_KEEP_N", 10)
