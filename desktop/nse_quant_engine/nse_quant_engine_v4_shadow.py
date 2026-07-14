@@ -276,23 +276,18 @@ def _run_adaptive_shadow() -> None:
         print(f"adaptive shadow skipped (import): {e}")
         return
 
-    baseline = getattr(C, "ALPHA_WEIGHTS", None) or {"momentum": 0.5, "quality": 0.3, "value": 0.2}
+    baseline = getattr(C, "ALPHA_WEIGHTS", None) or {"momentum": 0.5, "trend": 0.3, "safety": 0.2}
     v_status = vs.read_status(OUTPUT_DIR / "validation_status.json")
     n_eff = int(v_status.get("stats", {}).get("effective_validation_dates") or 0)
 
-    # Panel is optional; if forward_return_history is absent, fit will still
-    # gracefully record "dormant, insufficient effective history".
-    panel = pd.DataFrame()
-    fwd_path = OUTPUT_DIR / "forward_return_history.csv"
-    if fwd_path.exists():
-        try:
-            panel = pd.read_csv(fwd_path)
-            keep = [c for c in panel.columns if c in ("Signal_Date", "Net_Forward_Return")]
-            if "Signal_Date" in panel.columns:
-                panel = panel.rename(columns={"Signal_Date": "Date",
-                                              "Net_Forward_Return": "Fwd_Return"})
-        except Exception:
-            panel = pd.DataFrame()
+    # Real training panel: inner-join per-(Date,Symbol) alpha component scores
+    # with matured forward returns. Without this join alpha_cols is empty and
+    # the fit can never learn anything.
+    panel = build_adaptive_panel(
+        alpha_history_path=OUTPUT_DIR / "alpha_score_history.csv",
+        forward_history_path=OUTPUT_DIR / "forward_return_history.csv",
+        baseline_keys=list(baseline.keys()),
+    )
 
     log = aw.fit_adaptive_weights(
         panel=panel,
@@ -307,7 +302,10 @@ def _run_adaptive_shadow() -> None:
         max_step=float(getattr(C, "ADAPTIVE_MAX_STEP", 0.05)),
         max_total_drift=float(getattr(C, "ADAPTIVE_MAX_TOTAL_DRIFT", 0.30)),
         ridge_alpha=float(getattr(C, "ADAPTIVE_RIDGE_ALPHA", 1.0)),
+        max_alpha_corr=float(getattr(C, "ADAPTIVE_MAX_ALPHA_CORR", 0.8)),
     )
+    log["panel_columns"] = list(panel.columns)
+    log["panel_rows"] = int(len(panel))
     (OUTPUT_DIR / "adaptive_weights_log.json").write_text(
         json.dumps(log, indent=2), encoding="utf-8")
     (OUTPUT_DIR / "adaptive_weights_shadow.json").write_text(
@@ -317,7 +315,47 @@ def _run_adaptive_shadow() -> None:
         encoding="utf-8",
     )
     tag = "dormant" if log.get("dormant") else "active-shadow"
-    print(f"adaptive_weights: {tag} ({log.get('dormant_reason') or 'ok'})")
+    print(f"adaptive_weights: {tag} ({log.get('dormant_reason') or 'ok'}) "
+          f"[panel rows={log['panel_rows']}, cols={log['panel_columns']}]")
+
+
+def build_adaptive_panel(alpha_history_path: Path,
+                         forward_history_path: Path,
+                         baseline_keys: list[str]) -> pd.DataFrame:
+    """Inner-join alpha_score_history and forward_return_history on (Date, Symbol).
+
+    Returns a DataFrame with columns: Date, <baseline alpha keys present>, Fwd_Return.
+    'Symbol' is intentionally dropped so guardrail #5 in fit_adaptive_weights
+    (no per-symbol learning) passes. Missing files or empty joins yield an
+    empty DataFrame — the fit records a specific dormant_reason.
+    """
+    if not alpha_history_path.exists() or not forward_history_path.exists():
+        return pd.DataFrame()
+    try:
+        alphas = pd.read_csv(alpha_history_path)
+        fwd = pd.read_csv(forward_history_path)
+    except Exception:
+        return pd.DataFrame()
+    if "Signal_Date" in fwd.columns:
+        fwd = fwd.rename(columns={"Signal_Date": "Date"})
+    if "Net_Forward_Return" in fwd.columns:
+        fwd = fwd.rename(columns={"Net_Forward_Return": "Fwd_Return"})
+    if not {"Date", "Symbol", "Fwd_Return"}.issubset(fwd.columns):
+        return pd.DataFrame()
+    if not {"Date", "Symbol"}.issubset(alphas.columns):
+        return pd.DataFrame()
+    keep_alpha = [k for k in baseline_keys if k in alphas.columns]
+    if not keep_alpha:
+        return pd.DataFrame()
+    fwd = fwd[["Date", "Symbol", "Fwd_Return"]].copy()
+    alphas = alphas[["Date", "Symbol"] + keep_alpha].copy()
+    fwd["Date"] = fwd["Date"].astype(str)
+    alphas["Date"] = alphas["Date"].astype(str)
+    fwd["Symbol"] = fwd["Symbol"].astype(str)
+    alphas["Symbol"] = alphas["Symbol"].astype(str)
+    merged = alphas.merge(fwd, on=["Date", "Symbol"], how="inner")
+    # Drop Symbol before returning (guardrail #5).
+    return merged.drop(columns=["Symbol"])
 
 
 def main() -> None:
