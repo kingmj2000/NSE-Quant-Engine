@@ -927,6 +927,19 @@ def save_outputs(scored: pd.DataFrame, failed_symbols: List[str], config: pd.Dat
     latest_xlsx = OUTPUT_DIR / "latest_scores.xlsx"
     latest_csv = OUTPUT_DIR / "latest_scores.csv"
     dated_xlsx = OUTPUT_DIR / f"latest_scores_{today}.xlsx"
+
+    # Assert shadow-required columns are present (fail loudly, never silent).
+    _shadow_required = [
+        "Price", "MA_20D", "MA_50D", "MA_200D",
+        "Above_20DMA", "Above_50DMA", "Above_200DMA",
+        "Benchmark_Return_21D", "Relative_Strength_21D",
+        "Momentum_Score", "Trend_Score", "Safety_Score",
+        "Final_Score", "Confidence_Adjusted_Score",
+    ]
+    _missing = [c for c in _shadow_required if c not in latest_scores.columns]
+    if _missing:
+        raise RuntimeError(f"latest_scores.csv missing shadow-required columns: {_missing}")
+
     latest_scores.to_csv(latest_csv, index=False)
 
     rank_changes = make_rank_changes(scored)
