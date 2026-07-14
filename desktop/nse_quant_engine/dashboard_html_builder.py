@@ -1550,7 +1550,9 @@ canvas{margin-top:4px}
 </div>
 
 
-<h2>Top 5 watchlist candidates &mdash; post-governance veto</h2>
+<h2 id="top5Title">Top 5 watchlist candidates &mdash; post-governance veto</h2>
+<div class="sub" id="top5RankSub" style="margin-top:-4px;margin-bottom:8px"></div>
+<div id="top5AlignChip" style="display:none"></div>
 <div class="watchbanner" id="watchBanner" style="display:none">Reference levels only &mdash; not validated. Buy zones, stops, and targets below are mechanical outputs, not recommendations.</div>
 <div class="cards" id="cards"></div>
 
