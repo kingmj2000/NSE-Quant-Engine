@@ -121,6 +121,15 @@ def build_steps(include_shadow: bool = True, include_fetch: bool = True) -> list
                           gate=_gate_normal_scores_ready))
     # Always last — consumes every artifact produced above.
     steps.append(Step("dashboard_html_builder", _module("dashboard_html_builder")))
+
+    # Output retention: prune dated artifacts to config.RETENTION_KEEP_N.
+    # skippable=True so a cleanup failure can never fail a pipeline run.
+    def _run_cleanup():
+        if str(BASE) not in sys.path:
+            sys.path.insert(0, str(BASE))
+        from core.cleanup_outputs import run_cleanup
+        run_cleanup(BASE)
+    steps.append(Step("cleanup_outputs", _run_cleanup, skippable=True))
     return steps
 
 
