@@ -1932,6 +1932,30 @@ document.getElementById("cards").innerHTML = (DATA.cards||[]).map(c=>`
   if (dh && DATA.data_health_html) dh.innerHTML = DATA.data_health_html;
 })();
 
+// Top-5 ranking-column label + alignment (dashboard vs trade plan) honesty chip.
+(function injectTop5Ranking(){
+  const sub = document.getElementById("top5RankSub");
+  const rc  = DATA.ranking_column || "Confidence_Adjusted_Score";
+  if (sub) sub.innerHTML = `Ranked by <b>${rc}</b>; raw <b>Final_Score</b> shown for transparency. `
+    + `<span style="opacity:.75">Note: ${rc} embeds data-completeness and regime tilt, so a candidate can rank lower for missing metadata rather than worse prospects.</span>`;
+  const chip = document.getElementById("top5AlignChip");
+  const a = DATA.top5_alignment || {};
+  if (!chip) return;
+  if (a.ok === true) {
+    chip.style.display = "";
+    chip.innerHTML = `<div class="lblchip" style="background:var(--green-bg);color:var(--green);border:1px solid var(--green)">Top-5 alignment ✓ dashboard matches trade plan</div>`;
+  } else if (a.ok === false) {
+    chip.style.display = "";
+    chip.innerHTML = `<div class="glass panel" style="border:1px solid var(--red);background:var(--red-bg);margin:8px 0">`
+      + `<div style="color:var(--red);font-weight:700">Top-5 mismatch — investigate</div>`
+      + `<div class="sub" style="margin-top:6px">Dashboard: ${(a.dash||[]).join(', ') || '—'}<br>Trade plan: ${(a.plan||[]).join(', ') || '—'}</div>`
+      + `<div class="sub" style="margin-top:4px;opacity:.8">${a.reason||''}</div></div>`;
+  } else if (a.reason) {
+    chip.style.display = "";
+    chip.innerHTML = `<div class="lblchip" style="background:var(--amber-bg);color:var(--amber);border:1px solid var(--amber)">Top-5 alignment: ${a.reason}</div>`;
+  }
+})();
+
 // Also attach the plain-words line inside shadow-only cards.
 (function patchShadowUniquePlain(){
   const host = document.getElementById("shadowUniqueCards");
