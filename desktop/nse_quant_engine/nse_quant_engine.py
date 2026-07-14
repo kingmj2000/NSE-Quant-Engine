@@ -1009,6 +1009,22 @@ def save_outputs(scored: pd.DataFrame, failed_symbols: List[str], config: pd.Dat
     signal_hist["Run_Timestamp"] = run_ts
     append_history(OUTPUT_DIR / "signal_history.csv", signal_hist, ["Date", "Symbol"])
 
+    # Per-alpha score history (Date, Symbol, <baseline alpha keys>) — the ONLY
+    # place the adaptive shadow fit gets its per-signal alpha values. Keys must
+    # match core.config.ALPHA_WEIGHTS (non-overlapping component scores only —
+    # never Opportunity_Score / Final_Score, which are composites).
+    _alpha_col_map = {
+        "Momentum_Score": "momentum",
+        "Trend_Score": "trend",
+        "Safety_Score": "safety",
+    }
+    _alpha_src_cols = [c for c in _alpha_col_map if c in scored.columns]
+    if _alpha_src_cols:
+        alpha_hist = scored[["Date", "Symbol"] + _alpha_src_cols].copy()
+        alpha_hist = alpha_hist.rename(columns=_alpha_col_map)
+        alpha_hist["Run_Timestamp"] = run_ts
+        append_history(OUTPUT_DIR / "alpha_score_history.csv", alpha_hist, ["Date", "Symbol"])
+
     run_log_row = pd.DataFrame([{
         "Run_Timestamp": run_ts,
         "Run_Date": today,
