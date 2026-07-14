@@ -146,11 +146,12 @@ def test_shadow_recognizes_ma_50d_columns():
         "MA_200D": [90.0, 220.0],
         "Benchmark_Return_21D": [0.01, 0.01],
     })
-    out, warnings = build_core_input(df)
+    out, warnings, neutralized = build_core_input(df)
     # No warning about missing trend / bench columns
     joined = " ".join(warnings)
     assert "trend confirmation neutralized" not in joined, warnings
     assert "relative-strength confirmation neutralized" not in joined, warnings
+    assert not any("trend" in n["name"] or "relative_strength" in n["name"] for n in neutralized), neutralized
     assert out["MA50"].iloc[0] == 95.0
     assert out["MA200"].iloc[1] == 220.0
 
