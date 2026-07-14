@@ -1886,6 +1886,11 @@ document.getElementById("cards").innerHTML = (DATA.cards||[]).map(c=>`
         ${c.in_shadow_top5 ? '<span class="lblchip shadow">Also in shadow Top 5</span>' : ''}
      </div>
    </div>
+   <div class="perday" style="margin-top:6px;border-top:1px dashed var(--line);padding-top:8px">
+     <div class="pd"><div class="l">${c.rank_col_name||'Rank score'}</div><div class="n">${c.rank_score==null?'—':num(c.rank_score,2)}</div></div>
+     <div class="pd"><div class="l">${c.raw_col_name||'Final_Score'} <span style="opacity:.6">(raw)</span></div><div class="n">${c.raw_score==null?'—':num(c.raw_score,2)}</div></div>
+   </div>
+
 
    <div class="levels">
      <div class="lv"><div class="l">Buy zone</div><div class="n">${num(c.bzl)}&ndash;${num(c.bzh)}</div></div>
