@@ -74,7 +74,8 @@ def fit_adaptive_weights(panel: pd.DataFrame,
                          shrinkage_alpha: float = 0.20,
                          max_step: float = 0.05,
                          max_total_drift: float = 0.30,
-                         ridge_alpha: float = 1.0) -> dict:
+                         ridge_alpha: float = 1.0,
+                         max_alpha_corr: float = 0.8) -> dict:
     """Fit shrunk adaptive weights, then log every guardrail decision.
 
     `panel` columns must include ONE `Date` column, a `Fwd_Return` column,
@@ -95,6 +96,8 @@ def fit_adaptive_weights(panel: pd.DataFrame,
         "shrunk_final": None,
         "per_weight_delta": None,
         "total_drift": None,
+        "alpha_corr_matrix": None,
+        "max_alpha_corr_allowed": float(max_alpha_corr),
         "shadow_or_primary": "shadow",
         "dormant": True,
         "dormant_reason": None,
@@ -139,6 +142,28 @@ def fit_adaptive_weights(panel: pd.DataFrame,
         log["dormant_reason"] = f"too few clean rows ({len(sub)}) vs alphas ({len(alpha_cols)})"
         log["shrunk_final"] = dict(log["baseline"])
         return log
+
+    # Guardrail #4c — collinearity cap on the alpha panel. Two alphas whose
+    # pairwise |corr| exceeds max_alpha_corr are effectively the same signal;
+    # feeding both to ridge re-introduces the triple-count problem.
+    if len(alpha_cols) >= 2:
+        corr_df = sub[alpha_cols].corr(method="pearson").fillna(0.0)
+        log["alpha_corr_matrix"] = {
+            r: {c: round(float(corr_df.loc[r, c]), 4) for c in alpha_cols}
+            for r in alpha_cols
+        }
+        worst_pair = None
+        worst_val = 0.0
+        for i, a in enumerate(alpha_cols):
+            for b in alpha_cols[i + 1:]:
+                v = abs(float(corr_df.loc[a, b]))
+                if v > worst_val:
+                    worst_val, worst_pair = v, (a, b)
+        if worst_pair is not None and worst_val > float(max_alpha_corr):
+            log["dormant_reason"] = (f"alpha collinearity {worst_pair[0]}~{worst_pair[1]}="
+                                     f"{worst_val:.3f} exceeds cap {max_alpha_corr:.3f}")
+            log["shrunk_final"] = dict(log["baseline"])
+            return log
 
     X = sub[alpha_cols].to_numpy(dtype=float)
     y = sub["Fwd_Return"].to_numpy(dtype=float)

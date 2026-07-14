@@ -927,6 +927,19 @@ def save_outputs(scored: pd.DataFrame, failed_symbols: List[str], config: pd.Dat
     latest_xlsx = OUTPUT_DIR / "latest_scores.xlsx"
     latest_csv = OUTPUT_DIR / "latest_scores.csv"
     dated_xlsx = OUTPUT_DIR / f"latest_scores_{today}.xlsx"
+
+    # Assert shadow-required columns are present (fail loudly, never silent).
+    _shadow_required = [
+        "Price", "MA_20D", "MA_50D", "MA_200D",
+        "Above_20DMA", "Above_50DMA", "Above_200DMA",
+        "Benchmark_Return_21D", "Relative_Strength_21D",
+        "Momentum_Score", "Trend_Score", "Safety_Score",
+        "Final_Score", "Confidence_Adjusted_Score",
+    ]
+    _missing = [c for c in _shadow_required if c not in latest_scores.columns]
+    if _missing:
+        raise RuntimeError(f"latest_scores.csv missing shadow-required columns: {_missing}")
+
     latest_scores.to_csv(latest_csv, index=False)
 
     rank_changes = make_rank_changes(scored)
@@ -995,6 +1008,22 @@ def save_outputs(scored: pd.DataFrame, failed_symbols: List[str], config: pd.Dat
     signal_hist = scored[signal_history_cols].copy()
     signal_hist["Run_Timestamp"] = run_ts
     append_history(OUTPUT_DIR / "signal_history.csv", signal_hist, ["Date", "Symbol"])
+
+    # Per-alpha score history (Date, Symbol, <baseline alpha keys>) — the ONLY
+    # place the adaptive shadow fit gets its per-signal alpha values. Keys must
+    # match core.config.ALPHA_WEIGHTS (non-overlapping component scores only —
+    # never Opportunity_Score / Final_Score, which are composites).
+    _alpha_col_map = {
+        "Momentum_Score": "momentum",
+        "Trend_Score": "trend",
+        "Safety_Score": "safety",
+    }
+    _alpha_src_cols = [c for c in _alpha_col_map if c in scored.columns]
+    if _alpha_src_cols:
+        alpha_hist = scored[["Date", "Symbol"] + _alpha_src_cols].copy()
+        alpha_hist = alpha_hist.rename(columns=_alpha_col_map)
+        alpha_hist["Run_Timestamp"] = run_ts
+        append_history(OUTPUT_DIR / "alpha_score_history.csv", alpha_hist, ["Date", "Symbol"])
 
     run_log_row = pd.DataFrame([{
         "Run_Timestamp": run_ts,

@@ -223,6 +223,22 @@ ADAPTIVE_SHRINKAGE_ALPHA    = _f("ADAPTIVE_SHRINKAGE_ALPHA", 0.20)
 ADAPTIVE_MAX_STEP           = _f("ADAPTIVE_MAX_STEP", 0.05)
 ADAPTIVE_MAX_TOTAL_DRIFT    = _f("ADAPTIVE_MAX_TOTAL_DRIFT", 0.30)
 ADAPTIVE_RIDGE_ALPHA        = _f("ADAPTIVE_RIDGE_ALPHA", 1.0)
+# Baseline alpha weights used by the shadow adaptive fit.
+# NON-OVERLAPPING BY DESIGN: never mix component scores (momentum, trend, safety)
+# with composite scores (Opportunity_Score = f(momentum, trend, ...) or Final_Score
+# which is target-adjacent). Including both re-introduces the momentum triple-count
+# we removed earlier and destabilizes the ridge fit via collinearity.
+ALPHA_WEIGHTS               = {"momentum": 0.5, "trend": 0.3, "safety": 0.2}
+# Hard collinearity guardrail on the alpha panel handed to fit_adaptive_weights.
+ADAPTIVE_MAX_ALPHA_CORR     = _f("ADAPTIVE_MAX_ALPHA_CORR", 0.8)
+
+# ── Single source of ranking truth for Top-5 across dashboard / trade plan / validated ─
+# Confidence_Adjusted_Score embeds data-completeness and regime tilt, so a candidate
+# can rank lower for missing metadata rather than worse raw prospects. Raw Final_Score
+# is displayed alongside in the Top-5 UI for transparency. Falls back to Final_Score
+# only when the primary column is entirely NaN (logged).
+RANKING_COLUMN              = os.environ.get("RANKING_COLUMN", "Confidence_Adjusted_Score")
+RANKING_COLUMN_FALLBACK     = "Final_Score"
 
 # ── Dashboard shadow-green gate ─────────────────────────────────────────────
 # Dashboard "GREEN" chip must not be easier to earn than the documented

@@ -92,6 +92,33 @@ def _cfg(name: str, default):
     except Exception:
         return default
 
+def _assert_top5_alignment(cards: list, trade_plan_df, rank_col: str, fallback_col: str) -> dict:
+    """Compare dashboard cards Top-5 symbols vs trade_plan_latest.csv Top-5 symbols.
+
+    Both sides must sort by the same ranking column (RANKING_COLUMN). If the
+    ordered symbol lists diverge, the dashboard renders a RED "Top-5 mismatch"
+    honesty chip listing both lists rather than silently papering over it.
+    """
+    import pandas as _pd
+    dash_syms = [_norm_sym(c.get("sym")) for c in cards[:5]]
+    plan_syms: list[str] = []
+    try:
+        if trade_plan_df is None or getattr(trade_plan_df, "empty", True) or "Symbol" not in trade_plan_df.columns:
+            return {"ok": None, "dash": dash_syms, "plan": [], "reason": "trade plan not available"}
+        tp = trade_plan_df[~trade_plan_df["Symbol"].apply(_veto_symbol)].copy()
+        sort_by = [c for c in [rank_col, fallback_col] if c in tp.columns]
+        if not sort_by:
+            return {"ok": None, "dash": dash_syms, "plan": [], "reason": f"neither {rank_col} nor {fallback_col} in trade plan"}
+        tp = tp.sort_values(sort_by, ascending=False)
+        plan_syms = [_norm_sym(s) for s in tp["Symbol"].head(5).tolist()]
+    except Exception as e:
+        return {"ok": None, "dash": dash_syms, "plan": [], "reason": f"alignment check errored: {e}"}
+    ok = dash_syms == plan_syms and len(dash_syms) > 0
+    return {"ok": ok, "dash": dash_syms, "plan": plan_syms,
+            "reason": None if ok else "dashboard Top-5 ≠ trade plan Top-5"}
+
+
+
 
 # ─── verdict fallback + progress ──────────────────────────────────────────────
 _VALID_VERDICTS = (
@@ -860,11 +887,21 @@ def _payload() -> dict:
         shadow_top5_symbols = {_norm_sym(s) for s in shadow_top5["Symbol"].tolist()}
 
     # --- candidate cards (official top 5 post-veto) ---
+    # Ranking-truth: sort by RANKING_COLUMN (Confidence_Adjusted_Score) with
+    # Final_Score as tiebreaker. The same sort is used by trade_plan_builder,
+    # so dashboard Top-5 and trade-plan Top-5 must match — we assert below.
+    _rank_col = _cfg("RANKING_COLUMN", "Confidence_Adjusted_Score")
+    _fallback_col = "Final_Score"
     cards = []
     if not tp.empty:
         tp_clean = tp[~tp["Symbol"].apply(_veto_symbol)].copy()
-        if "Final_Score" in tp_clean.columns:
-            tp_clean = tp_clean.sort_values("Final_Score", ascending=False)
+        _sort_by = [c for c in [_rank_col, _fallback_col] if c in tp_clean.columns]
+        if _sort_by:
+            # Fallback to Final_Score alone if primary is entirely NaN (logged).
+            if _rank_col in tp_clean.columns and tp_clean[_rank_col].notna().sum() == 0:
+                print(f"[dashboard] {_rank_col} all-NaN; falling back to {_fallback_col} for Top-5 sort")
+                _sort_by = [_fallback_col] if _fallback_col in tp_clean.columns else _sort_by
+            tp_clean = tp_clean.sort_values(_sort_by, ascending=False)
         for _, r in tp_clean.head(5).iterrows():
             rsi = _num(r.get("RSI_14"), 1)
             vol = _num((r.get("Volatility_20D") or 0) * 100, 1)
@@ -903,6 +940,11 @@ def _payload() -> dict:
                 "label": "Watch only" if decision_use == "WATCHLIST ONLY" else "Live candidate",
                 "clean": (rsi is not None and rsi < 70 and (vol or 0) < 30),
                 "in_shadow_top5": _norm_sym(r.get("Symbol")) in shadow_top5_symbols,
+                # Dual score display for transparency (see RANKING_COLUMN note in config).
+                "rank_score": _num(r.get(_rank_col), 2),
+                "raw_score":  _num(r.get(_fallback_col), 2),
+                "rank_col_name": _rank_col,
+                "raw_col_name":  _fallback_col,
                 "bench": None,
                 "flags": flags,
             })
@@ -1142,6 +1184,9 @@ def _payload() -> dict:
         _c["plain"] = _plain_card_line(_c, _vstate)
     for _c in shadow_unique_top5:
         _c["plain"] = _plain_card_line(_c, _vstate)
+    # ── Top-5 alignment: dashboard cards vs trade plan Top-5 ─────────────────
+    top5_alignment = _assert_top5_alignment(cards, tp, _rank_col, _fallback_col)
+
 
     return {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -1164,6 +1209,8 @@ def _payload() -> dict:
         "shadow": shadow,
         "universe": universe_counts,
         "cards": cards,
+        "top5_alignment": top5_alignment,
+        "ranking_column": _rank_col,
         "shadow_unique_top5": shadow_unique_top5,
         "scatter": scatter,
         "avoid": avoid,
@@ -1503,7 +1550,9 @@ canvas{margin-top:4px}
 </div>
 
 
-<h2>Top 5 watchlist candidates &mdash; post-governance veto</h2>
+<h2 id="top5Title">Top 5 watchlist candidates &mdash; post-governance veto</h2>
+<div class="sub" id="top5RankSub" style="margin-top:-4px;margin-bottom:8px"></div>
+<div id="top5AlignChip" style="display:none"></div>
 <div class="watchbanner" id="watchBanner" style="display:none">Reference levels only &mdash; not validated. Buy zones, stops, and targets below are mechanical outputs, not recommendations.</div>
 <div class="cards" id="cards"></div>
 
@@ -1837,6 +1886,11 @@ document.getElementById("cards").innerHTML = (DATA.cards||[]).map(c=>`
         ${c.in_shadow_top5 ? '<span class="lblchip shadow">Also in shadow Top 5</span>' : ''}
      </div>
    </div>
+   <div class="perday" style="margin-top:6px;border-top:1px dashed var(--line);padding-top:8px">
+     <div class="pd"><div class="l">${c.rank_col_name||'Rank score'}</div><div class="n">${c.rank_score==null?'—':num(c.rank_score,2)}</div></div>
+     <div class="pd"><div class="l">${c.raw_col_name||'Final_Score'} <span style="opacity:.6">(raw)</span></div><div class="n">${c.raw_score==null?'—':num(c.raw_score,2)}</div></div>
+   </div>
+
 
    <div class="levels">
      <div class="lv"><div class="l">Buy zone</div><div class="n">${num(c.bzl)}&ndash;${num(c.bzh)}</div></div>
@@ -1876,6 +1930,30 @@ document.getElementById("cards").innerHTML = (DATA.cards||[]).map(c=>`
   if (d && DATA.plain_disclaimer_html) d.innerHTML = DATA.plain_disclaimer_html;
   const dh = document.getElementById("dataHealth");
   if (dh && DATA.data_health_html) dh.innerHTML = DATA.data_health_html;
+})();
+
+// Top-5 ranking-column label + alignment (dashboard vs trade plan) honesty chip.
+(function injectTop5Ranking(){
+  const sub = document.getElementById("top5RankSub");
+  const rc  = DATA.ranking_column || "Confidence_Adjusted_Score";
+  if (sub) sub.innerHTML = `Ranked by <b>${rc}</b>; raw <b>Final_Score</b> shown for transparency. `
+    + `<span style="opacity:.75">Note: ${rc} embeds data-completeness and regime tilt, so a candidate can rank lower for missing metadata rather than worse prospects.</span>`;
+  const chip = document.getElementById("top5AlignChip");
+  const a = DATA.top5_alignment || {};
+  if (!chip) return;
+  if (a.ok === true) {
+    chip.style.display = "";
+    chip.innerHTML = `<div class="lblchip" style="background:var(--green-bg);color:var(--green);border:1px solid var(--green)">Top-5 alignment ✓ dashboard matches trade plan</div>`;
+  } else if (a.ok === false) {
+    chip.style.display = "";
+    chip.innerHTML = `<div class="glass panel" style="border:1px solid var(--red);background:var(--red-bg);margin:8px 0">`
+      + `<div style="color:var(--red);font-weight:700">Top-5 mismatch — investigate</div>`
+      + `<div class="sub" style="margin-top:6px">Dashboard: ${(a.dash||[]).join(', ') || '—'}<br>Trade plan: ${(a.plan||[]).join(', ') || '—'}</div>`
+      + `<div class="sub" style="margin-top:4px;opacity:.8">${a.reason||''}</div></div>`;
+  } else if (a.reason) {
+    chip.style.display = "";
+    chip.innerHTML = `<div class="lblchip" style="background:var(--amber-bg);color:var(--amber);border:1px solid var(--amber)">Top-5 alignment: ${a.reason}</div>`;
+  }
 })();
 
 // Also attach the plain-words line inside shadow-only cards.

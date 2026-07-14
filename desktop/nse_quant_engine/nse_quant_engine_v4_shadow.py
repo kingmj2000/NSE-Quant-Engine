@@ -103,9 +103,16 @@ def text_series(df: pd.DataFrame, candidates: list[str], default="") -> pd.Serie
     return df[col].fillna(default).astype(str)
 
 
-def build_core_input(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
-    """Map current engine output columns into the Core v4.1 scoring schema."""
+def build_core_input(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str], list[dict]]:
+    """Map current engine output columns into the Core v4.1 scoring schema.
+
+    Returns (out, warnings_out, neutralized_inputs). neutralized_inputs is the
+    structured, machine-readable audit trail of every input the shadow engine
+    could not source and had to neutralize. Anything appended to it invalidates
+    a direct shadow-vs-official comparison for the affected factor.
+    """
     warnings_out: list[str] = []
+    neutralized: list[dict] = []
     out = df.copy()
 
     # Identity / universe
@@ -129,35 +136,49 @@ def build_core_input(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
         out["MA200"] = pd.to_numeric(out[ma200_col], errors="coerce") if ma200_col else np.nan
         if not ma200_col:
             warnings_out.append("MA200 missing: trend check uses MA50 only / neutral MA200 behavior inside core.")
+            neutralized.append({"name": "MA200", "reason": "column absent from latest_scores.csv"})
     else:
-        # Neutralize trend instead of applying a universal penalty when latest_scores lacks MA columns.
         out["Price"] = 1.0
         out["MA50"] = 1.0
         out["MA200"] = 1.0
         warnings_out.append("Price/MA trend columns missing in latest_scores: trend confirmation neutralized in shadow run.")
+        neutralized.append({"name": "trend (Price/MA50/MA200)",
+                            "reason": "Price and/or MA columns absent from latest_scores.csv"})
 
     bench_col = first_col(out, ["Bench_Return_21D", "Benchmark_Return_21D", "Nifty_Return_21D", "Index_Return_21D"])
     if bench_col:
         out["Bench_Return_21D"] = pd.to_numeric(out[bench_col], errors="coerce")
     else:
-        # Neutralize relative-strength gate when benchmark return is absent.
         out["Bench_Return_21D"] = out["Return_21D"]
         warnings_out.append("Benchmark 21D return missing: relative-strength confirmation neutralized in shadow run.")
+        neutralized.append({"name": "relative_strength (Benchmark_Return_21D)",
+                            "reason": "Benchmark_Return_21D absent from latest_scores.csv"})
 
-    # Optional fundamentals, if user has added the separate data file.
-    fpath = DATA_DIR / "fundamentals_latest.csv"
-    if fpath.exists():
+    # Optional fundamentals — check both data/ and output/ for the scaffold.
+    fund_paths = [DATA_DIR / "fundamentals_latest.csv", OUTPUT_DIR / "fundamentals_latest.csv"]
+    fpath = next((p for p in fund_paths if p.exists()), None)
+    if fpath is not None:
         try:
             fund = pd.read_csv(fpath)
             keep = [c for c in ["Symbol", "Fundamental_Score", "Fundamental_Coverage"] if c in fund.columns]
             if "Symbol" in keep and "Fundamental_Score" in keep:
                 out = out.merge(fund[keep], on="Symbol", how="left")
+                if out["Fundamental_Score"].notna().sum() == 0:
+                    warnings_out.append("fundamentals_latest.csv present but all Fundamental_Score values are NaN.")
+                    neutralized.append({"name": "fundamentals (Fundamental_Score)",
+                                        "reason": "all values NaN (AMBER health)"})
             else:
                 warnings_out.append("fundamentals_latest.csv exists but lacks Symbol/Fundamental_Score; ignored.")
+                neutralized.append({"name": "fundamentals (Fundamental_Score)",
+                                    "reason": "file present but missing Symbol/Fundamental_Score"})
         except Exception as exc:
             warnings_out.append(f"Could not read fundamentals_latest.csv; ignored. Error: {exc}")
+            neutralized.append({"name": "fundamentals (Fundamental_Score)",
+                                "reason": f"read error: {exc}"})
     else:
-        warnings_out.append("No data/fundamentals_latest.csv found: v4.1 shadow run is technical-only for now.")
+        warnings_out.append("No fundamentals_latest.csv found: v4.1 shadow run is technical-only for now.")
+        neutralized.append({"name": "fundamentals (Fundamental_Score)",
+                            "reason": "fundamentals_latest.csv not found in data/ or output/"})
 
     # Required minimum check
     if out["Return_21D"].notna().sum() == 0 or out["Volatility_20D"].notna().sum() == 0:
@@ -166,7 +187,7 @@ def build_core_input(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
             "Run the current workflow first and confirm latest_scores.csv has technical columns."
         )
 
-    return out, warnings_out
+    return out, warnings_out, neutralized
 
 
 def assign_shadow_buckets(df: pd.DataFrame) -> pd.Series:
@@ -255,23 +276,18 @@ def _run_adaptive_shadow() -> None:
         print(f"adaptive shadow skipped (import): {e}")
         return
 
-    baseline = getattr(C, "ALPHA_WEIGHTS", None) or {"momentum": 0.5, "quality": 0.3, "value": 0.2}
+    baseline = getattr(C, "ALPHA_WEIGHTS", None) or {"momentum": 0.5, "trend": 0.3, "safety": 0.2}
     v_status = vs.read_status(OUTPUT_DIR / "validation_status.json")
     n_eff = int(v_status.get("stats", {}).get("effective_validation_dates") or 0)
 
-    # Panel is optional; if forward_return_history is absent, fit will still
-    # gracefully record "dormant, insufficient effective history".
-    panel = pd.DataFrame()
-    fwd_path = OUTPUT_DIR / "forward_return_history.csv"
-    if fwd_path.exists():
-        try:
-            panel = pd.read_csv(fwd_path)
-            keep = [c for c in panel.columns if c in ("Signal_Date", "Net_Forward_Return")]
-            if "Signal_Date" in panel.columns:
-                panel = panel.rename(columns={"Signal_Date": "Date",
-                                              "Net_Forward_Return": "Fwd_Return"})
-        except Exception:
-            panel = pd.DataFrame()
+    # Real training panel: inner-join per-(Date,Symbol) alpha component scores
+    # with matured forward returns. Without this join alpha_cols is empty and
+    # the fit can never learn anything.
+    panel = build_adaptive_panel(
+        alpha_history_path=OUTPUT_DIR / "alpha_score_history.csv",
+        forward_history_path=OUTPUT_DIR / "forward_return_history.csv",
+        baseline_keys=list(baseline.keys()),
+    )
 
     log = aw.fit_adaptive_weights(
         panel=panel,
@@ -286,7 +302,10 @@ def _run_adaptive_shadow() -> None:
         max_step=float(getattr(C, "ADAPTIVE_MAX_STEP", 0.05)),
         max_total_drift=float(getattr(C, "ADAPTIVE_MAX_TOTAL_DRIFT", 0.30)),
         ridge_alpha=float(getattr(C, "ADAPTIVE_RIDGE_ALPHA", 1.0)),
+        max_alpha_corr=float(getattr(C, "ADAPTIVE_MAX_ALPHA_CORR", 0.8)),
     )
+    log["panel_columns"] = list(panel.columns)
+    log["panel_rows"] = int(len(panel))
     (OUTPUT_DIR / "adaptive_weights_log.json").write_text(
         json.dumps(log, indent=2), encoding="utf-8")
     (OUTPUT_DIR / "adaptive_weights_shadow.json").write_text(
@@ -296,7 +315,47 @@ def _run_adaptive_shadow() -> None:
         encoding="utf-8",
     )
     tag = "dormant" if log.get("dormant") else "active-shadow"
-    print(f"adaptive_weights: {tag} ({log.get('dormant_reason') or 'ok'})")
+    print(f"adaptive_weights: {tag} ({log.get('dormant_reason') or 'ok'}) "
+          f"[panel rows={log['panel_rows']}, cols={log['panel_columns']}]")
+
+
+def build_adaptive_panel(alpha_history_path: Path,
+                         forward_history_path: Path,
+                         baseline_keys: list[str]) -> pd.DataFrame:
+    """Inner-join alpha_score_history and forward_return_history on (Date, Symbol).
+
+    Returns a DataFrame with columns: Date, <baseline alpha keys present>, Fwd_Return.
+    'Symbol' is intentionally dropped so guardrail #5 in fit_adaptive_weights
+    (no per-symbol learning) passes. Missing files or empty joins yield an
+    empty DataFrame — the fit records a specific dormant_reason.
+    """
+    if not alpha_history_path.exists() or not forward_history_path.exists():
+        return pd.DataFrame()
+    try:
+        alphas = pd.read_csv(alpha_history_path)
+        fwd = pd.read_csv(forward_history_path)
+    except Exception:
+        return pd.DataFrame()
+    if "Signal_Date" in fwd.columns:
+        fwd = fwd.rename(columns={"Signal_Date": "Date"})
+    if "Net_Forward_Return" in fwd.columns:
+        fwd = fwd.rename(columns={"Net_Forward_Return": "Fwd_Return"})
+    if not {"Date", "Symbol", "Fwd_Return"}.issubset(fwd.columns):
+        return pd.DataFrame()
+    if not {"Date", "Symbol"}.issubset(alphas.columns):
+        return pd.DataFrame()
+    keep_alpha = [k for k in baseline_keys if k in alphas.columns]
+    if not keep_alpha:
+        return pd.DataFrame()
+    fwd = fwd[["Date", "Symbol", "Fwd_Return"]].copy()
+    alphas = alphas[["Date", "Symbol"] + keep_alpha].copy()
+    fwd["Date"] = fwd["Date"].astype(str)
+    alphas["Date"] = alphas["Date"].astype(str)
+    fwd["Symbol"] = fwd["Symbol"].astype(str)
+    alphas["Symbol"] = alphas["Symbol"].astype(str)
+    merged = alphas.merge(fwd, on=["Date", "Symbol"], how="inner")
+    # Drop Symbol before returning (guardrail #5).
+    return merged.drop(columns=["Symbol"])
 
 
 def main() -> None:
@@ -308,7 +367,7 @@ def main() -> None:
     old = read_latest_scores()
     print(f"Loaded official latest scores: {len(old)} rows")
 
-    core_input, warnings_out = build_core_input(old)
+    core_input, warnings_out, neutralized_inputs = build_core_input(old)
     shadow_scored = scoring.compute_opportunity_scores(core_input)
     shadow_scored = scoring.apply_fundamental_factor(shadow_scored)
 
@@ -348,6 +407,12 @@ def main() -> None:
     out = out.sort_values(["V4_Rank", "Old_Rank"], na_position="last").reset_index(drop=True)
 
     summary = make_summary(old, out, warnings_out)
+    summary["neutralized_inputs"] = neutralized_inputs
+    if neutralized_inputs:
+        print(f"[shadow] neutralized_inputs ({len(neutralized_inputs)}): "
+              + "; ".join(f"{n['name']} — {n['reason']}" for n in neutralized_inputs))
+    else:
+        print("[shadow] neutralized_inputs: [] (all required inputs present)")
     write_outputs(out, summary)
     try:
         _run_adaptive_shadow()
