@@ -92,6 +92,33 @@ def _cfg(name: str, default):
     except Exception:
         return default
 
+def _assert_top5_alignment(cards: list, trade_plan_df, rank_col: str, fallback_col: str) -> dict:
+    """Compare dashboard cards Top-5 symbols vs trade_plan_latest.csv Top-5 symbols.
+
+    Both sides must sort by the same ranking column (RANKING_COLUMN). If the
+    ordered symbol lists diverge, the dashboard renders a RED "Top-5 mismatch"
+    honesty chip listing both lists rather than silently papering over it.
+    """
+    import pandas as _pd
+    dash_syms = [_norm_sym(c.get("sym")) for c in cards[:5]]
+    plan_syms: list[str] = []
+    try:
+        if trade_plan_df is None or getattr(trade_plan_df, "empty", True) or "Symbol" not in trade_plan_df.columns:
+            return {"ok": None, "dash": dash_syms, "plan": [], "reason": "trade plan not available"}
+        tp = trade_plan_df[~trade_plan_df["Symbol"].apply(_veto_symbol)].copy()
+        sort_by = [c for c in [rank_col, fallback_col] if c in tp.columns]
+        if not sort_by:
+            return {"ok": None, "dash": dash_syms, "plan": [], "reason": f"neither {rank_col} nor {fallback_col} in trade plan"}
+        tp = tp.sort_values(sort_by, ascending=False)
+        plan_syms = [_norm_sym(s) for s in tp["Symbol"].head(5).tolist()]
+    except Exception as e:
+        return {"ok": None, "dash": dash_syms, "plan": [], "reason": f"alignment check errored: {e}"}
+    ok = dash_syms == plan_syms and len(dash_syms) > 0
+    return {"ok": ok, "dash": dash_syms, "plan": plan_syms,
+            "reason": None if ok else "dashboard Top-5 ≠ trade plan Top-5"}
+
+
+
 
 # ─── verdict fallback + progress ──────────────────────────────────────────────
 _VALID_VERDICTS = (
