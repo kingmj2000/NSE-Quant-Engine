@@ -329,7 +329,7 @@ def main() -> None:
     old = read_latest_scores()
     print(f"Loaded official latest scores: {len(old)} rows")
 
-    core_input, warnings_out = build_core_input(old)
+    core_input, warnings_out, neutralized_inputs = build_core_input(old)
     shadow_scored = scoring.compute_opportunity_scores(core_input)
     shadow_scored = scoring.apply_fundamental_factor(shadow_scored)
 
