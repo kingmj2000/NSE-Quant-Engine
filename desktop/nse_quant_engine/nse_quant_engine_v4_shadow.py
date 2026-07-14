@@ -369,6 +369,12 @@ def main() -> None:
     out = out.sort_values(["V4_Rank", "Old_Rank"], na_position="last").reset_index(drop=True)
 
     summary = make_summary(old, out, warnings_out)
+    summary["neutralized_inputs"] = neutralized_inputs
+    if neutralized_inputs:
+        print(f"[shadow] neutralized_inputs ({len(neutralized_inputs)}): "
+              + "; ".join(f"{n['name']} — {n['reason']}" for n in neutralized_inputs))
+    else:
+        print("[shadow] neutralized_inputs: [] (all required inputs present)")
     write_outputs(out, summary)
     try:
         _run_adaptive_shadow()
