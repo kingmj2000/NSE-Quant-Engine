@@ -103,9 +103,16 @@ def text_series(df: pd.DataFrame, candidates: list[str], default="") -> pd.Serie
     return df[col].fillna(default).astype(str)
 
 
-def build_core_input(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
-    """Map current engine output columns into the Core v4.1 scoring schema."""
+def build_core_input(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str], list[dict]]:
+    """Map current engine output columns into the Core v4.1 scoring schema.
+
+    Returns (out, warnings_out, neutralized_inputs). neutralized_inputs is the
+    structured, machine-readable audit trail of every input the shadow engine
+    could not source and had to neutralize. Anything appended to it invalidates
+    a direct shadow-vs-official comparison for the affected factor.
+    """
     warnings_out: list[str] = []
+    neutralized: list[dict] = []
     out = df.copy()
 
     # Identity / universe
@@ -129,35 +136,49 @@ def build_core_input(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
         out["MA200"] = pd.to_numeric(out[ma200_col], errors="coerce") if ma200_col else np.nan
         if not ma200_col:
             warnings_out.append("MA200 missing: trend check uses MA50 only / neutral MA200 behavior inside core.")
+            neutralized.append({"name": "MA200", "reason": "column absent from latest_scores.csv"})
     else:
-        # Neutralize trend instead of applying a universal penalty when latest_scores lacks MA columns.
         out["Price"] = 1.0
         out["MA50"] = 1.0
         out["MA200"] = 1.0
         warnings_out.append("Price/MA trend columns missing in latest_scores: trend confirmation neutralized in shadow run.")
+        neutralized.append({"name": "trend (Price/MA50/MA200)",
+                            "reason": "Price and/or MA columns absent from latest_scores.csv"})
 
     bench_col = first_col(out, ["Bench_Return_21D", "Benchmark_Return_21D", "Nifty_Return_21D", "Index_Return_21D"])
     if bench_col:
         out["Bench_Return_21D"] = pd.to_numeric(out[bench_col], errors="coerce")
     else:
-        # Neutralize relative-strength gate when benchmark return is absent.
         out["Bench_Return_21D"] = out["Return_21D"]
         warnings_out.append("Benchmark 21D return missing: relative-strength confirmation neutralized in shadow run.")
+        neutralized.append({"name": "relative_strength (Benchmark_Return_21D)",
+                            "reason": "Benchmark_Return_21D absent from latest_scores.csv"})
 
-    # Optional fundamentals, if user has added the separate data file.
-    fpath = DATA_DIR / "fundamentals_latest.csv"
-    if fpath.exists():
+    # Optional fundamentals — check both data/ and output/ for the scaffold.
+    fund_paths = [DATA_DIR / "fundamentals_latest.csv", OUTPUT_DIR / "fundamentals_latest.csv"]
+    fpath = next((p for p in fund_paths if p.exists()), None)
+    if fpath is not None:
         try:
             fund = pd.read_csv(fpath)
             keep = [c for c in ["Symbol", "Fundamental_Score", "Fundamental_Coverage"] if c in fund.columns]
             if "Symbol" in keep and "Fundamental_Score" in keep:
                 out = out.merge(fund[keep], on="Symbol", how="left")
+                if out["Fundamental_Score"].notna().sum() == 0:
+                    warnings_out.append("fundamentals_latest.csv present but all Fundamental_Score values are NaN.")
+                    neutralized.append({"name": "fundamentals (Fundamental_Score)",
+                                        "reason": "all values NaN (AMBER health)"})
             else:
                 warnings_out.append("fundamentals_latest.csv exists but lacks Symbol/Fundamental_Score; ignored.")
+                neutralized.append({"name": "fundamentals (Fundamental_Score)",
+                                    "reason": "file present but missing Symbol/Fundamental_Score"})
         except Exception as exc:
             warnings_out.append(f"Could not read fundamentals_latest.csv; ignored. Error: {exc}")
+            neutralized.append({"name": "fundamentals (Fundamental_Score)",
+                                "reason": f"read error: {exc}"})
     else:
-        warnings_out.append("No data/fundamentals_latest.csv found: v4.1 shadow run is technical-only for now.")
+        warnings_out.append("No fundamentals_latest.csv found: v4.1 shadow run is technical-only for now.")
+        neutralized.append({"name": "fundamentals (Fundamental_Score)",
+                            "reason": "fundamentals_latest.csv not found in data/ or output/"})
 
     # Required minimum check
     if out["Return_21D"].notna().sum() == 0 or out["Volatility_20D"].notna().sum() == 0:
@@ -166,7 +187,7 @@ def build_core_input(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
             "Run the current workflow first and confirm latest_scores.csv has technical columns."
         )
 
-    return out, warnings_out
+    return out, warnings_out, neutralized
 
 
 def assign_shadow_buckets(df: pd.DataFrame) -> pd.Series:
