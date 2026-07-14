@@ -1157,6 +1157,9 @@ def _payload() -> dict:
         _c["plain"] = _plain_card_line(_c, _vstate)
     for _c in shadow_unique_top5:
         _c["plain"] = _plain_card_line(_c, _vstate)
+    # ── Top-5 alignment: dashboard cards vs trade plan Top-5 ─────────────────
+    top5_alignment = _assert_top5_alignment(cards, tp, _rank_col, _fallback_col)
+
 
     return {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
