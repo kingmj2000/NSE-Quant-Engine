@@ -51,6 +51,10 @@ except ImportError:
 import pandas as pd
 import orchestrator
 import md_to_widgets
+from core.candidate_selection import (
+    canonical_order, top_official_candidates,
+    PRIMARY_SCORE_COL, SECONDARY_SCORE_COL,
+)
 
 
 # Optional: try to enable the embedded HTML dashboard (QWebEngineView). If the
@@ -872,8 +876,12 @@ class TradePlanView(QWidget):
             note.setObjectName("Sub"); self._v.addWidget(note); self._v.addStretch(); return
 
         grid = QGridLayout(); grid.setHorizontalSpacing(10); grid.setVerticalSpacing(10)
-        preview = trade_df.head(24) if "Final_Score" not in trade_df.columns else \
-                  trade_df.sort_values("Final_Score", ascending=False).head(24)
+        # Canonical official ordering — never sort by Final_Score.
+        preview = top_official_candidates(trade_df, 24)
+        if preview.empty:
+            # Fallback: show every row in canonical order so a user with an
+            # unusual trade_plan schema still sees something (still no Final_Score sort).
+            preview = canonical_order(trade_df).head(24)
         for i, (_, r) in enumerate(preview.iterrows()):
             grid.addWidget(self._card_for_row(r), i // 3, i % 3)
         holder = QWidget(); holder.setLayout(grid)
@@ -924,8 +932,13 @@ class TradePlanView(QWidget):
         _cell(0, 2, "Hold", f"{int(r.get('Hold_Days_Min',5) or 5)}–{int(r.get('Hold_Days_Max',15) or 15)}d")
         _cell(1, 0, "Target 1", _num(r.get('Target_1')), "#7FE0C6")
         _cell(1, 1, "Target 2", _num(r.get('Target_2')), "#7FE0C6")
-        _cell(1, 2, "Score", _num(r.get('Final_Score'), 1), "#9CC6FF")
+        # Primary: Confidence-Adjusted Score (authoritative ranking).
+        # Secondary: raw Final_Score for reference — never used to sort.
+        _cell(1, 2, "Adjusted Score", _num(r.get(PRIMARY_SCORE_COL), 1), "#9CC6FF")
+        raw_lbl = QLabel(f"Raw Score: {_num(r.get(SECONDARY_SCORE_COL), 1)}")
+        raw_lbl.setStyleSheet("background:transparent;color:#6B6F76;font-size:10.5px;")
         v.addLayout(grid)
+        v.addWidget(raw_lbl)
 
         reason = str(r.get("Reason", "") or "").strip()
         if reason:
