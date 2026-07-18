@@ -1781,6 +1781,10 @@ class MainWindow(QMainWindow):
             self.tab_macro.render(inst_df, macro_json, tilt_json, rebal_json)
         except Exception as e:
             _log_crash(f"Macro tab render failed: {e}")
+        try:
+            self.tab_candidates.refresh()
+        except Exception as e:
+            _log_crash(f"Candidates tab refresh failed: {e}")
 
         # drawer: hydrate step list from last run so users can see what ran
         steps = manifest.get("steps") or []
