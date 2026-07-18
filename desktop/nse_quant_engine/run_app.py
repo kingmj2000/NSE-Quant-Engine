@@ -55,6 +55,8 @@ from core.candidate_selection import (
     canonical_order, top_official_candidates,
     PRIMARY_SCORE_COL, SECONDARY_SCORE_COL,
 )
+from ui.decision_center import DecisionCenterView
+from ui.candidates_workbench import CandidatesWorkbench
 
 
 # Optional: try to enable the embedded HTML dashboard (QWebEngineView). If the
@@ -1466,9 +1468,13 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.btn_run); tb.addWidget(self.btn_drawer)
         col.addWidget(topbar)
 
-        # Tabs
+        # Tabs — reorganized per Phase 4:
+        #   Overview | Candidates | Validation | Portfolio | Context | Data Health | Advanced
+        # `Advanced` is a nested QTabWidget containing power-user views (Raw Scores,
+        # Shadow, Compare, embedded HTML dashboard).
         self.tabs = QTabWidget()
-        self.dashboard = Dashboard()
+        self.dashboard = DecisionCenterView(BASE, OUT)
+        self.tab_candidates = CandidatesWorkbench(BASE, OUT)
         self.tab_scores = self._make_table_tab()
         self.tab_shadow = self._make_table_tab()
         self.tab_compare = CompareView()
@@ -1477,18 +1483,24 @@ class MainWindow(QMainWindow):
         self.tab_trade = TradePlanView()
         self.tab_portfolio = PortfolioView()
         self.tab_macro = MacroRotationView()
-        self.tabs.addTab(self.dashboard, "Dashboard")
-        # Embedded HTML dashboard (Chart.js) — only shown when WebEngine is available.
+
+        # Advanced nested tab widget (Raw scores + Shadow + Compare + HTML dashboard)
+        self.tab_advanced = QTabWidget()
+        self.tab_advanced.addTab(self.tab_scores, "Raw Scores")
+        self.tab_advanced.addTab(self.tab_shadow, "Shadow")
+        self.tab_advanced.addTab(self.tab_compare, "Official vs Shadow")
         self.tab_html = HtmlDashboardView() if HAS_WEBENGINE else None
         if self.tab_html is not None:
-            self.tabs.addTab(self.tab_html, "Dashboard (HTML)")
-        for tab, name in [
-            (self.tab_scores, "Scores"), (self.tab_shadow, "Shadow"),
-            (self.tab_compare, "Compare"), (self.tab_dq, "DQ Report"),
-            (self.tab_validation, "Validation"), (self.tab_trade, "Trade Plan"),
-            (self.tab_portfolio, "Portfolio"), (self.tab_macro, "Macro & Rotation"),
-        ]:
-            self.tabs.addTab(tab, name)
+            self.tab_advanced.addTab(self.tab_html, "Dashboard (HTML)")
+        self.tab_advanced.addTab(self.tab_trade, "Trade Plan (detail)")
+
+        self.tabs.addTab(self.dashboard,    "Overview")
+        self.tabs.addTab(self.tab_candidates,"Candidates")
+        self.tabs.addTab(self.tab_validation,"Validation")
+        self.tabs.addTab(self.tab_portfolio, "Portfolio")
+        self.tabs.addTab(self.tab_macro,     "Context")
+        self.tabs.addTab(self.tab_dq,        "Data Health")
+        self.tabs.addTab(self.tab_advanced,  "Advanced")
         col.addWidget(self.tabs, 1)
 
         outer.addWidget(left, 1)
@@ -1769,6 +1781,10 @@ class MainWindow(QMainWindow):
             self.tab_macro.render(inst_df, macro_json, tilt_json, rebal_json)
         except Exception as e:
             _log_crash(f"Macro tab render failed: {e}")
+        try:
+            self.tab_candidates.refresh()
+        except Exception as e:
+            _log_crash(f"Candidates tab refresh failed: {e}")
 
         # drawer: hydrate step list from last run so users can see what ran
         steps = manifest.get("steps") or []
