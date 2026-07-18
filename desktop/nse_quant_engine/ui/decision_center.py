@@ -357,8 +357,7 @@ class DecisionCenterView(QWidget):
             except Exception:
                 return "—"
 
-        for i, row in enumerate(top.itertuples(index=False), start=1):
-            r = row._asdict() if hasattr(row, "_asdict") else dict(row._fields_ and zip(row._fields, row))  # noqa
+        for i, (_, r) in enumerate(top.iterrows(), start=1):
             sym = str(r.get("Symbol", "?"))
             rank = r.get("Opportunity_Rank", i)
             try: rank_disp = str(int(float(rank)))
