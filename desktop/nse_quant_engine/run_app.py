@@ -55,6 +55,8 @@ from core.candidate_selection import (
     canonical_order, top_official_candidates,
     PRIMARY_SCORE_COL, SECONDARY_SCORE_COL,
 )
+from ui.decision_center import DecisionCenterView
+from ui.candidates_workbench import CandidatesWorkbench
 
 
 # Optional: try to enable the embedded HTML dashboard (QWebEngineView). If the
