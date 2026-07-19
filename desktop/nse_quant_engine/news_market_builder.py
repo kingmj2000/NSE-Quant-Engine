@@ -1,39 +1,37 @@
+"""News & Market Context Builder (context-only).
+
+Guardrails (enforced by tests):
+- Never modifies latest_scores.csv, latest_scores_validated.xlsx,
+  validation_status.json, trade_plan_latest.xlsx, rank_changes.csv,
+  score_history.csv, rebalance_diff.json, or any shadow output.
+- News never influences scoring, ranking, adaptive weights, portfolio
+  selection, trade levels or rebalance decisions.
+- Unknown publication dates stay unknown (never replaced with `now`).
+- Uses the SAME finalized official source Trade Plan / Overview use, via
+  core.candidate_selection.top_official_candidates.
+- Any fetch failure preserves the last-good outputs; refresh_status is
+  recorded and a cache fallback is used.
+- All file writes are atomic.
 """
-News / Market Context Builder - Stage 3.4.1
-===========================================
-
-Fetches recent market/news context after latest_scores.csv exists.
-
-Patch improvements:
-    1. Adds Published_Date, Age_Days, and Recency_Bucket.
-    2. Uses recent Google News queries with when:45d.
-    3. Separates recent headlines from stale fallback headlines.
-    4. Makes old candidate headlines visible as stale rather than pretending
-       they are current.
-
-It does NOT alter quant scores. It creates a context pack for AI review.
-
-Reads:
-    output/latest_scores.csv
-    output/cross_sectional_validation_report.md
-
-Writes:
-    data/news_latest.csv
-    data/top_candidate_news.csv
-    output/news_market_context.md
-
-Run after trade_plan_builder.py:
-    python news_market_builder.py
-"""
-
 from __future__ import annotations
 
+import json
+import traceback
 from pathlib import Path
-from urllib.parse import quote_plus
-from email.utils import parsedate_to_datetime
-import xml.etree.ElementTree as ET
-import requests
+from typing import Iterable
 import pandas as pd
+
+from core.candidate_selection import top_official_candidates
+from news import SCHEMA_VERSION
+from news.news_cache import (
+    CACHE_COLUMNS, atomic_write_df, atomic_write_text,
+    read_cache, upsert, prune,
+)
+from news.news_dedup import cluster_key, dedup
+from news.news_relevance import (
+    build_aliases, classify_event, classify_relevance, load_alias_overrides,
+)
+from news.sources import google_news_rss, nse_announcements
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -42,205 +40,486 @@ DATA_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 LATEST_SCORES = OUTPUT_DIR / "latest_scores.csv"
-TRADE_PLAN_REPORT = OUTPUT_DIR / "trade_plan_report.md"
-CROSS_VALIDATION_REPORT = OUTPUT_DIR / "cross_sectional_validation_report.md"
-NEWS_OUT = DATA_DIR / "news_latest.csv"
-TOP_CANDIDATE_NEWS_OUT = DATA_DIR / "top_candidate_news.csv"
-MARKET_CONTEXT_OUT = OUTPUT_DIR / "news_market_context.md"
-
-HEADERS = {"User-Agent": "Mozilla/5.0"}
-
-RECENT_DAYS = 45
+RANK_CHANGES = OUTPUT_DIR / "rank_changes.csv"
+ALIAS_OVERRIDES = DATA_DIR / "news_alias_overrides.csv"
+NEWS_CACHE = DATA_DIR / "news_cache.csv"
+SOURCE_HEALTH = DATA_DIR / "news_source_health.json"
+TOP_CAND_OUT = DATA_DIR / "top_candidate_news.csv"
+MARKET_OUT = DATA_DIR / "news_latest.csv"
+DIGEST_OUT = OUTPUT_DIR / "news_digest.json"
+CONTEXT_MD = OUTPUT_DIR / "news_market_context.md"
 
 MARKET_QUERIES = [
     "Nifty 50 market outlook India",
     "Nifty Next 50 market outlook India",
-    "India stock market Nifty FII flows RBI inflation crude rupee",
-    "RBI policy India stock market outlook",
+    "India stock market FII flows RBI inflation crude rupee",
+    "RBI policy India stock market",
     "Nasdaq US Fed India market impact",
-    "crude oil rupee India equity market impact",
+    "crude oil rupee India equity market",
 ]
 
+# Caps
+MAX_CANDIDATES = 30
+MAX_QUERIES_PER_SYMBOL = 2
+MAX_STORIES_PER_SYMBOL = 15
+RANK_GAINER_MIN = 5
+RECENT_WINDOW_DAYS = 30
+NSE_WINDOW_DAYS = 14
 
-def google_news_rss_url(query: str, recent_days: int = RECENT_DAYS) -> str:
-    q = f"{query} when:{recent_days}d"
-    return f"https://news.google.com/rss/search?q={quote_plus(q)}&hl=en-IN&gl=IN&ceid=IN:en"
-
-
-def parse_pub_date(value: str):
-    if not value:
-        return pd.NaT
-    try:
-        dt = parsedate_to_datetime(value)
-        if dt.tzinfo is not None:
-            dt = dt.replace(tzinfo=None)
-        return pd.Timestamp(dt)
-    except Exception:
-        return pd.NaT
+DISCLAIMER = (
+    "News and filings are human-review context only. "
+    "They do not change any score, rank, validation result, adaptive weight, "
+    "trade level, portfolio decision or rebalance output."
+)
 
 
-def add_recency_fields(df: pd.DataFrame) -> pd.DataFrame:
+# ---------- recency ----------
+def add_recency(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
+        for c in ("Published_Date", "Age_Days", "Recency_Bucket"):
+            if c not in df.columns:
+                df[c] = pd.Series(dtype="object")
         return df
     now = pd.Timestamp.now()
-    df["Published_Date"] = df["Published"].map(parse_pub_date)
-    df["Age_Days"] = (now - df["Published_Date"]).dt.days
-    df["Recency_Bucket"] = pd.cut(
-        df["Age_Days"],
-        bins=[-999999, 14, 45, 90, 999999],
-        labels=["Recent_0_14D", "Current_15_45D", "Older_46_90D", "Stale_90DPlus"],
-    ).astype(str)
+    pub = pd.to_datetime(df.get("Published_Date"), errors="coerce")
+    df["Published_Date"] = pub  # keep NaT as NaT — never overwrite with now
+    df["Age_Days"] = (now - pub).dt.days
+    bins = [-1e9, 7, 30, 90, 1e9]
+    labels = ["Recent_0_7D", "Current_8_30D", "Older_31_90D", "Stale_90DPlus"]
+    df["Recency_Bucket"] = pd.cut(df["Age_Days"], bins=bins, labels=labels).astype(str)
     df.loc[df["Published_Date"].isna(), "Recency_Bucket"] = "Unknown_Date"
     return df
 
 
-def fetch_rss(query: str, limit: int = 10) -> list[dict]:
-    url = google_news_rss_url(query)
+# ---------- candidate coverage ----------
+def select_candidates(latest: pd.DataFrame, rank_changes: pd.DataFrame | None,
+                      pins: Iterable[str] | None = None) -> pd.DataFrame:
+    """One deduplicated candidate set with deterministic priority.
+
+    Priority (fills the MAX_CANDIDATES cap in this order):
+      1. Official ranks 1–15  (top_official_candidates → canonical)
+      2. New Top-20 entrants  (Previous_Rank NaN & current Rank <= 20)
+      3. Rank gainers         (Rank_Change >= RANK_GAINER_MIN, ranked <= 30)
+      4. High-ranked with newly introduced review flags
+      5. User pins
+    """
+    ordered_syms: list[str] = []
+    priority_map: dict[str, str] = {}
+    seen: set[str] = set()
+
+    def add(sym: str, why: str) -> None:
+        sym = str(sym).strip().upper()
+        if not sym or sym in seen:
+            return
+        seen.add(sym); ordered_syms.append(sym); priority_map[sym] = why
+
+    official = top_official_candidates(latest, n=15)
+    for _, r in official.iterrows():
+        add(r.get("Symbol", ""), "official_top15")
+
+    if rank_changes is not None and not rank_changes.empty:
+        rc = rank_changes.copy()
+        rc["Rank"] = pd.to_numeric(rc.get("Rank"), errors="coerce")
+        rc["Previous_Rank"] = pd.to_numeric(rc.get("Previous_Rank"), errors="coerce")
+        rc["Rank_Change"] = pd.to_numeric(rc.get("Rank_Change"), errors="coerce")
+        entrants = rc[(rc["Previous_Rank"].isna()) & (rc["Rank"] <= 20)]
+        for _, r in entrants.sort_values("Rank").iterrows():
+            add(r.get("Symbol", ""), "new_top20_entrant")
+        gainers = rc[(rc["Rank_Change"] >= RANK_GAINER_MIN) & (rc["Rank"] <= 30)]
+        for _, r in gainers.sort_values("Rank").iterrows():
+            add(r.get("Symbol", ""), "rank_gainer")
+
+    # newly flagged high-ranked
+    if "Risk_Flag" in latest.columns and "Opportunity_Rank" in latest.columns:
+        flagged = latest.copy()
+        flagged["Opportunity_Rank"] = pd.to_numeric(flagged["Opportunity_Rank"], errors="coerce")
+        flagged = flagged[(flagged["Risk_Flag"].astype(str).str.len() > 0)
+                          & (flagged["Opportunity_Rank"] <= 20)]
+        for _, r in flagged.sort_values("Opportunity_Rank").iterrows():
+            add(r.get("Symbol", ""), "new_risk_flag")
+
+    for p in (pins or []):
+        add(p, "user_pin")
+
+    ordered_syms = ordered_syms[:MAX_CANDIDATES]
+    latest_lut = latest.set_index(latest["Symbol"].astype(str).str.upper()) if "Symbol" in latest.columns else pd.DataFrame()
+    rows = []
+    for i, sym in enumerate(ordered_syms):
+        row = latest_lut.loc[sym] if sym in latest_lut.index else pd.Series()
+        rows.append({
+            "Symbol": sym,
+            "Name": row.get("Name", ""),
+            "Rank": row.get("Opportunity_Rank", row.get("Rank")),
+            "Coverage_Reason": priority_map[sym],
+            "Priority_Order": i,
+        })
+    return pd.DataFrame(rows)
+
+
+# ---------- source health ----------
+class SourceHealth:
+    def __init__(self) -> None:
+        self.entries: dict[str, dict] = {}
+
+    def record(self, source: str, *, status: str, items_received: int = 0,
+               items_retained: int = 0, error: str = "",
+               cache_fallback: bool = False) -> None:
+        now = pd.Timestamp.now().isoformat(timespec="seconds")
+        e = self.entries.setdefault(source, {
+            "Source": source, "Last_Attempt": None, "Last_Success": None,
+            "Fetch_Status": "unknown", "Items_Received": 0, "Items_Retained": 0,
+            "Unknown_Date_Count": 0, "Duplicate_Count": 0,
+            "Cache_Fallback_Used": False, "Error": "",
+        })
+        e["Last_Attempt"] = now
+        e["Fetch_Status"] = status
+        e["Items_Received"] = int(items_received)
+        e["Items_Retained"] = int(items_retained)
+        e["Error"] = error or ""
+        if status == "success":
+            e["Last_Success"] = now
+        if cache_fallback:
+            e["Cache_Fallback_Used"] = True
+
+    def to_list(self) -> list[dict]:
+        return list(self.entries.values())
+
+
+# ---------- building rows ----------
+def _row_from_item(item: dict, symbol: str, name: str, rank, reason: str,
+                   event: str) -> dict:
+    now_iso = pd.Timestamp.now().isoformat(timespec="seconds")
+    return {
+        "Cluster_Key": "",  # filled after
+        "Symbol": symbol,
+        "Rank": rank,
+        "Name": name,
+        "Canonical_Title": item.get("Canonical_Title", ""),
+        "Source": item.get("Source", ""),
+        "All_Sources": item.get("Source", ""),
+        "Source_Type": item.get("Source_Type", "media"),
+        "Published_Date": item.get("Published_Date", pd.NaT),
+        "Age_Days": pd.NA,
+        "Recency_Bucket": "",
+        "Event_Category": event,
+        "URL": item.get("URL", ""),
+        "Is_Official_Filing": bool(item.get("Is_Official_Filing", False)),
+        "Relevance_Reason": reason,
+        "Duplicate_Count": 1,
+        "First_Seen": now_iso,
+        "Last_Seen": now_iso,
+        "Fetched_At": now_iso,
+    }
+
+
+# ---------- main ----------
+def build(pins: Iterable[str] | None = None) -> dict:
+    """Run the news refresh. Never raises. Returns the digest envelope."""
+    health = SourceHealth()
+    refresh_status = "success"
+    cache_fallback_used = False
+    prev_digest = _safe_read_json(DIGEST_OUT)
+
+    if not LATEST_SCORES.exists():
+        return _write_failed(prev_digest, health, "latest_scores_missing")
+
     try:
-        r = requests.get(url, headers=HEADERS, timeout=30)
-        r.raise_for_status()
-        root = ET.fromstring(r.content)
+        latest = pd.read_csv(LATEST_SCORES)
     except Exception as exc:
-        return [{"Query": query, "Title": f"FETCH_ERROR: {exc}", "Link": "", "Published": "", "Source": ""}]
+        return _write_failed(prev_digest, health, f"latest_scores_read_error: {exc}")
 
-    items = []
-    seen_titles = set()
-    for item in root.findall("./channel/item"):
-        title = item.findtext("title", default="").strip()
-        if not title or title in seen_titles:
+    rank_changes = _safe_read_csv(RANK_CHANGES)
+    overrides = load_alias_overrides(ALIAS_OVERRIDES)
+    candidates = select_candidates(latest, rank_changes, pins=pins)
+
+    cache = read_cache(NEWS_CACHE)
+
+    # --- NSE announcements: one warmed session, one feed per run ---
+    nse_items: list[dict] = []
+    session = nse_announcements.warm_session()
+    nse_items, nse_health = nse_announcements.fetch_feed(session, window_days=NSE_WINDOW_DAYS)
+    health.record("nse_announcements", status=nse_health["fetch_status"],
+                  items_received=nse_health["items_received"], error=nse_health.get("error", ""))
+    nse_by_sym = nse_announcements.filter_for_symbols(nse_items, candidates["Symbol"].tolist()) if candidates.shape[0] else {}
+    if nse_health["fetch_status"] != "success":
+        cache_fallback_used = True
+        refresh_status = "partial"
+
+    # --- Candidate-specific media via Google News RSS ---
+    candidate_rows: list[dict] = []
+    gnews_received = 0
+    gnews_retained = 0
+    gnews_failed = 0
+    for _, cand in candidates.iterrows():
+        sym = cand["Symbol"]; name = cand.get("Name", "") or ""; rnk = cand.get("Rank")
+        aliases = build_aliases(name, sym, overrides)
+
+        # Official filings first (mapped by exchange symbol, not text)
+        for it in nse_by_sym.get(sym, [])[:MAX_STORIES_PER_SYMBOL]:
+            reason = classify_relevance(it["Canonical_Title"], sym, aliases,
+                                        is_official_filing=True,
+                                        filing_symbol=it.get("Filing_Symbol"))
+            if not reason:
+                continue
+            candidate_rows.append(_row_from_item(
+                it, sym, name, rnk, reason,
+                classify_event(it["Canonical_Title"])))
+
+        # Media queries (capped)
+        queries = _candidate_queries(name, sym)[:MAX_QUERIES_PER_SYMBOL]
+        media_kept_for_sym = 0
+        for q in queries:
+            items, gh = google_news_rss.fetch(q, recent_days=RECENT_WINDOW_DAYS, limit=10)
+            if gh["fetch_status"] != "success":
+                gnews_failed += 1
+                continue
+            gnews_received += gh["items_received"]
+            for it in items:
+                if media_kept_for_sym >= MAX_STORIES_PER_SYMBOL:
+                    break
+                reason = classify_relevance(it["Canonical_Title"], sym, aliases, is_official_filing=False)
+                if not reason:
+                    continue
+                candidate_rows.append(_row_from_item(
+                    it, sym, name, rnk, reason,
+                    classify_event(it["Canonical_Title"])))
+                media_kept_for_sym += 1
+                gnews_retained += 1
+
+    gnews_status = "success" if gnews_failed == 0 else ("partial" if gnews_retained else "failed")
+    health.record("google_news_rss", status=gnews_status,
+                  items_received=gnews_received, items_retained=gnews_retained,
+                  error=f"{gnews_failed} query failures" if gnews_failed else "")
+    if gnews_status == "failed":
+        cache_fallback_used = True
+        refresh_status = "partial" if refresh_status == "success" else refresh_status
+
+    # --- Market context (never assigned to candidates) ---
+    market_rows: list[dict] = []
+    for q in MARKET_QUERIES:
+        items, gh = google_news_rss.fetch(q, recent_days=RECENT_WINDOW_DAYS, limit=8)
+        if gh["fetch_status"] != "success":
             continue
-        seen_titles.add(title)
-        link = item.findtext("link", default="")
-        published = item.findtext("pubDate", default="")
-        source_node = item.find("source")
-        source = source_node.text if source_node is not None else ""
-        items.append({"Query": query, "Title": title, "Link": link, "Published": published, "Source": source})
-        if len(items) >= limit:
-            break
-    return items
+        for it in items:
+            market_rows.append({
+                "Query": q,
+                "Canonical_Title": it["Canonical_Title"],
+                "URL": it["URL"],
+                "Source": it["Source"],
+                "Published_Date": it["Published_Date"],
+                "Source_Type": "media",
+                "Is_Official_Filing": False,
+            })
+
+    cand_df = pd.DataFrame(candidate_rows, columns=CACHE_COLUMNS) if candidate_rows else pd.DataFrame(columns=CACHE_COLUMNS)
+    cand_df = add_recency(cand_df)
+    if not cand_df.empty:
+        cand_df["Cluster_Key"] = cand_df.apply(cluster_key, axis=1)
+        cand_df = dedup(cand_df)
+
+    # --- Merge with cache (cache fills gaps if fresh fetch weak) ---
+    merged = upsert(cache, cand_df)
+
+    # If everything failed and we have zero fresh rows, fall back to cache
+    if cand_df.empty and not cache.empty:
+        cache_fallback_used = True
+        if refresh_status == "success":
+            refresh_status = "cached"
+        merged = cache.copy()
+
+    if cand_df.empty and cache.empty and nse_health["fetch_status"] != "success" and gnews_status != "success":
+        refresh_status = "failed"
+
+    # --- Market news ---
+    market_df = pd.DataFrame(market_rows)
+    market_df = add_recency(market_df) if not market_df.empty else market_df
+
+    # --- Sort candidate feed per spec ---
+    display = merged.copy() if not merged.empty else pd.DataFrame(columns=CACHE_COLUMNS + ["Age_Days"])
+    if not display.empty:
+        display = add_recency(display)
+        display["_rank"] = pd.to_numeric(display["Rank"], errors="coerce").fillna(1e9)
+        display["_filing"] = display["Is_Official_Filing"].astype(bool).astype(int)
+        display["_pd"] = pd.to_datetime(display["Published_Date"], errors="coerce")
+        display = display.sort_values(
+            by=["_rank", "_filing", "_pd", "Symbol"],
+            ascending=[True, False, False, True],
+            na_position="last",
+        ).drop(columns=["_rank", "_filing", "_pd"])
+
+    # --- Atomic writes: only overwrite valid outputs if we have real data ---
+    if refresh_status != "failed":
+        atomic_write_df(TOP_CAND_OUT, display)
+        atomic_write_df(MARKET_OUT, market_df if not market_df.empty else pd.DataFrame(
+            columns=["Query", "Canonical_Title", "URL", "Source", "Published_Date",
+                     "Source_Type", "Is_Official_Filing", "Age_Days", "Recency_Bucket"]))
+        atomic_write_df(NEWS_CACHE, prune(merged))
+    else:
+        # Do NOT overwrite valid outputs with empties.
+        pass
+
+    # --- Digest envelope ---
+    digest = {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": pd.Timestamp.now().isoformat(timespec="seconds"),
+        "refresh_status": refresh_status,
+        "ranking_source": "output/latest_scores.csv (finalized official; via core.candidate_selection.top_official_candidates)",
+        "ranking_column": "Confidence_Adjusted_Score",
+        "disclaimer": DISCLAIMER,
+        "source_health": health.to_list(),
+        "cache_fallback_used": cache_fallback_used,
+        "candidate_coverage": candidates.to_dict(orient="records") if not candidates.empty else [],
+        "counts": {
+            "candidates": int(len(candidates)),
+            "candidate_stories": int(len(display)),
+            "official_filings": int(display["Is_Official_Filing"].sum()) if not display.empty else 0,
+            "unknown_date": int((display.get("Recency_Bucket", pd.Series(dtype=str)) == "Unknown_Date").sum()) if not display.empty else 0,
+            "market_items": int(len(market_df)),
+        },
+        "stories": display.head(300).to_dict(orient="records") if not display.empty else [],
+        "market_items": market_df.head(60).to_dict(orient="records") if not market_df.empty else [],
+    }
+    _write_digest(digest, prev_digest)
+    _write_source_health(health)
+    _write_context_md(digest, display, market_df)
+    return digest
 
 
-def candidate_queries(latest: pd.DataFrame, top_n: int = 12) -> list[tuple[str, str]]:
-    eligible = latest.copy()
-    if "Opportunity_Eligible" in eligible.columns:
-        eligible = eligible[eligible["Opportunity_Eligible"].astype(str).str.lower().eq("yes")].copy()
-    if "Confidence_Adjusted_Score" in eligible.columns:
-        eligible["Confidence_Adjusted_Score"] = pd.to_numeric(eligible["Confidence_Adjusted_Score"], errors="coerce")
-        eligible = eligible.sort_values("Confidence_Adjusted_Score", ascending=False)
-    elif "Final_Score" in eligible.columns:
-        eligible["Final_Score"] = pd.to_numeric(eligible["Final_Score"], errors="coerce")
-        eligible = eligible.sort_values("Final_Score", ascending=False)
-    eligible = eligible.head(top_n)
-
-    queries = []
-    for _, row in eligible.iterrows():
-        name = str(row.get("Name", "")).strip()
-        symbol = str(row.get("Raw_Symbol", row.get("Symbol", ""))).replace(".NS", "")
-        query = f"{name} {symbol} stock news India" if name else f"{symbol} stock news India"
-        queries.append((str(row.get("Symbol")), query))
-    return queries
+def _candidate_queries(name: str, symbol: str) -> list[str]:
+    sym = (symbol or "").strip().upper()
+    nm = (name or "").strip()
+    strict_bits = []
+    if sym:
+        strict_bits.append(f'"{sym}"')
+    if nm:
+        strict_bits.append(f'"{nm}"')
+    strict = " OR ".join(strict_bits) if strict_bits else sym or nm
+    broad = f'{strict} results earnings order acquisition regulatory'
+    return [q for q in (strict, broad) if q]
 
 
-def md_table(df: pd.DataFrame, cols: list[str], max_rows: int = 10) -> str:
-    if df.empty:
-        return "_No rows._"
-    temp = df.copy()
-    for col in cols:
-        if col not in temp.columns:
-            temp[col] = ""
-    return temp[cols].head(max_rows).to_markdown(index=False)
+def _safe_read_csv(path: Path) -> pd.DataFrame:
+    try:
+        return pd.read_csv(path) if path.exists() else pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
+
+
+def _safe_read_json(path: Path) -> dict | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+    except Exception:
+        return None
+
+
+def _write_digest(digest: dict, prev_digest: dict | None) -> None:
+    # Preserve last-good digest if this run failed
+    if digest.get("refresh_status") == "failed" and prev_digest is not None:
+        prev_digest = dict(prev_digest)
+        prev_digest.setdefault("previous_refresh_status", prev_digest.get("refresh_status"))
+        prev_digest["refresh_status"] = "failed"
+        prev_digest["last_failed_attempt"] = digest["generated_at"]
+        prev_digest["source_health"] = digest["source_health"]
+        atomic_write_text(DIGEST_OUT, json.dumps(prev_digest, indent=2, default=str))
+        return
+    atomic_write_text(DIGEST_OUT, json.dumps(digest, indent=2, default=str))
+
+
+def _write_source_health(health: SourceHealth) -> None:
+    atomic_write_text(SOURCE_HEALTH, json.dumps(health.to_list(), indent=2, default=str))
+
+
+def _write_failed(prev_digest: dict | None, health: SourceHealth, reason: str) -> dict:
+    health.record("pipeline", status="failed", error=reason)
+    digest = {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": pd.Timestamp.now().isoformat(timespec="seconds"),
+        "refresh_status": "failed",
+        "ranking_source": "unavailable",
+        "ranking_column": "Confidence_Adjusted_Score",
+        "disclaimer": DISCLAIMER,
+        "source_health": health.to_list(),
+        "cache_fallback_used": True,
+        "candidate_coverage": [],
+        "counts": {"candidates": 0, "candidate_stories": 0, "official_filings": 0,
+                   "unknown_date": 0, "market_items": 0},
+        "stories": [], "market_items": [],
+        "error": reason,
+    }
+    _write_digest(digest, prev_digest)
+    _write_source_health(health)
+    return digest
+
+
+def _write_context_md(digest: dict, display: pd.DataFrame, market_df: pd.DataFrame) -> None:
+    lines: list[str] = []
+    lines.append("# News & Market Context Pack")
+    lines.append("")
+    lines.append(f"_{DISCLAIMER}_")
+    lines.append("")
+    lines.append(f"- Schema: `{digest['schema_version']}`")
+    lines.append(f"- Refresh status: **{digest['refresh_status']}**")
+    lines.append(f"- Ranking source: {digest['ranking_source']}")
+    lines.append(f"- Ranking column: `{digest['ranking_column']}`")
+    lines.append(f"- Generated: {digest['generated_at']}")
+    lines.append(f"- Cache fallback used: {digest['cache_fallback_used']}")
+    lines.append("")
+
+    lines.append("## Source health")
+    for h in digest["source_health"]:
+        lines.append(f"- **{h['Source']}** — {h['Fetch_Status']} "
+                     f"(received {h['Items_Received']}, retained {h.get('Items_Retained', 0)})"
+                     f"{' · error: ' + h['Error'] if h.get('Error') else ''}")
+    lines.append("")
+
+    def _section(title: str, subset: pd.DataFrame, cols: list[str]) -> None:
+        lines.append(f"## {title}")
+        if subset is None or subset.empty:
+            lines.append("_No rows._"); lines.append(""); return
+        cols = [c for c in cols if c in subset.columns]
+        lines.append(subset[cols].head(40).to_markdown(index=False))
+        lines.append("")
+
+    if not display.empty:
+        filings = display[display["Is_Official_Filing"].astype(bool)]
+        recent = display[(display["Recency_Bucket"].isin(["Recent_0_7D", "Current_8_30D"]))
+                         & (~display["Is_Official_Filing"].astype(bool))]
+        stale = display[display["Recency_Bucket"].isin(["Older_31_90D", "Stale_90DPlus"])]
+        unknown = display[display["Recency_Bucket"] == "Unknown_Date"]
+    else:
+        filings = recent = stale = unknown = pd.DataFrame()
+
+    _section("Recent official filings", filings,
+             ["Symbol", "Rank", "Canonical_Title", "Source", "Published_Date", "URL", "Event_Category"])
+    _section("Recent candidate-specific media", recent,
+             ["Symbol", "Rank", "Canonical_Title", "Source", "Published_Date", "Event_Category", "Relevance_Reason"])
+    _section("Market context", market_df,
+             ["Query", "Canonical_Title", "Source", "Published_Date", "Recency_Bucket"])
+    _section("Stale candidate context", stale,
+             ["Symbol", "Rank", "Canonical_Title", "Source", "Published_Date", "Event_Category"])
+    _section("Unknown-date items", unknown,
+             ["Symbol", "Rank", "Canonical_Title", "Source", "Event_Category", "Relevance_Reason"])
+
+    lines.append("## Candidate coverage")
+    if digest["candidate_coverage"]:
+        cov = pd.DataFrame(digest["candidate_coverage"])
+        lines.append(cov.to_markdown(index=False))
+    else:
+        lines.append("_No candidates selected for coverage._")
+    lines.append("")
+    atomic_write_text(CONTEXT_MD, "\n".join(lines))
 
 
 def main() -> None:
-    print("News / Market Context Builder - Stage 3.4.1")
-    print("===========================================")
-
-    if not LATEST_SCORES.exists():
-        raise FileNotFoundError("output/latest_scores.csv not found. Run nse_quant_engine.py first.")
-
-    latest = pd.read_csv(LATEST_SCORES)
-
-    print("Fetching market context...")
-    rows = []
-    for q in MARKET_QUERIES:
-        rows.extend(fetch_rss(q, limit=8))
-    market_news = add_recency_fields(pd.DataFrame(rows))
-    if not market_news.empty:
-        market_news = market_news.sort_values(["Published_Date"], ascending=False, na_position="last")
-    market_news.to_csv(NEWS_OUT, index=False)
-
-    print("Fetching top candidate news...")
-    candidate_rows = []
-    for symbol, q in candidate_queries(latest, top_n=12):
-        for item in fetch_rss(q, limit=5):
-            item["Symbol"] = symbol
-            candidate_rows.append(item)
-    candidate_news = add_recency_fields(pd.DataFrame(candidate_rows))
-    if not candidate_news.empty:
-        candidate_news = candidate_news.sort_values(["Symbol", "Published_Date"], ascending=[True, False], na_position="last")
-    candidate_news.to_csv(TOP_CANDIDATE_NEWS_OUT, index=False)
-
-    validation_text = CROSS_VALIDATION_REPORT.read_text(encoding="utf-8", errors="ignore") if CROSS_VALIDATION_REPORT.exists() else ""
-    trade_plan_text = TRADE_PLAN_REPORT.read_text(encoding="utf-8", errors="ignore") if TRADE_PLAN_REPORT.exists() else ""
-
-    recent_candidate_news = candidate_news[candidate_news["Recency_Bucket"].isin(["Recent_0_14D", "Current_15_45D"])].copy() if not candidate_news.empty else pd.DataFrame()
-    stale_candidate_news = candidate_news[candidate_news["Recency_Bucket"].isin(["Older_46_90D", "Stale_90DPlus"])].copy() if not candidate_news.empty else pd.DataFrame()
-
-    lines = []
-    lines.append("# News and Market Context Pack")
-    lines.append("")
-    lines.append("This file is context for AI review. It does not change the quant scores.")
-    lines.append("")
-    lines.append("News recency rule: recent/current headlines are prioritized. Older headlines are shown only as stale context, not fresh catalysts.")
-    lines.append("")
-
-    if validation_text:
-        lines.append("## Current Validation Summary")
-        lines.append("")
-        lines.append(validation_text[:3000])
-        lines.append("")
-
-    if trade_plan_text:
-        lines.append("## Trade Plan Validation Stamp")
-        lines.append("")
-        lines.append(trade_plan_text[:1200])
-        lines.append("")
-
-    lines.append("## Recent Market Context Headlines")
-    lines.append(md_table(
-        market_news[market_news["Recency_Bucket"].isin(["Recent_0_14D", "Current_15_45D"])],
-        ["Query", "Title", "Source", "Published", "Recency_Bucket"],
-        25,
-    ))
-    lines.append("")
-
-    lines.append("## Recent Candidate-Specific Headlines")
-    lines.append(md_table(
-        recent_candidate_news,
-        ["Symbol", "Title", "Source", "Published", "Recency_Bucket"],
-        30,
-    ))
-    lines.append("")
-
-    lines.append("## Stale Candidate Headlines")
-    lines.append("These are old context, not fresh catalysts.")
-    lines.append(md_table(
-        stale_candidate_news,
-        ["Symbol", "Title", "Source", "Published", "Recency_Bucket"],
-        30,
-    ))
-    lines.append("")
-
-    lines.append("## How to use this")
-    lines.append("- Upload this file with latest_scores_validated.xlsx and trade_plan_latest.xlsx.")
-    lines.append("- Ask AI to flag candidates with negative or contradictory RECENT news.")
-    lines.append("- Stale headlines can be risk context, but should not be treated as current catalysts.")
-    lines.append("- Do not let headlines override the score mechanically; use them as final review context.")
-    MARKET_CONTEXT_OUT.write_text("\n".join(lines), encoding="utf-8")
-
-    print(f"Saved: {NEWS_OUT}")
-    print(f"Saved: {TOP_CANDIDATE_NEWS_OUT}")
-    print(f"Saved: {MARKET_CONTEXT_OUT}")
+    try:
+        digest = build()
+        print(f"[news] refresh_status={digest['refresh_status']} "
+              f"stories={digest['counts']['candidate_stories']} "
+              f"filings={digest['counts']['official_filings']}")
+    except Exception:
+        # Absolute guarantee: builder never fails the outer pipeline.
+        print("[news] non-fatal error:")
+        traceback.print_exc()
 
 
 if __name__ == "__main__":
