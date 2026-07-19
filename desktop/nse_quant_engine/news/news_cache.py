@@ -75,6 +75,9 @@ def upsert(existing: pd.DataFrame, new_rows: pd.DataFrame) -> pd.DataFrame:
     keep.update(incoming)
     fresh = incoming.loc[~incoming.index.isin(keep.index)]
     combined = pd.concat([keep, fresh]).reset_index()
+    for c in CACHE_COLUMNS:
+        if c not in combined.columns:
+            combined[c] = pd.NA
     return combined[CACHE_COLUMNS]
 
 
