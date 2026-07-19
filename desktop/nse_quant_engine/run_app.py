@@ -1484,6 +1484,17 @@ class MainWindow(QMainWindow):
         self.tab_portfolio = PortfolioView()
         self.tab_macro = MacroRotationView()
 
+        # Context nested tab (Macro + News & Events)
+        self.tab_context = QTabWidget()
+        self.tab_context.addTab(self.tab_macro, "Macro / Rotation")
+        try:
+            from ui.news_events import NewsEventsView
+            self.tab_news = NewsEventsView()
+            self.tab_context.addTab(self.tab_news, "News & Events")
+        except Exception as _news_exc:
+            self.tab_news = None
+            print(f"[ui] news view unavailable: {_news_exc}")
+
         # Advanced nested tab widget (Raw scores + Shadow + Compare + HTML dashboard)
         self.tab_advanced = QTabWidget()
         self.tab_advanced.addTab(self.tab_scores, "Raw Scores")
@@ -1498,7 +1509,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.tab_candidates,"Candidates")
         self.tabs.addTab(self.tab_validation,"Validation")
         self.tabs.addTab(self.tab_portfolio, "Portfolio")
-        self.tabs.addTab(self.tab_macro,     "Context")
+        self.tabs.addTab(self.tab_context,   "Context")
         self.tabs.addTab(self.tab_dq,        "Data Health")
         self.tabs.addTab(self.tab_advanced,  "Advanced")
         col.addWidget(self.tabs, 1)
