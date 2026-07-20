@@ -40,16 +40,22 @@ def build() -> dict:
         REPORT.write_text("# Shadow vs Official\n\nMissing one of the score files — run the pipeline first.\n")
         return {"recommendation": "INSUFFICIENT_DATA"}
 
-    score_col_off = "Final_Score" if "Final_Score" in off.columns else "Opportunity_Score"
-    score_col_sha = "Final_Score" if "Final_Score" in sha.columns else "Opportunity_Score"
+    def _score_col(frame: pd.DataFrame) -> str:
+        # Official ranking authority = Confidence_Adjusted_Score; shadow keeps its own composite.
+        for c in ("Confidence_Adjusted_Score", "Final_Score", "Opportunity_Score"):
+            if c in frame.columns:
+                return c
+        return frame.columns[-1]
+    score_col_off = _score_col(off)
+    score_col_sha = _score_col(sha)
     merged = off[["Symbol", score_col_off]].rename(columns={score_col_off: "score_off"}).merge(
         sha[["Symbol", score_col_sha]].rename(columns={score_col_sha: "score_sha"}),
         on="Symbol", how="inner",
     )
 
     top_n = 25
-    top_off = set(off.nlargest(top_n, score_col_off)["Symbol"])
-    top_sha = set(sha.nlargest(top_n, score_col_sha)["Symbol"])
+    top_off = set(off.sort_values([score_col_off, "Symbol"], ascending=[False, True]).head(top_n)["Symbol"])
+    top_sha = set(sha.sort_values([score_col_sha, "Symbol"], ascending=[False, True]).head(top_n)["Symbol"])
     jaccard = len(top_off & top_sha) / max(len(top_off | top_sha), 1)
     rho = _spearman(merged["score_off"], merged["score_sha"])
 

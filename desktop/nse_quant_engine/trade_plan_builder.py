@@ -536,9 +536,11 @@ def make_trade_plan(latest: pd.DataFrame, rules: Dict[str, float], verdict: str,
 
     out = out[OUTPUT_COLUMNS].copy()
 
-    sort_cols = [c for c in ["Confidence_Adjusted_Score", "Final_Score"] if c in out.columns]
+    sort_cols = [c for c in ["Confidence_Adjusted_Score", "Symbol"] if c in out.columns]
     if sort_cols:
-        out = out.sort_values(sort_cols, ascending=False)
+        # Confidence_Adjusted_Score desc, Symbol asc (Final_Score never breaks ties).
+        ascending = [False if c == "Confidence_Adjusted_Score" else True for c in sort_cols]
+        out = out.sort_values(sort_cols, ascending=ascending)
 
     return out
 
@@ -558,11 +560,11 @@ def write_outputs(plan: pd.DataFrame, verdict: str, grade: str) -> None:
 
     top_review = plan[
         ~plan["Trade_Status"].astype(str).str.contains("Avoid", case=False, na=False)
-    ].sort_values(["Confidence_Adjusted_Score", "Final_Score"], ascending=False).head(25)
+    ].sort_values(["Confidence_Adjusted_Score", "Symbol"], ascending=[False, True]).head(25)
 
     avoid_wait = plan[
         plan["Trade_Status"].astype(str).str.contains("Avoid|Watch only", case=False, na=False)
-    ].sort_values(["Confidence_Adjusted_Score", "Final_Score"], ascending=False).head(100)
+    ].sort_values(["Confidence_Adjusted_Score", "Symbol"], ascending=[False, True]).head(100)
 
     with pd.ExcelWriter(TRADE_PLAN_XLSX, engine="openpyxl") as writer:
         plan.to_excel(writer, sheet_name="All Trade Plans", index=False)
@@ -640,9 +642,10 @@ def _emit_corr_and_benchmark(plan: pd.DataFrame) -> None:
         ].copy()
         if reviewable.empty:
             return
-        sort_cols = [c for c in ["Confidence_Adjusted_Score", "Final_Score"] if c in reviewable.columns]
+        sort_cols = [c for c in ["Confidence_Adjusted_Score", "Symbol"] if c in reviewable.columns]
         if sort_cols:
-            reviewable = reviewable.sort_values(sort_cols, ascending=False)
+            ascending = [False if c == "Confidence_Adjusted_Score" else True for c in sort_cols]
+            reviewable = reviewable.sort_values(sort_cols, ascending=ascending)
         pool_n = int(getattr(C, "CORR_AWARE_POOL_N", 25))
         pool = reviewable.head(pool_n)
         pool_syms = pool["Symbol"].astype(str).tolist()
@@ -654,7 +657,7 @@ def _emit_corr_and_benchmark(plan: pd.DataFrame) -> None:
                 top5 = psel.diversified_top_n(
                     pool, corr, n=5,
                     alpha=float(getattr(C, "CORR_AWARE_ALPHA", 0.65)),
-                    score_col="Final_Score" if "Final_Score" in pool.columns else "Confidence_Adjusted_Score",
+                    score_col="Confidence_Adjusted_Score",
                 )
             else:
                 top5 = pool_syms[:5]
@@ -690,9 +693,10 @@ def _emit_horizon_sentiment_alpha(plan: pd.DataFrame) -> None:
         reviewable = plan[
             ~plan["Trade_Status"].astype(str).str.contains("Avoid", case=False, na=False)
         ].copy()
-        sort_cols = [c for c in ["Confidence_Adjusted_Score", "Final_Score"] if c in reviewable.columns]
+        sort_cols = [c for c in ["Confidence_Adjusted_Score", "Symbol"] if c in reviewable.columns]
         if sort_cols:
-            reviewable = reviewable.sort_values(sort_cols, ascending=False)
+            ascending = [False if c == "Confidence_Adjusted_Score" else True for c in sort_cols]
+            reviewable = reviewable.sort_values(sort_cols, ascending=ascending)
         top5_syms = reviewable["Symbol"].astype(str).head(5).tolist()
     except Exception:
         top5_syms = []
@@ -797,10 +801,10 @@ def _emit_fundamentals_sizing_backtest_bundle(plan: pd.DataFrame) -> None:
         reviewable = plan[
             ~plan["Trade_Status"].astype(str).str.contains("Avoid", case=False, na=False)
         ].copy()
-        sort_cols = [c for c in ["Confidence_Adjusted_Score", "Final_Score"]
+        sort_cols = [c for c in ["Confidence_Adjusted_Score", "Symbol"]
                      if c in reviewable.columns]
         if sort_cols:
-            reviewable = reviewable.sort_values(sort_cols, ascending=False)
+            reviewable = reviewable.sort_values(sort_cols, ascending=[False if c == "Confidence_Adjusted_Score" else True for c in sort_cols])
         top5 = reviewable.head(5).copy()
         top5_syms = top5["Symbol"].astype(str).tolist()
     except Exception:

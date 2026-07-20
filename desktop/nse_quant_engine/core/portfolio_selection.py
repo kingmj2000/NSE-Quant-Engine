@@ -60,7 +60,7 @@ def diversified_top_n(candidates: pd.DataFrame,
                       corr: pd.DataFrame,
                       n: int = 5,
                       alpha: float = 0.65,
-                      score_col: str = "Final_Score",
+                      score_col: str = "Confidence_Adjusted_Score",
                       symbol_col: str = "Symbol") -> list[str]:
     """Greedy pick: start with the top-scored symbol, then iteratively add the
     candidate maximising ``alpha·norm_score − (1-alpha)·max_corr_with_selected``.
