@@ -220,6 +220,22 @@ def load_inputs() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         for col in ["Final_Score", "Confidence_Adjusted_Score"]:
             if col in scores.columns:
                 scores[col] = pd.to_numeric(scores[col], errors="coerce")
+        # ── Ranking schema migration (non-destructive; read-time only) ──
+        # Existing unversioned history was written when Final_Score authored
+        # the ranking. Interpret missing/blank versions as schema v1. New
+        # writes stamp schema v2 with Confidence_Adjusted_Score authoritative.
+        if "Ranking_Schema_Version" not in scores.columns:
+            scores["Ranking_Schema_Version"] = 1
+        else:
+            scores["Ranking_Schema_Version"] = (
+                pd.to_numeric(scores["Ranking_Schema_Version"], errors="coerce").fillna(1).astype(int)
+            )
+        if "Ranking_Column" not in scores.columns:
+            scores["Ranking_Column"] = np.where(
+                scores["Ranking_Schema_Version"].eq(2),
+                "Confidence_Adjusted_Score",
+                "Final_Score",
+            )
 
     if not fwd.empty:
         fwd["Signal_Date"] = pd.to_datetime(fwd["Signal_Date"], errors="coerce")
@@ -233,13 +249,17 @@ def load_inputs() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
 def assign_buckets(work: pd.DataFrame) -> pd.DataFrame:
     pieces = []
 
+    # Authoritative bucketing column = Confidence_Adjusted_Score (schema v2).
+    # Symbol asc is the deterministic tie-breaker; Final_Score never breaks ties.
+    rank_col = "Confidence_Adjusted_Score"
+
     for (signal_date, horizon), g in work.groupby(["Signal_Date", "Horizon_Days"]):
-        g = g.dropna(subset=["Final_Score", "Net_Forward_Return"]).copy()
+        g = g.dropna(subset=[rank_col, "Net_Forward_Return"]).copy()
 
         if len(g) < 10:
             continue
 
-        g = g.sort_values("Final_Score", ascending=False).reset_index(drop=True)
+        g = g.sort_values([rank_col, "Symbol"], ascending=[False, True]).reset_index(drop=True)
         g["Score_Rank_On_Date"] = range(1, len(g) + 1)
         g["Score_Percentile_On_Date"] = 1 - ((g["Score_Rank_On_Date"] - 1) / max(len(g) - 1, 1))
 
@@ -250,7 +270,7 @@ def assign_buckets(work: pd.DataFrame) -> pd.DataFrame:
 
         try:
             g["Score_Decile"] = pd.qcut(
-                g["Final_Score"].rank(method="first", ascending=True),
+                g[rank_col].rank(method="first", ascending=True),
                 10,
                 labels=["D10_Lowest", "D9", "D8", "D7", "D6", "D5", "D4", "D3", "D2", "D1_Highest"],
             )
@@ -259,7 +279,7 @@ def assign_buckets(work: pd.DataFrame) -> pd.DataFrame:
 
         try:
             g["Score_Quintile"] = pd.qcut(
-                g["Final_Score"].rank(method="first", ascending=True),
+                g[rank_col].rank(method="first", ascending=True),
                 5,
                 labels=["Q5_Lowest", "Q4", "Q3", "Q2", "Q1_Highest"],
             )
@@ -292,6 +312,7 @@ def make_detail(scores: pd.DataFrame, fwd: pd.DataFrame) -> pd.DataFrame:
         "Bucket",
         "Rank",
         "Risk_Flag",
+        "Ranking_Schema_Version",
     ]
 
     for col in score_cols:
@@ -303,6 +324,15 @@ def make_detail(scores: pd.DataFrame, fwd: pd.DataFrame) -> pd.DataFrame:
 
     if "Opportunity_Eligible" in work.columns:
         work = work[work["Opportunity_Eligible"].astype(str).str.lower().eq("yes")].copy()
+
+    # Authoritative verdict is computed on schema-v2 rows only (Confidence_Adjusted_Score
+    # is the ranking authority). Legacy schema-v1 rows remain in score_history.csv for
+    # audit, but are excluded here so a stale Final_Score-authored past cannot green-light
+    # the current CAS-authored model.
+    if "Ranking_Schema_Version" in work.columns:
+        v2 = pd.to_numeric(work["Ranking_Schema_Version"], errors="coerce").fillna(1).astype(int).eq(2)
+        if v2.any():
+            work = work[v2].copy()
 
     detail = assign_buckets(work)
 

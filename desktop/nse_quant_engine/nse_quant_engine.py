@@ -787,12 +787,26 @@ def score_candidates(latest: pd.DataFrame, benchmark_prices: pd.DataFrame, rules
     df["Confidence_Adjusted_Score"] = (df["Final_Score"] * (df["Confidence_Score"] / 10)).clip(0, 100)
 
     df["Bucket"] = df.apply(assign_bucket, axis=1)
-    df = df.sort_values("Final_Score", ascending=False).copy()
+    # Diagnostic-only raw score rank (retained for transparency; never consumed downstream).
+    df["Raw_Score_Rank"] = (
+        df.sort_values(["Final_Score", "Symbol"], ascending=[False, True])
+          .assign(_rr=lambda x: range(1, len(x) + 1))
+          .sort_index()["_rr"]
+    )
+    # ── OFFICIAL RANKING AUTHORITY ─────────────────────────────────────────────
+    # Confidence_Adjusted_Score desc, Symbol asc as deterministic tie-breaker.
+    # Final_Score is diagnostic only and MUST NOT influence official ordering.
+    df = df.sort_values(
+        ["Confidence_Adjusted_Score", "Symbol"], ascending=[False, True]
+    ).copy()
     df["Rank"] = range(1, len(df) + 1)
     df["Reason"] = df.apply(build_reason, axis=1)
     df["Key_Risk"] = df.apply(build_key_risk, axis=1)
 
-    df["Group_Rank"] = df.groupby("Universe_Group")["Final_Score"].rank(ascending=False, method="first").astype(int)
+    df["Group_Rank"] = (
+        df.groupby("Universe_Group")["Confidence_Adjusted_Score"]
+          .rank(ascending=False, method="first").astype(int)
+    )
     df["Opportunity_Rank"] = np.nan
     eligible_mask = df["Opportunity_Eligible"].astype(str).str.lower().eq("yes")
     df.loc[eligible_mask, "Opportunity_Rank"] = range(1, eligible_mask.sum() + 1)
@@ -866,7 +880,8 @@ def append_history(file_path: Path, new_rows: pd.DataFrame, key_cols: List[str])
 
 def make_rank_changes(scored: pd.DataFrame) -> pd.DataFrame:
     history_path = OUTPUT_DIR / "score_history.csv"
-    base_cols = ["Date", "Symbol", "Name", "Universe", "Universe_Group", "Rank", "Final_Score", "Bucket"]
+    base_cols = ["Date", "Symbol", "Name", "Universe", "Universe_Group", "Rank",
+                 "Confidence_Adjusted_Score", "Final_Score", "Bucket"]
     if not history_path.exists():
         out = scored[base_cols].copy()
         out["Previous_Rank"] = np.nan
@@ -881,12 +896,14 @@ def make_rank_changes(scored: pd.DataFrame) -> pd.DataFrame:
     latest_old_date = old["Date"].dropna().max()
     if pd.isna(latest_old_date):
         return pd.DataFrame()
-    prev = old[old["Date"] == latest_old_date][["Symbol", "Rank", "Final_Score"]].copy()
-    prev = prev.rename(columns={"Rank": "Previous_Rank", "Final_Score": "Previous_Score"})
+    # Prefer CAS-based previous score; fall back to Final_Score for pre-schema-v2 rows.
+    prev_score_col = "Confidence_Adjusted_Score" if "Confidence_Adjusted_Score" in old.columns else "Final_Score"
+    prev = old[old["Date"] == latest_old_date][["Symbol", "Rank", prev_score_col]].copy()
+    prev = prev.rename(columns={"Rank": "Previous_Rank", prev_score_col: "Previous_Score"})
     curr = scored[base_cols].copy()
     out = curr.merge(prev, on="Symbol", how="left")
     out["Rank_Change"] = out["Previous_Rank"] - out["Rank"]
-    out["Score_Change"] = out["Final_Score"] - out["Previous_Score"]
+    out["Score_Change"] = out["Confidence_Adjusted_Score"] - out["Previous_Score"]
     return out.sort_values("Rank")
 
 
@@ -896,7 +913,7 @@ def save_outputs(scored: pd.DataFrame, failed_symbols: List[str], config: pd.Dat
 
     output_cols = [
         "Date", "Universe", "Universe_Group", "Opportunity_Type", "Opportunity_Eligible",
-        "Opportunity_Rank", "Group_Rank", "Rank", "Symbol", "Raw_Symbol",
+        "Opportunity_Rank", "Group_Rank", "Rank", "Raw_Score_Rank", "Symbol", "Raw_Symbol",
         "Name", "Category", "ISIN", "Source",
         "Price", "Close", "Adj Close", "Volume",
         "Final_Score", "Confidence_Adjusted_Score", "Confidence_Score",
@@ -952,21 +969,22 @@ def save_outputs(scored: pd.DataFrame, failed_symbols: List[str], config: pd.Dat
     )
 
     eligible = latest_scores[latest_scores["Opportunity_Eligible"].astype(str).str.lower().eq("yes")].copy()
-    top_opportunities = eligible.sort_values("Final_Score", ascending=False).head(TOP_N)
-    top_confidence_adjusted = eligible.sort_values("Confidence_Adjusted_Score", ascending=False).head(TOP_N)
-    top_etfs = eligible[eligible["Universe"].str.lower().eq("etf")].sort_values("Final_Score", ascending=False).head(TOP_N)
-    top_stocks = eligible[eligible["Universe"].str.lower().eq("stock")].sort_values("Final_Score", ascending=False).head(TOP_N)
+    # Official Top-N uses the authoritative ranking column (Confidence_Adjusted_Score, Symbol asc).
+    top_opportunities = eligible.sort_values(["Confidence_Adjusted_Score", "Symbol"], ascending=[False, True]).head(TOP_N)
+    top_confidence_adjusted = top_opportunities  # kept for sheet-name backward compatibility
+    top_etfs = eligible[eligible["Universe"].str.lower().eq("etf")].sort_values(["Confidence_Adjusted_Score", "Symbol"], ascending=[False, True]).head(TOP_N)
+    top_stocks = eligible[eligible["Universe"].str.lower().eq("stock")].sort_values(["Confidence_Adjusted_Score", "Symbol"], ascending=[False, True]).head(TOP_N)
     low_risk = eligible[
         (eligible["Risk_Score"] >= rules["Risk_Score_Min"])
         & (eligible["Final_Score"] >= rules["Final_Score_Min"])
         & (eligible["Return_21D"] >= rules["Return_21D_Min"])
         & (~eligible["Bucket"].eq("Avoid"))
-    ].sort_values(["Risk_Score", "Final_Score"], ascending=False).head(TOP_N)
+    ].sort_values(["Risk_Score", "Confidence_Adjusted_Score", "Symbol"], ascending=[False, False, True]).head(TOP_N)
     etf_quality_review = latest_scores[
         latest_scores["Universe"].str.lower().eq("etf")
         & latest_scores["ETF_Quality_Data_Flag"].astype(str).str.lower().ne("complete")
     ].head(TOP_N)
-    parking = latest_scores[latest_scores["Opportunity_Eligible"].astype(str).str.lower().eq("no")].sort_values("Final_Score", ascending=False).head(TOP_N)
+    parking = latest_scores[latest_scores["Opportunity_Eligible"].astype(str).str.lower().eq("no")].sort_values(["Confidence_Adjusted_Score", "Symbol"], ascending=[False, True]).head(TOP_N)
     avoid = latest_scores[latest_scores["Bucket"].eq("Avoid")].head(TOP_N)
 
     for path in [latest_xlsx, dated_xlsx]:
@@ -987,14 +1005,20 @@ def save_outputs(scored: pd.DataFrame, failed_symbols: List[str], config: pd.Dat
             if failed_symbols:
                 pd.DataFrame({"Failed_Symbols": failed_symbols}).to_excel(writer, sheet_name="Failed Symbols", index=False)
 
+    # Score history — writes ranking-schema v2 rows (Confidence_Adjusted_Score
+    # is the authoritative ranking column). Older unversioned rows are treated
+    # as schema v1 (Final_Score-authoritative) at read time and excluded from
+    # the v2 authoritative verdict — see cross_sectional_validation.py.
     score_history_cols = [
         "Date", "Symbol", "Universe", "Universe_Group", "Opportunity_Type", "Opportunity_Eligible",
         "Name", "Category", "Final_Score", "Confidence_Adjusted_Score", "Confidence_Score",
         "Opportunity_Score", "Safety_Score", "ETF_Quality_Score", "Score_Consistency_4W",
-        "Rank", "Opportunity_Rank", "Group_Rank", "Bucket", "Risk_Flag", "Reason", "Key_Risk"
+        "Rank", "Raw_Score_Rank", "Opportunity_Rank", "Group_Rank", "Bucket", "Risk_Flag", "Reason", "Key_Risk"
     ]
     score_hist = scored[score_history_cols].copy()
     score_hist["Run_Timestamp"] = run_ts
+    score_hist["Ranking_Column"] = "Confidence_Adjusted_Score"
+    score_hist["Ranking_Schema_Version"] = 2
     append_history(OUTPUT_DIR / "score_history.csv", score_hist, ["Date", "Symbol"])
 
     signal_history_cols = [
@@ -1033,6 +1057,7 @@ def save_outputs(scored: pd.DataFrame, failed_symbols: List[str], config: pd.Dat
         "Eligible_Count": int((scored["Opportunity_Eligible"].astype(str).str.lower() == "yes").sum()),
         "Failed_Count": len(failed_symbols),
         "Top_Symbol": str(top_opportunities["Symbol"].iloc[0]) if not top_opportunities.empty else "",
+        "Top_Confidence_Adjusted_Score": float(top_opportunities["Confidence_Adjusted_Score"].iloc[0]) if not top_opportunities.empty else np.nan,
         "Top_Final_Score": float(top_opportunities["Final_Score"].iloc[0]) if not top_opportunities.empty else np.nan,
     }])
     append_history(OUTPUT_DIR / "run_log.csv", run_log_row, ["Run_Timestamp"])
@@ -1064,16 +1089,16 @@ def write_report(scored: pd.DataFrame, failed_symbols: List[str], universe_summa
         "Suggested_Hold_Days", "Reason", "Key_Risk"
     ]
 
-    top5 = eligible.sort_values("Final_Score", ascending=False).head(5)
-    conf = eligible.sort_values("Confidence_Adjusted_Score", ascending=False).head(5)
-    etfs = eligible[eligible["Universe"].str.lower().eq("etf")].sort_values("Final_Score", ascending=False).head(5)
-    stocks = eligible[eligible["Universe"].str.lower().eq("stock")].sort_values("Final_Score", ascending=False).head(5)
+    top5 = eligible.sort_values(["Confidence_Adjusted_Score", "Symbol"], ascending=[False, True]).head(5)
+    conf = top5  # authoritative ranking is Confidence_Adjusted_Score; alias kept for report headings
+    etfs = eligible[eligible["Universe"].str.lower().eq("etf")].sort_values(["Confidence_Adjusted_Score", "Symbol"], ascending=[False, True]).head(5)
+    stocks = eligible[eligible["Universe"].str.lower().eq("stock")].sort_values(["Confidence_Adjusted_Score", "Symbol"], ascending=[False, True]).head(5)
     low_risk = eligible[
         (eligible["Risk_Score"] >= rules["Risk_Score_Min"])
         & (eligible["Final_Score"] >= rules["Final_Score_Min"])
         & (eligible["Return_21D"] >= rules["Return_21D_Min"])
         & (~eligible["Bucket"].eq("Avoid"))
-    ].sort_values(["Risk_Score", "Final_Score"], ascending=False).head(5)
+    ].sort_values(["Risk_Score", "Confidence_Adjusted_Score", "Symbol"], ascending=[False, False, True]).head(5)
 
     lines = []
     lines.append("# NSE Quant Engine Stage 3.3 Final Report")
@@ -1120,7 +1145,7 @@ def print_summary(scored: pd.DataFrame) -> None:
         "Risk_Score", "Bucket", "Return_21D", "Volatility_20D", "Current_Drawdown_60D",
         "Reason", "Key_Risk"
     ]
-    display_df = eligible.sort_values("Final_Score", ascending=False)[show_cols].head(20).copy()
+    display_df = eligible.sort_values(["Confidence_Adjusted_Score", "Symbol"], ascending=[False, True])[show_cols].head(20).copy()
     for col in ["Final_Score", "Confidence_Adjusted_Score", "Confidence_Score", "Risk_Score", "Return_21D", "Volatility_20D", "Current_Drawdown_60D"]:
         display_df[col] = pd.to_numeric(display_df[col], errors="coerce").round(4)
     print(display_df.to_string(index=False))

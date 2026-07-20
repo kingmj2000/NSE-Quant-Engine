@@ -44,8 +44,8 @@ def _exit_reason(sym: str, prev_row: pd.Series, all_curr: pd.DataFrame,
     if not all_curr.empty and "Symbol" in all_curr.columns:
         sub = all_curr[all_curr["Symbol"].astype(str) == sym]
         if not sub.empty:
-            prev_score = pd.to_numeric(prev_row.get("Final_Score"), errors="coerce")
-            curr_score = pd.to_numeric(sub.iloc[0].get("Final_Score"), errors="coerce")
+            prev_score = pd.to_numeric(prev_row.get("Confidence_Adjusted_Score", prev_row.get("Final_Score")), errors="coerce")
+            curr_score = pd.to_numeric(sub.iloc[0].get("Confidence_Adjusted_Score", sub.iloc[0].get("Final_Score")), errors="coerce")
             if pd.notna(prev_score) and pd.notna(curr_score) and curr_score < prev_score - 3:
                 reasons.append(f"score decay ({prev_score:.1f}→{curr_score:.1f})")
         else:
