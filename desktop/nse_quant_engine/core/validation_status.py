@@ -108,11 +108,15 @@ def decide_verdict(stats: dict) -> tuple[str, str]:
 
 
 def write_status(path: str | Path, verdict: str, grade: str, stats: dict,
-                 horizon: int = 10) -> dict:
+                 horizon: int = 10,
+                 ranking_column: str = "Confidence_Adjusted_Score",
+                 ranking_schema_version: int = 2) -> dict:
     status = {
         "verdict": verdict,
         "evidence_grade": grade,
         "horizon_days": horizon,
+        "ranking_column": ranking_column,
+        "ranking_schema_version": int(ranking_schema_version),
         "stats": {k: (None if v is None else float(v) if isinstance(v, (int, float)) else v)
                   for k, v in stats.items()},
         "schema": "nse_validation_status_v1",
