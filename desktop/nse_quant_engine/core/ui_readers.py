@@ -39,13 +39,18 @@ COLUMN_ALIASES: dict[str, list[str]] = {
 
 
 def pick_column(df: pd.DataFrame, name: str) -> str | None:
-    """Return the first alias present in df.columns, or None."""
-    if df is None or df.empty:
+    """Return the first alias present in df.columns, or None.
+
+    Note: a DataFrame with columns but zero rows is still valid for column
+    resolution — we deliberately do NOT bail out on df.empty.
+    """
+    if df is None:
         return None
-    if name in df.columns:
+    cols = list(df.columns)
+    if name in cols:
         return name
     for c in COLUMN_ALIASES.get(name, []):
-        if c in df.columns:
+        if c in cols:
             return c
     return None
 

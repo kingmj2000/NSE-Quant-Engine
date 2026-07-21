@@ -56,14 +56,21 @@ def _top_n(df: pd.DataFrame, n: int) -> list[str]:
 
 
 def _risk_flag_set(df: pd.DataFrame) -> dict[str, str]:
-    """{symbol: risk_flag_text} for rows where the flag is non-empty."""
+    """{symbol: risk_flag_text} for rows where the flag is truly non-empty
+    (NaN / empty / whitespace all treated as no flag)."""
     if df is None or df.empty or "Symbol" not in df.columns or "Risk_Flag" not in df.columns:
         return {}
     out: dict[str, str] = {}
     for r in df.itertuples(index=False):
-        flag = str(getattr(r, "Risk_Flag", "") or "").strip()
-        if flag:
-            out[str(getattr(r, "Symbol", ""))] = flag
+        raw = getattr(r, "Risk_Flag", None)
+        if raw is None:
+            continue
+        if isinstance(raw, float) and pd.isna(raw):
+            continue
+        flag = str(raw).strip()
+        if not flag or flag.lower() == "nan":
+            continue
+        out[str(getattr(r, "Symbol", ""))] = flag
     return out
 
 
@@ -96,14 +103,17 @@ def build_daily_changes(base_dir: str | Path, out_dir: str | Path | None = None,
         except Exception:
             prev = pd.DataFrame()
 
-    # Official Top-5 / Top-20 diffs.
+    # Official Top-5 / Top-20 diffs — only meaningful when we have a prior
+    # snapshot to diff against. On a first-ever run every current name would
+    # otherwise be flagged as an "entrant".
+    has_prev = not prev.empty
     curr_top5, prev_top5 = set(_top_n(curr, 5)), set(_top_n(prev, 5))
     curr_top20, prev_top20 = set(_top_n(curr, 20)), set(_top_n(prev, 20))
 
-    top5_entries = sorted(curr_top5 - prev_top5)
-    top5_exits = sorted(prev_top5 - curr_top5)
-    top20_entries = sorted(curr_top20 - prev_top20)
-    top20_exits = sorted(prev_top20 - curr_top20)
+    top5_entries  = sorted(curr_top5  - prev_top5)  if has_prev else []
+    top5_exits    = sorted(prev_top5  - curr_top5)  if has_prev else []
+    top20_entries = sorted(curr_top20 - prev_top20) if has_prev else []
+    top20_exits   = sorted(prev_top20 - curr_top20) if has_prev else []
 
     # Rank movers (join current vs previous canonical ranks).
     curr_r = _rank_map(curr)
