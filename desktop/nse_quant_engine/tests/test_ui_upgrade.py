@@ -72,15 +72,15 @@ def test_validation_status_source_is_json(tmp_path):
                "horizon_days": 10, "stats": {}}
     (tmp_path / "output" / "validation_status.json").write_text(json.dumps(payload))
 
-    from ui.decision_center import _read_json  # noqa: PLC0415
-    status = _read_json(tmp_path / "output" / "validation_status.json")
+    from core.ui_readers import read_validation_status  # headless
+    status = read_validation_status(tmp_path / "output")
     assert status["verdict"] == "Validation Positive"
 
 
 def test_missing_output_files_do_not_crash_read_helpers(tmp_path):
-    from ui.decision_center import _read_json, _read_csv  # noqa: PLC0415
-    assert _read_json(tmp_path / "nope.json") == {}
-    assert _read_csv(tmp_path / "nope.csv").empty
+    from core.ui_readers import read_json, read_csv  # headless
+    assert read_json(tmp_path / "nope.json") == {}
+    assert read_csv(tmp_path / "nope.csv").empty
 
 
 # --------------------------------------- Phase 5: shadow can't reorder official

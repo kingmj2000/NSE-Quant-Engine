@@ -24,6 +24,10 @@ from core.candidate_selection import (
     canonical_order, is_eligible,
     PRIMARY_SCORE_COL, SECONDARY_SCORE_COL,
 )
+from core.ui_readers import (
+    pick_column as _pick_col, read_news_digest, read_daily_changes,
+    stories_for_symbol,
+)
 
 
 # ---- shared helpers (kept local; no cycle with run_app.py) ------------------
@@ -64,23 +68,6 @@ DISPLAY_COLS = [
     PRIMARY_SCORE_COL, SECONDARY_SCORE_COL, "Confidence_Score",
     "RSI", "Volatility", "Drawdown", "Risk_Flag", "News_Count", "Event",
 ]
-
-# Fallbacks used when a column is missing from latest_scores.csv but a
-# semantically equivalent alt name exists.
-_ALIASES = {
-    "Volatility": ["Volatility", "Volatility_20D", "Vol"],
-    "Drawdown":   ["Drawdown", "Max_Drawdown_%", "MaxDD"],
-    "Confidence_Score": ["Confidence_Score", "Confidence"],
-    "News_Count": ["News_Count", "News_Recent_Count"],
-    "Event":      ["Event", "Event_Risk_Flag"],
-}
-
-
-def _pick_col(df: pd.DataFrame, name: str) -> str | None:
-    if name in df.columns: return name
-    for a in _ALIASES.get(name, []):
-        if a in df.columns: return a
-    return None
 
 
 def _fmt(v: Any, nd: int = 2) -> str:
@@ -152,10 +139,14 @@ class CandidatesWorkbench(QWidget):
         self.cb_flag.currentIndexChanged.connect(self._apply_filters)
         h.addWidget(self.cb_flag)
 
-        self.cb_source = QComboBox()
-        self.cb_source.addItems(["Official + Shadow", "Official only", "Shadow only", "Both agree"])
-        self.cb_source.currentIndexChanged.connect(self._apply_filters)
-        h.addWidget(self.cb_source)
+        # Mode: strictly separated. Official is the pipeline authority.
+        # Shadow shows shadow-only ordering (never merged into official).
+        # Compare uses OFFICIAL ordering and appends Shadow_Rank / Shadow_Score.
+        self.cb_mode = QComboBox()
+        self.cb_mode.addItems(["Official", "Shadow", "Compare"])
+        self.cb_mode.currentIndexChanged.connect(self._on_mode_changed)
+        h.addWidget(QLabel("Mode:"))
+        h.addWidget(self.cb_mode)
 
         self.cb_new20 = QComboBox()
         self.cb_new20.addItems(["Any", "New Top-20 entrant only"])
@@ -212,7 +203,7 @@ class CandidatesWorkbench(QWidget):
         rc     = _read_csv(self.OUT / "rank_changes.csv")
         shadow = _read_csv(self.OUT / "latest_scores_v4_shadow.csv")
 
-        # Rank-change lookup
+        # Rank-change lookup (official only)
         self._rank_change.clear()
         if not rc.empty and {"Symbol", "Rank_Change"}.issubset(rc.columns):
             for r in rc.itertuples():
@@ -220,13 +211,39 @@ class CandidatesWorkbench(QWidget):
                 except Exception: pass
 
         self._trade_syms = set(trade["Symbol"].astype(str).tolist()) if not trade.empty and "Symbol" in trade.columns else set()
-        self._shadow_syms = set(shadow["Symbol"].astype(str).tolist()) if not shadow.empty and "Symbol" in shadow.columns else set()
 
-        # Canonical order retains ALL rows (eligible + ineligible + flagged).
-        df = canonical_order(scores, eligible_only=False)
-        self._df_all = df.reset_index(drop=True)
+        # OFFICIAL: canonical order retains ALL rows.
+        self._df_official = canonical_order(scores, eligible_only=False).reset_index(drop=True)
 
-        # Populate filter combos with distinct values
+        # SHADOW: keep strictly separate. Order shadow by its own score
+        # (Confidence_Adjusted_Score preferred, then Final_Score). Never
+        # mixed into official ordering. Symbol is the join key for Compare.
+        self._df_shadow = pd.DataFrame()
+        self._shadow_rank_map: dict[str, int] = {}
+        self._shadow_score_map: dict[str, float] = {}
+        if not shadow.empty and "Symbol" in shadow.columns:
+            score_col = None
+            for c in (PRIMARY_SCORE_COL, SECONDARY_SCORE_COL, "Opportunity_Score"):
+                if c in shadow.columns:
+                    score_col = c; break
+            if score_col is not None:
+                s = shadow.copy()
+                s["_score"] = pd.to_numeric(s[score_col], errors="coerce")
+                s = s.sort_values(["_score", "Symbol"], ascending=[False, True],
+                                  na_position="last").reset_index(drop=True)
+                for i, r in s.iterrows():
+                    sym = str(r["Symbol"])
+                    self._shadow_rank_map[sym] = i + 1
+                    try: self._shadow_score_map[sym] = float(r["_score"])
+                    except Exception: pass
+                self._df_shadow = s.drop(columns=["_score"])
+            else:
+                self._df_shadow = shadow.copy()
+
+        self._apply_mode_source()
+
+        # Populate filter combos from currently-active df
+        df = self._df_all
         self._reload_combo(self.cb_universe, "All universes",
                            sorted(df["Universe"].dropna().astype(str).unique().tolist()) if "Universe" in df.columns else [])
         self._reload_combo(self.cb_bucket, "All buckets",
@@ -234,17 +251,22 @@ class CandidatesWorkbench(QWidget):
 
         self._apply_filters()
 
-    def _reload_combo(self, combo: QComboBox, first: str, items: list[str]):
-        combo.blockSignals(True)
-        current = combo.currentText()
-        combo.clear()
-        combo.addItem(first)
-        for it in items:
-            combo.addItem(it)
-        # restore selection when possible
-        idx = combo.findText(current)
-        if idx >= 0: combo.setCurrentIndex(idx)
-        combo.blockSignals(False)
+    def _on_mode_changed(self):
+        # Switching Official ↔ Shadow swaps the base dataset entirely.
+        self._apply_mode_source()
+        df = self._df_all
+        self._reload_combo(self.cb_universe, "All universes",
+                           sorted(df["Universe"].dropna().astype(str).unique().tolist()) if "Universe" in df.columns else [])
+        self._reload_combo(self.cb_bucket, "All buckets",
+                           sorted(df["Bucket"].dropna().astype(str).unique().tolist()) if "Bucket" in df.columns else [])
+        self._apply_filters()
+
+    def _apply_mode_source(self):
+        mode = self.cb_mode.currentText()
+        if mode == "Shadow":
+            self._df_all = self._df_shadow.copy().reset_index(drop=True)
+        else:  # Official OR Compare — both use official as the base ordering
+            self._df_all = self._df_official.copy().reset_index(drop=True)
 
     # ------------- Filters --------------------------------------------------
     def _apply_filters(self):
@@ -278,31 +300,18 @@ class CandidatesWorkbench(QWidget):
             m &= df["Bucket"].astype(str) == self.cb_bucket.currentText()
 
         elig = self.cb_eligible.currentText()
-        if elig != "All":
+        if elig != "All" and "Opportunity_Eligible" in df.columns:
             elig_mask = is_eligible(df)
             m &= elig_mask if elig == "Eligible" else ~elig_mask
 
         flag = self.cb_flag.currentText()
-        if flag != "All":
-            if "Risk_Flag" in df.columns:
-                has_flag = df["Risk_Flag"].astype(str).str.strip().ne("") & df["Risk_Flag"].notna()
-                m &= has_flag if flag == "Flagged" else ~has_flag
-
-        src = self.cb_source.currentText()
-        if src != "Official + Shadow" and "Symbol" in df.columns:
-            syms = df["Symbol"].astype(str)
-            in_off = pd.Series([True] * len(df), index=df.index)  # scores IS official
-            in_sh  = syms.isin(self._shadow_syms)
-            if src == "Official only":
-                m &= in_off & ~in_sh
-            elif src == "Shadow only":
-                m &= ~in_off & in_sh
-            elif src == "Both agree":
-                m &= in_off & in_sh
+        if flag != "All" and "Risk_Flag" in df.columns:
+            has_flag = df["Risk_Flag"].astype(str).str.strip().ne("") & df["Risk_Flag"].notna()
+            m &= has_flag if flag == "Flagged" else ~has_flag
 
         if self.cb_new20.currentIndex() > 0:
-            rebal = _read_json(self.OUT / "rebalance_diff.json")
-            added20 = set((rebal.get("top20", {}) or {}).get("added", []) or [])
+            daily = read_daily_changes(self.OUT)
+            added20 = set(daily.get("top20_entries") or [])
             if added20 and "Symbol" in df.columns:
                 m &= df["Symbol"].astype(str).isin(added20)
             else:
@@ -310,16 +319,23 @@ class CandidatesWorkbench(QWidget):
 
         self._df_view = df[m].reset_index(drop=True)
         self._populate_table(self._df_view)
-        self.lbl_count.setText(f"{len(self._df_view):,} candidates "
-                               f"of {len(self._df_all):,} (canonical order)")
+        mode = self.cb_mode.currentText()
+        suffix = {"Official": "official ranking (CAS)",
+                  "Shadow":   "SHADOW ranking — informational, not authoritative",
+                  "Compare":  "official ranking + shadow columns"}.get(mode, "")
+        self.lbl_count.setText(f"{len(self._df_view):,} of {len(self._df_all):,} — {suffix}")
 
     # ------------- Table population ----------------------------------------
     def _populate_table(self, df: pd.DataFrame):
+        mode = self.cb_mode.currentText()
         headers = [
             "Rank", "ΔRank", "Symbol", "Name", "Universe", "Bucket",
             "Adj Score", "Raw Score", "Confidence", "RSI", "Vol", "DD",
             "Risk", "News", "Event",
         ]
+        if mode == "Compare":
+            headers += ["Shadow Rank", "Shadow Score"]
+
         model = QStandardItemModel(len(df), len(headers))
         model.setHorizontalHeaderLabels(headers)
 
@@ -331,32 +347,42 @@ class CandidatesWorkbench(QWidget):
             "Bucket":     "Bucket",
             "Adj Score":  PRIMARY_SCORE_COL,
             "Raw Score":  SECONDARY_SCORE_COL,
-            "Confidence": _pick_col(df, "Confidence_Score") or "Confidence_Score",
-            "RSI":        "RSI",
-            "Vol":        _pick_col(df, "Volatility") or "Volatility",
-            "DD":         _pick_col(df, "Drawdown") or "Drawdown",
+            "Confidence": _pick_col(df, "Confidence") or "Confidence_Score",
+            "RSI":        _pick_col(df, "RSI") or "RSI_14",
+            "Vol":        _pick_col(df, "Volatility") or "Volatility_20D",
+            "DD":         _pick_col(df, "Drawdown") or "Current_Drawdown_60D",
             "Risk":       "Risk_Flag",
             "News":       _pick_col(df, "News_Count") or "News_Count",
             "Event":      _pick_col(df, "Event") or "Event",
         }
 
         for r, (_, row) in enumerate(df.iterrows()):
+            sym = str(row.get("Symbol", ""))
             for c, h in enumerate(headers):
                 if h == "ΔRank":
-                    sym = str(row.get("Symbol", ""))
-                    d = self._rank_change.get(sym)
-                    if d is None or (isinstance(d, float) and pd.isna(d)):
+                    # In Shadow mode there is no official ΔRank — leave blank.
+                    if mode == "Shadow":
                         txt = ""
                     else:
-                        di = int(d)
-                        txt = ("▲" if di > 0 else ("▼" if di < 0 else "•")) + str(abs(di))
+                        d = self._rank_change.get(sym)
+                        if d is None or (isinstance(d, float) and pd.isna(d)):
+                            txt = ""
+                        else:
+                            di = int(d)
+                            txt = ("▲" if di > 0 else ("▼" if di < 0 else "•")) + str(abs(di))
                     it = QStandardItem(txt)
+                elif h == "Shadow Rank":
+                    sr = self._shadow_rank_map.get(sym)
+                    it = QStandardItem("" if sr is None else str(int(sr)))
+                elif h == "Shadow Score":
+                    ss = self._shadow_score_map.get(sym)
+                    it = QStandardItem(_fmt(ss, 1) if ss is not None else "")
                 else:
                     src = col_map.get(h, h)
                     val = row.get(src) if src in row.index else None
                     if h in ("Adj Score", "Raw Score", "Confidence"):
                         txt = _fmt(val, 1)
-                    elif h in ("Rank",):
+                    elif h == "Rank":
                         try: txt = str(int(float(val)))
                         except Exception: txt = ""
                     elif h in ("RSI", "Vol", "DD"):
@@ -652,12 +678,9 @@ class CandidatesWorkbench(QWidget):
         wrap = QFrame(); wrap.setObjectName("Card"); wrap.setProperty("accent", "dim")
         v = QVBoxLayout(wrap); v.setContentsMargins(14, 12, 14, 12); v.setSpacing(6)
         v.addWidget(_section_label("News & filings (context only)"))
-        news_path = self.OUT / "news_market_latest.csv"
-        rows = 0
-        if news_path.exists():
-            df = _read_csv(news_path)
-            if not df.empty and "Symbol" in df.columns:
-                rows = int((df["Symbol"].astype(str) == sym).sum())
+        digest = read_news_digest(self.OUT)
+        stories = stories_for_symbol(digest, sym)
+        rows = len(stories)
         lbl = QLabel(f"{rows} recent headline(s) referencing {sym}." if rows
                      else f"No recent headlines linked to {sym}.")
         lbl.setStyleSheet("color:#B7BCC6;font-size:11.5px;background:transparent;")

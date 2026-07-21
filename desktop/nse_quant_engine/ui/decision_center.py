@@ -30,6 +30,10 @@ from core.candidate_selection import (
     top_official_candidates, canonical_order,
     PRIMARY_SCORE_COL, SECONDARY_SCORE_COL,
 )
+from core.ui_readers import (
+    read_validation_status, read_rebalance_diff, read_daily_changes,
+    read_data_health, read_shadow_summary, pick_column,
+)
 
 
 # ---- shared factories (kept local so this module has no run_app.py cycle) ---
@@ -137,28 +141,30 @@ class DecisionCenterView(QWidget):
         self._clear()
         OUT = self.OUT
 
-        status   = _read_json(OUT / "validation_status.json")
+        status   = read_validation_status(OUT)
         manifest = _read_json(OUT / "run_manifest.json")
         macro    = _read_json(OUT / "macro_context.json")
         tilt     = _read_json(OUT / "regime_tilt_report.json")
-        rebal    = _read_json(OUT / "rebalance_diff.json")
-        shadow_j = _read_json(OUT / "shadow_vs_official.json")
+        rebal    = read_rebalance_diff(OUT)
+        daily    = read_daily_changes(OUT)
+        shadow_j = read_shadow_summary(OUT)
+        health   = read_data_health(self.BASE)
 
         scores   = _read_csv(OUT / "latest_scores.csv")
         trade    = _read_csv(OUT / "trade_plan_latest.csv")
         fwd      = _read_csv(OUT / "forward_return_history.csv")
         rank_ch  = _read_csv(OUT / "rank_changes.csv")
 
-        verdict  = str(status.get("verdict") or "Insufficient History")
-        grade    = str(status.get("evidence_grade") or "Insufficient Evidence")
-        is_live  = (verdict == "Validation Positive")
+        verdict  = status["verdict"]
+        grade    = status["evidence_grade"]
+        is_live  = status["is_valid_positive"]
         mode     = "LIVE" if is_live else "WATCHLIST ONLY"
         regime   = str(macro.get("regime") or "—")
         finished = manifest.get("completed_at") or "—"
 
         self._body.addWidget(self._banner(verdict, grade, mode, regime, finished, is_live))
         self._body.addWidget(self._section_validation_progress(status, fwd))
-        self._body.addWidget(self._section_todays_changes(rank_ch, rebal, tilt, shadow_j, status, macro))
+        self._body.addWidget(self._section_todays_changes(daily, rebal, tilt, shadow_j, health, macro))
         self._body.addWidget(self._section_top_candidates(scores, trade, rank_ch))
         self._body.addWidget(self._section_review_queue(scores, trade, rank_ch))
         self._body.addWidget(self._section_overlay_activation())
@@ -246,66 +252,70 @@ class DecisionCenterView(QWidget):
         return wrap
 
     # ---------------- C. Today's changes ------------------------------------
-    def _section_todays_changes(self, rank_ch: pd.DataFrame, rebal: dict,
+    def _section_todays_changes(self, daily: dict, rebal: dict,
                                 tilt: dict, shadow_j: dict,
-                                status: dict, macro: dict) -> QFrame:
+                                health: dict, macro: dict) -> QFrame:
         wrap = QFrame(); wrap.setObjectName("Card"); wrap.setProperty("accent", "indigo")
         v = QVBoxLayout(wrap); v.setContentsMargins(16, 12, 16, 14); v.setSpacing(6)
         v.addWidget(_section_label("Today's changes"))
 
-        bullets: list[tuple[str, str]] = []  # (text, tone)
+        bullets: list[tuple[str, str]] = []
 
-        # Top-5 / Top-20 entrants + leavers from rebalance_diff.json
-        added_top5   = list((rebal.get("top5", {}) or {}).get("added", []) or [])
-        removed_top5 = list((rebal.get("top5", {}) or {}).get("removed", []) or [])
-        added_top20  = list((rebal.get("top20", {}) or {}).get("added", []) or [])
-        removed_top20= list((rebal.get("top20", {}) or {}).get("removed", []) or [])
-        if added_top5:   bullets.append((f"↑ Top-5 entrants: {', '.join(added_top5)}", "green"))
-        if removed_top5: bullets.append((f"↓ Top-5 exits: {', '.join(removed_top5)}", "amber"))
-        if added_top20:  bullets.append((f"↑ Top-20 entrants: {', '.join(added_top20)}", "blue"))
-        if removed_top20:bullets.append((f"↓ Top-20 exits: {', '.join(removed_top20)}", "dim"))
+        if not daily.get("previous_snapshot_available", True):
+            bullets.append(("First snapshot on record — no prior run to diff against.", "dim"))
 
-        # Rank gainers / losers from rank_changes.csv
-        if not rank_ch.empty and {"Symbol", "Rank_Change"}.issubset(rank_ch.columns):
-            rc = rank_ch.copy()
-            rc["Rank_Change"] = pd.to_numeric(rc["Rank_Change"], errors="coerce")
-            gain = rc.dropna(subset=["Rank_Change"]).nlargest(3, "Rank_Change")
-            lose = rc.dropna(subset=["Rank_Change"]).nsmallest(3, "Rank_Change")
-            if not gain.empty:
-                bullets.append(("Biggest rank gainers: " +
-                    ", ".join(f"{r.Symbol} ({int(r.Rank_Change):+d})" for r in gain.itertuples()),
-                    "green"))
-            if not lose.empty:
-                bullets.append(("Biggest rank losers: " +
-                    ", ".join(f"{r.Symbol} ({int(r.Rank_Change):+d})" for r in lose.itertuples()),
-                    "amber"))
+        # Top-5 / Top-20 entrants + leavers from daily_changes.json (structured)
+        t5in  = list(daily.get("top5_entries") or [])
+        t5out = list(daily.get("top5_exits") or [])
+        t20in = list(daily.get("top20_entries") or [])
+        t20out= list(daily.get("top20_exits") or [])
+        if t5in:  bullets.append((f"↑ Top-5 entrants: {', '.join(t5in)}", "green"))
+        if t5out: bullets.append((f"↓ Top-5 exits: {', '.join(t5out)}", "amber"))
+        if t20in: bullets.append((f"↑ Top-20 entrants: {', '.join(t20in)}", "blue"))
+        if t20out:bullets.append((f"↓ Top-20 exits: {', '.join(t20out)}", "dim"))
 
-        # Regime change
-        regime_prev = str(macro.get("previous_regime") or "")
-        regime_now  = str(macro.get("regime") or "")
-        if regime_prev and regime_now and regime_prev != regime_now:
-            bullets.append((f"Market regime change: {regime_prev} → {regime_now}", "violet"))
+        # Rank gainers / losers from structured daily_changes
+        for r in (daily.get("largest_rank_gainers") or [])[:3]:
+            bullets.append((f"Rank gainer: {r.get('Symbol')} "
+                            f"({int(r.get('rank_change', 0)):+d})", "green"))
+        for r in (daily.get("largest_rank_losers") or [])[:3]:
+            bullets.append((f"Rank loser: {r.get('Symbol')} "
+                            f"({int(r.get('rank_change', 0)):+d})", "amber"))
+
+        # New / cleared risk flags
+        for f in (daily.get("new_risk_flags") or [])[:5]:
+            bullets.append((f"⚠ New risk flag: {f.get('Symbol')} — {f.get('flag')}", "amber"))
+        for f in (daily.get("cleared_risk_flags") or [])[:5]:
+            bullets.append((f"✓ Risk flag cleared: {f.get('Symbol')}", "green"))
+
+        # Regime change from daily_changes (falls back to macro dict)
+        rc = daily.get("regime_change")
+        if rc and rc.get("from") and rc.get("to"):
+            bullets.append((f"Market regime change: {rc['from']} → {rc['to']}", "violet"))
+
+        # Rebalance headline (Top-5 basket turnover / recommendation)
+        rec = rebal.get("recommendation")
+        turn = rebal.get("estimated_turnover_pct")
+        if rec:
+            extra = f" (turnover ~{turn}%)" if turn is not None else ""
+            bullets.append((f"Rebalance: {rec}{extra}", "blue"))
 
         # Regime tilt notes (if any)
         note = str(tilt.get("note") or tilt.get("summary") or "").strip()
         if note:
             bullets.append((f"Regime tilt: {note}", "violet"))
 
-        # Shadow vs official change
-        champ = str(shadow_j.get("champion") or "").strip()
-        streak = shadow_j.get("streak") or shadow_j.get("shadow_lead_streak")
-        if champ:
-            tone = "green" if champ.lower() == "official" else "amber"
-            extra = f" (streak {streak})" if streak else ""
-            bullets.append((f"Shadow vs official: {champ}{extra}", tone))
+        # Shadow vs official (from structured summary)
+        champ = shadow_j.get("champion")
+        if champ and champ != "review":
+            tone = "green" if champ == "official" else "amber"
+            bullets.append((f"Shadow vs official: {champ} leads on filtered EV/day", tone))
 
-        # Data-source failures — data_health.json
-        dh = _read_json(self.BASE / "data" / "data_health.json")
-        if dh:
-            reds = [k for k, meta in dh.items()
-                    if isinstance(meta, dict) and str(meta.get("status", "")).lower() == "red"]
-            if reds:
-                bullets.append((f"Data feed failures: {', '.join(reds)}", "red"))
+        # Data-source failures
+        if health.get("reds"):
+            bullets.append((f"Data feed failures: {', '.join(health['reds'])}", "red"))
+        if health.get("ambers"):
+            bullets.append((f"Data feed degraded: {', '.join(health['ambers'])}", "amber"))
 
         if not bullets:
             v.addWidget(_empty_note("No material changes vs. previous run."))
@@ -378,9 +388,11 @@ class DecisionCenterView(QWidget):
                 (_fmt(r.get(PRIMARY_SCORE_COL)), "#9CC6FF"),
                 (_fmt(r.get(SECONDARY_SCORE_COL)), "#6B6F76"),
                 (str(r.get("Bucket", "") or "—"), "#C6A8FA"),
-                (_fmt(r.get("RSI")), "#ECEDEE"),
-                (_fmt(r.get("Volatility") or r.get("Vol") or r.get("Volatility_20D")), "#ECEDEE"),
-                (_fmt(r.get("Drawdown") or r.get("Max_Drawdown_%")), "#F2B13C"),
+                (_fmt(r.get("RSI_14") if "RSI_14" in r.index else r.get("RSI")), "#ECEDEE"),
+                (_fmt(r.get("Volatility_20D") if "Volatility_20D" in r.index else
+                      (r.get("Volatility_60D") if "Volatility_60D" in r.index else r.get("Volatility"))), "#ECEDEE"),
+                (_fmt(r.get("Current_Drawdown_60D") if "Current_Drawdown_60D" in r.index else
+                      (r.get("Max_Drawdown_60D") if "Max_Drawdown_60D" in r.index else r.get("Drawdown"))), "#F2B13C"),
                 (str(r.get("Risk_Flag", "") or "")[:20], "#F2B13C"),
             ]
             for c, (txt, col) in enumerate(cells):
@@ -427,21 +439,24 @@ class DecisionCenterView(QWidget):
             for r in big.itertuples():
                 items.append((f"↕ Large rank move: {r.Symbol} ({int(r.Rank_Change):+d})", "blue"))
 
-        # 4. Official / shadow disagreement
-        cmp_j = _read_json(self.OUT / "shadow_vs_official.json")
-        if cmp_j:
-            disagreement = cmp_j.get("disagreement") or cmp_j.get("delta_top5")
-            if disagreement:
-                items.append((f"⇄ Official vs shadow disagreement: {disagreement}", "violet"))
+        # 4. Official / shadow disagreement — top-25 overlap (Jaccard) low
+        cmp_j = read_shadow_summary(self.OUT)
+        jac = cmp_j.get("jaccard_top25")
+        try:
+            if jac is not None and float(jac) < 0.5:
+                items.append((f"⇄ Official vs shadow Top-25 overlap only {float(jac):.0%}",
+                              "violet"))
+        except Exception:
+            pass
+        if cmp_j.get("champion") == "shadow":
+            items.append(("⇄ Shadow model leads official on filtered EV/day", "violet"))
 
-        # 5. Data quality reds/amber
-        dh = _read_json(self.BASE / "data" / "data_health.json")
-        for k, meta in (dh or {}).items():
-            if not isinstance(meta, dict): continue
-            status = str(meta.get("status", "")).lower()
-            if status in ("red", "amber"):
-                tone = "red" if status == "red" else "amber"
-                items.append((f"● Data feed {status.upper()}: {k}", tone))
+        # 5. Data quality reds/amber (structured feeds dict)
+        health = read_data_health(self.BASE)
+        for k in health.get("reds", []):
+            items.append((f"● Data feed RED: {k}", "red"))
+        for k in health.get("ambers", []):
+            items.append((f"● Data feed AMBER: {k}", "amber"))
 
         if not items:
             v.addWidget(_empty_note("Nothing needs human review right now."))

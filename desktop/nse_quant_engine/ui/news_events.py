@@ -129,8 +129,10 @@ class NewsEventsView(QWidget):
 
     # ---------- data ----------
     def refresh(self) -> None:
-        self._digest = _read_digest()
-        stories = self._digest.get("stories") or []
+        # Shared structured reader — same source Decision Center + Workbench use.
+        from core.ui_readers import read_news_digest  # local import: Qt-safe
+        self._digest = read_news_digest(OUTPUT_DIR)
+        stories = list(self._digest.get("stories") or [])
         if not stories:
             df = _read_csv_fallback()
             if not df.empty:
@@ -138,13 +140,14 @@ class NewsEventsView(QWidget):
         self._stories = stories
 
         # KPIs
-        counts = self._digest.get("counts", {})
+        counts = self._digest.get("counts", {}) or {}
         self._kpis["Last refresh"].setText(str(self._digest.get("generated_at", "—")))
         self._kpis["Candidates"].setText(str(counts.get("candidates", "—")))
         self._kpis["Recent items"].setText(str(counts.get("candidate_stories", len(stories))))
         self._kpis["Official filings"].setText(str(counts.get("official_filings", "—")))
         self._kpis["Unknown-date"].setText(str(counts.get("unknown_date", "—")))
-        failed = sum(1 for h in self._digest.get("source_health", []) if h.get("Fetch_Status") == "failed")
+        failed = sum(1 for h in (self._digest.get("source_health") or [])
+                     if isinstance(h, dict) and h.get("Fetch_Status") == "failed")
         self._kpis["Failed sources"].setText(str(failed))
 
         # populate event dropdown

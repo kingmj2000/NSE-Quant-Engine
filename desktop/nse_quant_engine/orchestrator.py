@@ -103,10 +103,19 @@ def build_steps(include_shadow: bool = True, include_fetch: bool = True) -> list
         ]
     steps.append(Step("dq_report_builder",  _module("dq_report_builder")))
     steps.append(Step("nse_quant_engine",  _runpy("nse_quant_engine.py"), network=True))
+    def _run_daily_changes():
+        if str(BASE) not in sys.path:
+            sys.path.insert(0, str(BASE))
+        from core.daily_changes import build_daily_changes
+        build_daily_changes(BASE)
+
     steps += [
         Step("validation_builder",          _runpy("validation_builder.py")),
         Step("cross_sectional_validation",  _runpy("cross_sectional_validation.py")),
         Step("trade_plan_builder",          _runpy("trade_plan_builder.py")),
+        # Post-ranking structured daily diff for the UI — read-only over
+        # latest_scores.csv + score_history.csv + macro_context.json.
+        Step("daily_changes_builder",       _run_daily_changes, skippable=True),
         Step("news_market_builder",         _runpy("news_market_builder.py"), network=True, skippable=True),
     ]
     if include_shadow:
