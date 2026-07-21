@@ -267,7 +267,48 @@ class CandidatesWorkbench(QWidget):
             self._df_all = self._df_shadow.copy().reset_index(drop=True)
         else:  # Official OR Compare — both use official as the base ordering
             self._df_all = self._df_official.copy().reset_index(drop=True)
-...
+
+    # ------------- Filters --------------------------------------------------
+    def _apply_filters(self):
+        df = self._df_all
+        if df.empty:
+            self._df_view = df
+            self.table.setModel(QStandardItemModel(0, 0))
+            self.lbl_count.setText("0 candidates")
+            self._render_inspector(None)
+            return
+
+        m = pd.Series([True] * len(df), index=df.index)
+
+        q = self.txt_search.text().strip().lower()
+        if q:
+            sym = df["Symbol"].astype(str).str.lower() if "Symbol" in df.columns else pd.Series("", index=df.index)
+            nam = df["Name"].astype(str).str.lower()   if "Name"   in df.columns else pd.Series("", index=df.index)
+            m &= sym.str.contains(q, na=False) | nam.str.contains(q, na=False)
+
+        if self.cb_universe.currentIndex() > 0 and "Universe" in df.columns:
+            m &= df["Universe"].astype(str) == self.cb_universe.currentText()
+
+        if "Universe" in df.columns:
+            t = self.cb_type.currentText()
+            if t == "Stocks only":
+                m &= ~df["Universe"].astype(str).str.contains("ETF", case=False, na=False)
+            elif t == "ETFs only":
+                m &= df["Universe"].astype(str).str.contains("ETF", case=False, na=False)
+
+        if self.cb_bucket.currentIndex() > 0 and "Bucket" in df.columns:
+            m &= df["Bucket"].astype(str) == self.cb_bucket.currentText()
+
+        elig = self.cb_eligible.currentText()
+        if elig != "All" and "Opportunity_Eligible" in df.columns:
+            elig_mask = is_eligible(df)
+            m &= elig_mask if elig == "Eligible" else ~elig_mask
+
+        flag = self.cb_flag.currentText()
+        if flag != "All" and "Risk_Flag" in df.columns:
+            has_flag = df["Risk_Flag"].astype(str).str.strip().ne("") & df["Risk_Flag"].notna()
+            m &= has_flag if flag == "Flagged" else ~has_flag
+
         if self.cb_new20.currentIndex() > 0:
             daily = read_daily_changes(self.OUT)
             added20 = set(daily.get("top20_entries") or [])
