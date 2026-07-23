@@ -41,6 +41,7 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 LATEST_SCORES = OUTPUT_DIR / "latest_scores.csv"
 RANK_CHANGES = OUTPUT_DIR / "rank_changes.csv"
+DAILY_CHANGES = OUTPUT_DIR / "daily_changes.json"
 ALIAS_OVERRIDES = DATA_DIR / "news_alias_overrides.csv"
 NEWS_CACHE = DATA_DIR / "news_cache.csv"
 SOURCE_HEALTH = DATA_DIR / "news_source_health.json"
@@ -58,13 +59,16 @@ MARKET_QUERIES = [
     "crude oil rupee India equity market",
 ]
 
-# Caps
-MAX_CANDIDATES = 30
-MAX_QUERIES_PER_SYMBOL = 2
-MAX_STORIES_PER_SYMBOL = 15
-RANK_GAINER_MIN = 5
+# Caps (explicit constants — enforced by _select_candidates priority)
+MAX_CANDIDATES = 30                 # max symbols per run
+MAX_QUERIES_PER_SYMBOL = 2          # media queries per symbol
+MAX_STORIES_PER_SYMBOL = 15         # retained stories per symbol per run
+RANK_GAINER_MIN = 5                 # min rank improvement to qualify a "gainer"
 RECENT_WINDOW_DAYS = 30
 NSE_WINDOW_DAYS = 14
+
+# Risk-flag values that must NEVER trigger candidate expansion.
+NEUTRAL_RISK_FLAGS = {"", "clean", "none", "nan", "n/a", "na", "-", "ok"}
 
 DISCLAIMER = (
     "News and filings are human-review context only. "
