@@ -176,8 +176,12 @@ class NewsEventsView(QWidget):
         elif t == "Media":
             rows = [r for r in rows if not bool(r.get("Is_Official_Filing"))]
         elif t == "New since last run":
-            gen = self._digest.get("generated_at", "")
-            rows = [r for r in rows if str(r.get("First_Seen", "")) >= str(gen)[:10]]
+            # Compare First_Seen against the previous *successful* refresh
+            # timestamp so this works correctly across multiple same-day runs.
+            cutoff = (self._digest.get("previous_successful_refresh_at")
+                      or self._digest.get("last_successful_refresh_at")
+                      or self._digest.get("generated_at", ""))
+            rows = [r for r in rows if str(r.get("First_Seen", "")) > str(cutoff)]
         ev = self.f_event.currentText()
         if ev != "All events":
             rows = [r for r in rows if r.get("Event_Category") == ev]

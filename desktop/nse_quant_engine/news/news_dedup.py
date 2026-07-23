@@ -53,8 +53,19 @@ def _jaccard(a: set[str], b: set[str]) -> float:
 
 
 def dedup(rows: pd.DataFrame, fuzzy_threshold: float = 0.9) -> pd.DataFrame:
-    """Cluster rows, return one representative per cluster with All_Sources,
-    Duplicate_Count. Official filings cluster among themselves only."""
+    """Cluster rows within (Symbol, Source_Type) — never globally.
+
+    The same article may legitimately map to multiple candidate symbols
+    (e.g. an M&A story mentioning both AAA and BBB). We therefore scope
+    clustering so that:
+      - A single article that mentions AAA and BBB remains present under
+        BOTH symbols; duplicates for AAA merge only with other AAA rows.
+      - Official filings never merge into media rows (kept in a separate
+        (symbol, is_filing) bucket).
+      - Multiple distinct same-day filings for one symbol remain separate
+        (different URL / different normalized title / low token overlap).
+    All_Sources / Duplicate_Count remain meaningful per-symbol.
+    """
     if rows is None or rows.empty:
         return rows.copy() if rows is not None else pd.DataFrame()
 
@@ -63,32 +74,28 @@ def dedup(rows: pd.DataFrame, fuzzy_threshold: float = 0.9) -> pd.DataFrame:
     df["_title_key"] = df["Canonical_Title"].map(normalize_title)
     df["_tokens"] = df["Canonical_Title"].map(_title_tokens)
     df["_is_filing"] = df.get("Is_Official_Filing", False).astype(bool)
+    df["_sym"] = df.get("Symbol", "").astype(str).str.upper()
 
     cluster_id = [-1] * len(df)
-    reps: list[int] = []
 
-    for i in range(len(df)):
-        if cluster_id[i] != -1:
-            continue
-        cluster_id[i] = i
-        reps.append(i)
-        for j in range(i + 1, len(df)):
-            if cluster_id[j] != -1:
+    for (_sym, _filing), grp in df.groupby(["_sym", "_is_filing"], sort=False):
+        idxs = list(grp.index)
+        for a_pos, i in enumerate(idxs):
+            if cluster_id[i] != -1:
                 continue
-            # filings never merge into media (and vice versa)
-            if df.at[i, "_is_filing"] != df.at[j, "_is_filing"]:
-                continue
-            same_url = df.at[i, "_url_key"] and df.at[i, "_url_key"] == df.at[j, "_url_key"]
-            same_title = df.at[i, "_title_key"] and df.at[i, "_title_key"] == df.at[j, "_title_key"]
-            fuzzy = _jaccard(df.at[i, "_tokens"], df.at[j, "_tokens"]) >= fuzzy_threshold
-            if same_url or same_title or fuzzy:
-                cluster_id[j] = i
+            cluster_id[i] = i
+            for j in idxs[a_pos + 1:]:
+                if cluster_id[j] != -1:
+                    continue
+                same_url = df.at[i, "_url_key"] and df.at[i, "_url_key"] == df.at[j, "_url_key"]
+                same_title = df.at[i, "_title_key"] and df.at[i, "_title_key"] == df.at[j, "_title_key"]
+                fuzzy = _jaccard(df.at[i, "_tokens"], df.at[j, "_tokens"]) >= fuzzy_threshold
+                if same_url or same_title or fuzzy:
+                    cluster_id[j] = i
 
     df["_cluster"] = cluster_id
     out_rows = []
-    for cid, grp in df.groupby("_cluster", sort=False):
-        # pick primary: prefer official filings, then earliest First_Seen,
-        # then earliest Published_Date
+    for _cid, grp in df.groupby("_cluster", sort=False):
         grp = grp.copy()
         grp["_pd"] = pd.to_datetime(grp["Published_Date"], errors="coerce")
         grp["_fs"] = pd.to_datetime(grp["First_Seen"], errors="coerce")
@@ -99,7 +106,6 @@ def dedup(rows: pd.DataFrame, fuzzy_threshold: float = 0.9) -> pd.DataFrame:
         )
         primary = grp.iloc[0].copy()
         sources = [str(s) for s in grp["Source"].fillna("").tolist() if str(s)]
-        # dedup while preserving order
         seen = set(); ordered = []
         for s in sources:
             if s not in seen:
@@ -109,13 +115,16 @@ def dedup(rows: pd.DataFrame, fuzzy_threshold: float = 0.9) -> pd.DataFrame:
         out_rows.append(primary)
 
     out = pd.DataFrame(out_rows)
-    return out.drop(columns=[c for c in ("_url_key", "_title_key", "_tokens", "_is_filing", "_cluster", "_pd", "_fs") if c in out.columns]).reset_index(drop=True)
+    return out.drop(columns=[c for c in ("_url_key", "_title_key", "_tokens", "_is_filing", "_sym", "_cluster", "_pd", "_fs") if c in out.columns]).reset_index(drop=True)
 
 
 def cluster_key(row: pd.Series) -> str:
+    """Symbol-scoped cluster key so cache upserts and dedup never collapse
+    two different candidates' rows into one representative."""
+    sym = str(row.get("Symbol", "")).upper()
+    filing = "f" if bool(row.get("Is_Official_Filing", False)) else "m"
     u = canonical_url(str(row.get("URL", "")))
     if u:
-        return f"u::{u}"
+        return f"u::{sym}::{filing}::{u}"
     t = normalize_title(str(row.get("Canonical_Title", "")))
-    sym = str(row.get("Symbol", "")).upper()
-    return f"t::{sym}::{t}"
+    return f"t::{sym}::{filing}::{t}"

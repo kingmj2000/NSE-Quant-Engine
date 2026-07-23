@@ -41,6 +41,7 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 LATEST_SCORES = OUTPUT_DIR / "latest_scores.csv"
 RANK_CHANGES = OUTPUT_DIR / "rank_changes.csv"
+DAILY_CHANGES = OUTPUT_DIR / "daily_changes.json"
 ALIAS_OVERRIDES = DATA_DIR / "news_alias_overrides.csv"
 NEWS_CACHE = DATA_DIR / "news_cache.csv"
 SOURCE_HEALTH = DATA_DIR / "news_source_health.json"
@@ -58,13 +59,16 @@ MARKET_QUERIES = [
     "crude oil rupee India equity market",
 ]
 
-# Caps
-MAX_CANDIDATES = 30
-MAX_QUERIES_PER_SYMBOL = 2
-MAX_STORIES_PER_SYMBOL = 15
-RANK_GAINER_MIN = 5
+# Caps (explicit constants — enforced by _select_candidates priority)
+MAX_CANDIDATES = 30                 # max symbols per run
+MAX_QUERIES_PER_SYMBOL = 2          # media queries per symbol
+MAX_STORIES_PER_SYMBOL = 15         # retained stories per symbol per run
+RANK_GAINER_MIN = 5                 # min rank improvement to qualify a "gainer"
 RECENT_WINDOW_DAYS = 30
 NSE_WINDOW_DAYS = 14
+
+# Risk-flag values that must NEVER trigger candidate expansion.
+NEUTRAL_RISK_FLAGS = {"", "clean", "none", "nan", "n/a", "na", "-", "ok"}
 
 DISCLAIMER = (
     "News and filings are human-review context only. "
@@ -92,16 +96,25 @@ def add_recency(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------- candidate coverage ----------
-def select_candidates(latest: pd.DataFrame, rank_changes: pd.DataFrame | None,
-                      pins: Iterable[str] | None = None) -> pd.DataFrame:
-    """One deduplicated candidate set with deterministic priority.
+def _is_new_risk(flag: str) -> bool:
+    return bool(flag) and str(flag).strip().lower() not in NEUTRAL_RISK_FLAGS
 
-    Priority (fills the MAX_CANDIDATES cap in this order):
-      1. Official ranks 1–15  (top_official_candidates → canonical)
-      2. New Top-20 entrants  (Previous_Rank NaN & current Rank <= 20)
-      3. Rank gainers         (Rank_Change >= RANK_GAINER_MIN, ranked <= 30)
-      4. High-ranked with newly introduced review flags
-      5. User pins
+
+def select_candidates(
+    latest: pd.DataFrame,
+    rank_changes: pd.DataFrame | None = None,
+    pins: Iterable[str] | None = None,
+    daily_changes: dict | None = None,
+) -> pd.DataFrame:
+    """One deterministic deduplicated candidate set with fixed priority.
+
+    Priority (fills the MAX_CANDIDATES cap in this exact order):
+      1. Official ranks 1–15                       (canonical order)
+      2. New official Top-20 entrants              (from daily_changes.json)
+      3. Large official rank gainers               (rank_change >= RANK_GAINER_MIN)
+      4. Newly introduced non-clean risk flags     (from daily_changes.json)
+      5. Manually pinned symbols
+    Never reads news_cache.csv to infer candidates.
     """
     ordered_syms: list[str] = []
     priority_map: dict[str, str] = {}
@@ -109,35 +122,34 @@ def select_candidates(latest: pd.DataFrame, rank_changes: pd.DataFrame | None,
 
     def add(sym: str, why: str) -> None:
         sym = str(sym).strip().upper()
-        if not sym or sym in seen:
+        if not sym or sym in seen or len(ordered_syms) >= MAX_CANDIDATES:
             return
         seen.add(sym); ordered_syms.append(sym); priority_map[sym] = why
 
+    # 1. Official top 15 — canonical source of truth
     official = top_official_candidates(latest, n=15)
     for _, r in official.iterrows():
         add(r.get("Symbol", ""), "official_top15")
 
-    if rank_changes is not None and not rank_changes.empty:
-        rc = rank_changes.copy()
-        rc["Rank"] = pd.to_numeric(rc.get("Rank"), errors="coerce")
-        rc["Previous_Rank"] = pd.to_numeric(rc.get("Previous_Rank"), errors="coerce")
-        rc["Rank_Change"] = pd.to_numeric(rc.get("Rank_Change"), errors="coerce")
-        entrants = rc[(rc["Previous_Rank"].isna()) & (rc["Rank"] <= 20)]
-        for _, r in entrants.sort_values("Rank").iterrows():
-            add(r.get("Symbol", ""), "new_top20_entrant")
-        gainers = rc[(rc["Rank_Change"] >= RANK_GAINER_MIN) & (rc["Rank"] <= 30)]
-        for _, r in gainers.sort_values("Rank").iterrows():
-            add(r.get("Symbol", ""), "rank_gainer")
+    # 2/3/4. From structured daily_changes.json (never from news_cache.csv,
+    # never from any risk-flag heuristic on the current snapshot alone).
+    dc = daily_changes or {}
+    for sym in dc.get("top20_entries", []) or []:
+        add(sym, "new_top20_entrant")
+    for row in dc.get("largest_rank_gainers", []) or []:
+        try:
+            if int(row.get("rank_change", 0)) >= RANK_GAINER_MIN:
+                add(row.get("Symbol", ""), "rank_gainer")
+        except Exception:
+            continue
+    for row in dc.get("new_risk_flags", []) or []:
+        sym = str(row.get("Symbol", "")).strip().upper()
+        flag = str(row.get("flag", "")).strip()
+        if not sym or not _is_new_risk(flag):
+            continue
+        add(sym, "new_risk_flag")
 
-    # newly flagged high-ranked
-    if "Risk_Flag" in latest.columns and "Opportunity_Rank" in latest.columns:
-        flagged = latest.copy()
-        flagged["Opportunity_Rank"] = pd.to_numeric(flagged["Opportunity_Rank"], errors="coerce")
-        flagged = flagged[(flagged["Risk_Flag"].astype(str).str.len() > 0)
-                          & (flagged["Opportunity_Rank"] <= 20)]
-        for _, r in flagged.sort_values("Opportunity_Rank").iterrows():
-            add(r.get("Symbol", ""), "new_risk_flag")
-
+    # 5. Manual pins
     for p in (pins or []):
         add(p, "user_pin")
 
@@ -158,28 +170,61 @@ def select_candidates(latest: pd.DataFrame, rank_changes: pd.DataFrame | None,
 
 # ---------- source health ----------
 class SourceHealth:
+    """Per-source health with preserved Last_Success across failures.
+
+    A failed refresh must NOT overwrite the previous success timestamp; a
+    failed refresh is also NOT reported as a successful zero-news run.
+    Callers can prime the registry with the previous digest's entries via
+    ``seed_from_previous`` so Last_Success survives outages.
+    """
+
     def __init__(self) -> None:
         self.entries: dict[str, dict] = {}
 
-    def record(self, source: str, *, status: str, items_received: int = 0,
-               items_retained: int = 0, error: str = "",
-               cache_fallback: bool = False) -> None:
-        now = pd.Timestamp.now().isoformat(timespec="seconds")
-        e = self.entries.setdefault(source, {
+    def _slot(self, source: str) -> dict:
+        return self.entries.setdefault(source, {
             "Source": source, "Last_Attempt": None, "Last_Success": None,
             "Fetch_Status": "unknown", "Items_Received": 0, "Items_Retained": 0,
             "Unknown_Date_Count": 0, "Duplicate_Count": 0,
             "Cache_Fallback_Used": False, "Error": "",
         })
+
+    def seed_from_previous(self, prev_entries: list[dict] | None) -> None:
+        for e in prev_entries or []:
+            if not isinstance(e, dict):
+                continue
+            name = str(e.get("Source", "")).strip()
+            if not name:
+                continue
+            slot = self._slot(name)
+            # Only carry forward the durable "Last_Success" timestamp; everything
+            # else is overwritten by the current attempt.
+            if e.get("Last_Success") and not slot.get("Last_Success"):
+                slot["Last_Success"] = e["Last_Success"]
+
+    def record(self, source: str, *, status: str, items_received: int = 0,
+               items_retained: int = 0, unknown_date_count: int = 0,
+               duplicate_count: int = 0, error: str = "",
+               cache_fallback: bool = False) -> None:
+        now = pd.Timestamp.now().isoformat(timespec="seconds")
+        e = self._slot(source)
         e["Last_Attempt"] = now
         e["Fetch_Status"] = status
         e["Items_Received"] = int(items_received)
         e["Items_Retained"] = int(items_retained)
+        e["Unknown_Date_Count"] = int(unknown_date_count)
+        e["Duplicate_Count"] = int(duplicate_count)
         e["Error"] = error or ""
         if status == "success":
             e["Last_Success"] = now
+        # NOTE: on non-success, Last_Success is intentionally left as-is
+        # so an outage never erases the prior good timestamp.
         if cache_fallback:
             e["Cache_Fallback_Used"] = True
+
+    def statuses(self) -> list[str]:
+        return [str(e.get("Fetch_Status", "unknown")) for e in self.entries.values()
+                if e.get("Source") != "pipeline"]
 
     def to_list(self) -> list[dict]:
         return list(self.entries.values())
@@ -214,11 +259,23 @@ def _row_from_item(item: dict, symbol: str, name: str, rank, reason: str,
 
 # ---------- main ----------
 def build(pins: Iterable[str] | None = None) -> dict:
-    """Run the news refresh. Never raises. Returns the digest envelope."""
+    """Run the news refresh. Never raises. Returns the digest envelope.
+
+    Refresh-status semantics (aggregated across live sources):
+      success  — every live source succeeded
+      partial  — at least one live source succeeded and at least one failed
+      cached   — no live source succeeded, but usable cache exists
+      failed   — no live source succeeded and no usable cache exists
+    """
     health = SourceHealth()
-    refresh_status = "success"
-    cache_fallback_used = False
     prev_digest = _safe_read_json(DIGEST_OUT)
+    # Preserve prior Last_Success entries so an outage never erases them.
+    if prev_digest:
+        health.seed_from_previous(prev_digest.get("source_health"))
+
+    # Track successful-refresh timestamps (for "new since last run" semantics).
+    prev_last_success = (prev_digest or {}).get("last_successful_refresh_at")
+    prev_prev_success = (prev_digest or {}).get("previous_successful_refresh_at")
 
     if not LATEST_SCORES.exists():
         return _write_failed(prev_digest, health, "latest_scores_missing")
@@ -228,28 +285,26 @@ def build(pins: Iterable[str] | None = None) -> dict:
     except Exception as exc:
         return _write_failed(prev_digest, health, f"latest_scores_read_error: {exc}")
 
-    rank_changes = _safe_read_csv(RANK_CHANGES)
     overrides = load_alias_overrides(ALIAS_OVERRIDES)
-    candidates = select_candidates(latest, rank_changes, pins=pins)
+    daily_changes = _safe_read_json(DAILY_CHANGES) or {}
+    candidates = select_candidates(latest, daily_changes=daily_changes, pins=pins)
 
     cache = read_cache(NEWS_CACHE)
 
     # --- NSE announcements: one warmed session, one feed per run ---
-    nse_items: list[dict] = []
     session = nse_announcements.warm_session()
     nse_items, nse_health = nse_announcements.fetch_feed(session, window_days=NSE_WINDOW_DAYS)
-    health.record("nse_announcements", status=nse_health["fetch_status"],
-                  items_received=nse_health["items_received"], error=nse_health.get("error", ""))
     nse_by_sym = nse_announcements.filter_for_symbols(nse_items, candidates["Symbol"].tolist()) if candidates.shape[0] else {}
-    if nse_health["fetch_status"] != "success":
-        cache_fallback_used = True
-        refresh_status = "partial"
+    nse_status = nse_health["fetch_status"]
+    # (Items_Retained / Duplicate_Count are filled after per-symbol filtering.)
 
     # --- Candidate-specific media via Google News RSS ---
     candidate_rows: list[dict] = []
     gnews_received = 0
     gnews_retained = 0
+    gnews_attempts = 0
     gnews_failed = 0
+    nse_retained = 0
     for _, cand in candidates.iterrows():
         sym = cand["Symbol"]; name = cand.get("Name", "") or ""; rnk = cand.get("Rank")
         aliases = build_aliases(name, sym, overrides)
@@ -264,11 +319,13 @@ def build(pins: Iterable[str] | None = None) -> dict:
             candidate_rows.append(_row_from_item(
                 it, sym, name, rnk, reason,
                 classify_event(it["Canonical_Title"])))
+            nse_retained += 1
 
-        # Media queries (capped)
-        queries = _candidate_queries(name, sym)[:MAX_QUERIES_PER_SYMBOL]
+        # Media queries (capped, alias-driven)
+        queries = _candidate_queries(name, sym, aliases)[:MAX_QUERIES_PER_SYMBOL]
         media_kept_for_sym = 0
         for q in queries:
+            gnews_attempts += 1
             items, gh = google_news_rss.fetch(q, recent_days=RECENT_WINDOW_DAYS, limit=10)
             if gh["fetch_status"] != "success":
                 gnews_failed += 1
@@ -286,13 +343,23 @@ def build(pins: Iterable[str] | None = None) -> dict:
                 media_kept_for_sym += 1
                 gnews_retained += 1
 
-    gnews_status = "success" if gnews_failed == 0 else ("partial" if gnews_retained else "failed")
-    health.record("google_news_rss", status=gnews_status,
-                  items_received=gnews_received, items_retained=gnews_retained,
-                  error=f"{gnews_failed} query failures" if gnews_failed else "")
-    if gnews_status == "failed":
-        cache_fallback_used = True
-        refresh_status = "partial" if refresh_status == "success" else refresh_status
+    # Overall Google News RSS status:
+    #   - no attempts at all → unknown (treat as failed for aggregation)
+    #   - every attempt failed → failed
+    #   - some succeeded, some failed → partial
+    #   - all succeeded → success
+    if gnews_attempts == 0:
+        gnews_status = "failed"
+        gnews_err = "no queries attempted"
+    elif gnews_failed == 0:
+        gnews_status = "success"
+        gnews_err = ""
+    elif gnews_failed == gnews_attempts:
+        gnews_status = "failed"
+        gnews_err = f"all {gnews_attempts} queries failed"
+    else:
+        gnews_status = "partial"
+        gnews_err = f"{gnews_failed}/{gnews_attempts} queries failed"
 
     # --- Market context (never assigned to candidates) ---
     market_rows: list[dict] = []
@@ -313,22 +380,57 @@ def build(pins: Iterable[str] | None = None) -> dict:
 
     cand_df = pd.DataFrame(candidate_rows, columns=CACHE_COLUMNS) if candidate_rows else pd.DataFrame(columns=CACHE_COLUMNS)
     cand_df = add_recency(cand_df)
+    duplicates_dropped = 0
+    unknown_date_fresh = 0
     if not cand_df.empty:
+        pre = len(cand_df)
+        unknown_date_fresh = int((cand_df.get("Recency_Bucket", pd.Series(dtype=str)) == "Unknown_Date").sum())
         cand_df["Cluster_Key"] = cand_df.apply(cluster_key, axis=1)
         cand_df = dedup(cand_df)
+        duplicates_dropped = max(0, pre - len(cand_df))
+
+    # --- Aggregate refresh status across live sources ---
+    live_statuses = [nse_status, gnews_status]
+    ok = sum(1 for s in live_statuses if s == "success")
+    bad = sum(1 for s in live_statuses if s in ("failed",))
+    if ok == len(live_statuses):
+        refresh_status = "success"
+    elif ok >= 1 and bad >= 1:
+        refresh_status = "partial"
+    elif ok == 0:
+        refresh_status = "cached" if not cache.empty else "failed"
+    else:
+        refresh_status = "partial"
+
+    cache_fallback_used = (refresh_status in ("cached", "partial", "failed")) and (not cache.empty)
 
     # --- Merge with cache (cache fills gaps if fresh fetch weak) ---
-    merged = upsert(cache, cand_df)
-
-    # If everything failed and we have zero fresh rows, fall back to cache
-    if cand_df.empty and not cache.empty:
-        cache_fallback_used = True
-        if refresh_status == "success":
-            refresh_status = "cached"
+    if refresh_status == "cached":
         merged = cache.copy()
+    elif refresh_status == "failed":
+        merged = cand_df.copy()  # empty; do not persist
+    else:
+        merged = upsert(cache, cand_df)
 
-    if cand_df.empty and cache.empty and nse_health["fetch_status"] != "success" and gnews_status != "success":
-        refresh_status = "failed"
+    # --- Record source health with per-source detail ---
+    health.record(
+        "nse_announcements",
+        status=nse_status,
+        items_received=int(nse_health.get("items_received", 0)),
+        items_retained=int(nse_retained),
+        cache_fallback=(nse_status != "success" and not cache.empty),
+        error=nse_health.get("error", ""),
+    )
+    health.record(
+        "google_news_rss",
+        status=gnews_status,
+        items_received=int(gnews_received),
+        items_retained=int(gnews_retained),
+        unknown_date_count=int(unknown_date_fresh),
+        duplicate_count=int(duplicates_dropped),
+        cache_fallback=(gnews_status != "success" and not cache.empty),
+        error=gnews_err,
+    )
 
     # --- Market news ---
     market_df = pd.DataFrame(market_rows)
@@ -347,28 +449,43 @@ def build(pins: Iterable[str] | None = None) -> dict:
             na_position="last",
         ).drop(columns=["_rank", "_filing", "_pd"])
 
-    # --- Atomic writes: only overwrite valid outputs if we have real data ---
+    # --- Successful-refresh timestamps ---
+    generated_at = pd.Timestamp.now().isoformat(timespec="seconds")
+    if refresh_status in ("success", "partial"):
+        last_successful_refresh_at = generated_at
+        previous_successful_refresh_at = prev_last_success or prev_prev_success
+    else:
+        last_successful_refresh_at = prev_last_success
+        previous_successful_refresh_at = prev_prev_success
+
+    # --- Atomic writes: never overwrite valid outputs with empties ---
     if refresh_status != "failed":
-        atomic_write_df(TOP_CAND_OUT, display)
+        atomic_write_df(TOP_CAND_OUT, _with_legacy_aliases(display))
         atomic_write_df(MARKET_OUT, market_df if not market_df.empty else pd.DataFrame(
             columns=["Query", "Canonical_Title", "URL", "Source", "Published_Date",
                      "Source_Type", "Is_Official_Filing", "Age_Days", "Recency_Bucket"]))
         atomic_write_df(NEWS_CACHE, prune(merged))
-    else:
-        # Do NOT overwrite valid outputs with empties.
-        pass
 
     # --- Digest envelope ---
     digest = {
         "schema_version": SCHEMA_VERSION,
-        "generated_at": pd.Timestamp.now().isoformat(timespec="seconds"),
+        "generated_at": generated_at,
         "refresh_status": refresh_status,
+        "previous_successful_refresh_at": previous_successful_refresh_at,
+        "last_successful_refresh_at": last_successful_refresh_at,
         "ranking_source": "output/latest_scores.csv (finalized official; via core.candidate_selection.top_official_candidates)",
         "ranking_column": "Confidence_Adjusted_Score",
         "disclaimer": DISCLAIMER,
         "source_health": health.to_list(),
         "cache_fallback_used": cache_fallback_used,
         "candidate_coverage": candidates.to_dict(orient="records") if not candidates.empty else [],
+        "candidate_coverage_meta": {
+            "max_candidates": MAX_CANDIDATES,
+            "max_queries_per_symbol": MAX_QUERIES_PER_SYMBOL,
+            "max_stories_per_symbol": MAX_STORIES_PER_SYMBOL,
+            "rank_gainer_min": RANK_GAINER_MIN,
+            "coverage_source": "core.candidate_selection.top_official_candidates + output/daily_changes.json",
+        },
         "counts": {
             "candidates": int(len(candidates)),
             "candidate_stories": int(len(display)),
@@ -385,16 +502,50 @@ def build(pins: Iterable[str] | None = None) -> dict:
     return digest
 
 
-def _candidate_queries(name: str, symbol: str) -> list[str]:
+def _with_legacy_aliases(df: pd.DataFrame) -> pd.DataFrame:
+    """Add legacy column aliases (Title, Link, Published) alongside the
+    modern schema so existing consumers of top_candidate_news.csv keep
+    working. Modern fields remain the source of truth."""
+    if df is None or df.empty:
+        return df.copy() if df is not None else pd.DataFrame()
+    out = df.copy()
+    if "Canonical_Title" in out.columns:
+        out["Title"] = out["Canonical_Title"]
+    if "URL" in out.columns:
+        out["Link"] = out["URL"]
+    if "Published_Date" in out.columns:
+        out["Published"] = out["Published_Date"]
+    return out
+
+
+def _candidate_queries(name: str, symbol: str, aliases: list[str] | None = None) -> list[str]:
+    """Build media queries from approved aliases (symbol, full name, cleaned
+    name, manual overrides). Never emits a bare generic token as a query."""
+    from news.news_relevance import GENERIC_TOKENS  # local import: avoid cycle
     sym = (symbol or "").strip().upper()
     nm = (name or "").strip()
-    strict_bits = []
-    if sym:
-        strict_bits.append(f'"{sym}"')
-    if nm:
-        strict_bits.append(f'"{nm}"')
-    strict = " OR ".join(strict_bits) if strict_bits else sym or nm
-    broad = f'{strict} results earnings order acquisition regulatory'
+    seen: set[str] = set()
+    quoted: list[str] = []
+    for a in (aliases or []):
+        a = (a or "").strip()
+        if not a:
+            continue
+        toks = [t for t in a.lower().split() if t]
+        # reject bare generic single-tokens
+        if len(toks) == 1 and (toks[0] in GENERIC_TOKENS or len(toks[0]) < 4):
+            continue
+        key = a.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        quoted.append(f'"{a}"')
+    if not quoted:
+        if sym:
+            quoted.append(f'"{sym}"')
+        elif nm:
+            quoted.append(f'"{nm}"')
+    strict = " OR ".join(quoted)
+    broad = f'{strict} results earnings order acquisition regulatory' if strict else ""
     return [q for q in (strict, broad) if q]
 
 

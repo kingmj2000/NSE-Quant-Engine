@@ -385,3 +385,181 @@ def test_cache_upsert_preserves_first_seen():
     out = upsert(a, b)
     assert out.iloc[0]["First_Seen"] == "2026-01-01"
     assert out.iloc[0]["Last_Seen"] == "2026-07-01"
+
+
+# ---------- Correctness pass: additional required tests ----------
+def test_multi_company_article_linked_to_every_symbol():
+    from news.news_dedup import dedup
+    rows = pd.DataFrame([
+        {"Symbol": "AAA", "Canonical_Title": "AAA and BBB announce joint venture",
+         "URL": "https://x.com/jv", "Source": "A", "Is_Official_Filing": False,
+         "First_Seen": "2026-07-01", "Published_Date": "2026-07-01"},
+        {"Symbol": "BBB", "Canonical_Title": "AAA and BBB announce joint venture",
+         "URL": "https://x.com/jv", "Source": "A", "Is_Official_Filing": False,
+         "First_Seen": "2026-07-01", "Published_Date": "2026-07-01"},
+    ])
+    out = dedup(rows)
+    assert set(out["Symbol"]) == {"AAA", "BBB"}
+    assert len(out) == 2
+
+
+def test_duplicates_merge_within_one_symbol():
+    from news.news_dedup import dedup
+    rows = pd.DataFrame([
+        {"Symbol": "AAA", "Canonical_Title": "AAA beats Q1",
+         "URL": "https://x.com/a", "Source": "A", "Is_Official_Filing": False,
+         "First_Seen": "2026-07-01", "Published_Date": "2026-07-01"},
+        {"Symbol": "AAA", "Canonical_Title": "AAA beats Q1!",
+         "URL": "https://x.com/a?utm_source=x", "Source": "A-mirror",
+         "Is_Official_Filing": False,
+         "First_Seen": "2026-07-01", "Published_Date": "2026-07-01"},
+    ])
+    out = dedup(rows)
+    assert len(out) == 1
+    assert out.iloc[0]["Duplicate_Count"] == 2
+
+
+def test_clean_risk_flag_is_not_new_risk():
+    import news_market_builder as nmb
+    latest = pd.DataFrame([{"Symbol": "RELIANCE", "Opportunity_Eligible": "Yes",
+                            "Opportunity_Rank": 1, "Confidence_Adjusted_Score": 90}])
+    dc = {"new_risk_flags": [{"Symbol": "RELIANCE", "flag": "Clean"}]}
+    cands = nmb.select_candidates(latest, daily_changes=dc)
+    reasons = dict(zip(cands["Symbol"], cands["Coverage_Reason"]))
+    assert reasons.get("RELIANCE") == "official_top15"  # not new_risk_flag
+
+
+def test_new_non_clean_risk_flag_included():
+    import news_market_builder as nmb
+    latest = pd.DataFrame([
+        {"Symbol": "AAA", "Opportunity_Eligible": "Yes", "Opportunity_Rank": 1,
+         "Confidence_Adjusted_Score": 90},
+        {"Symbol": "ZZZ", "Opportunity_Eligible": "No", "Opportunity_Rank": 25,
+         "Confidence_Adjusted_Score": 40},
+    ])
+    dc = {"new_risk_flags": [{"Symbol": "ZZZ", "flag": "avoid"}]}
+    cands = nmb.select_candidates(latest, daily_changes=dc)
+    assert "ZZZ" in list(cands["Symbol"])
+    assert dict(zip(cands["Symbol"], cands["Coverage_Reason"]))["ZZZ"] == "new_risk_flag"
+
+
+def test_alias_queries_use_manual_and_generated_aliases():
+    import news_market_builder as nmb
+    aliases = ["INFY", "Infosys Limited", "Infosys"]
+    qs = nmb._candidate_queries("Infosys Limited", "INFY", aliases)
+    assert any('"INFY"' in q for q in qs)
+    assert any('"Infosys Limited"' in q or '"Infosys"' in q for q in qs)
+
+
+def test_alias_queries_reject_generic_single_tokens():
+    import news_market_builder as nmb
+    qs = nmb._candidate_queries("Power Ltd", "PWRLTD", ["power", "ltd"])
+    # Should only use the safe symbol fallback, not the generic tokens
+    joined = " ".join(qs).lower()
+    assert '"power"' not in joined and '"ltd"' not in joined
+
+
+def test_partial_source_failure_produces_partial(isolated_pipeline, monkeypatch):
+    nmb, tmp = isolated_pipeline
+    monkeypatch.setattr(nmb.nse_announcements, "warm_session", lambda **kw: None)
+    monkeypatch.setattr(nmb.nse_announcements, "fetch_feed",
+                        lambda *a, **kw: ([], {"fetch_status": "success", "items_received": 0, "error": ""}))
+    monkeypatch.setattr(nmb.google_news_rss, "fetch",
+                        lambda *a, **kw: ([], {"fetch_status": "failed", "items_received": 0, "error": "net"}))
+    digest = nmb.build()
+    assert digest["refresh_status"] == "partial"
+
+
+def test_all_fail_with_cache_produces_cached(isolated_pipeline, monkeypatch):
+    nmb, tmp = isolated_pipeline
+    from news.news_cache import CACHE_COLUMNS
+    seed = pd.DataFrame([{
+        "Cluster_Key": "u::RELIANCE::f::https://x/f", "Symbol": "RELIANCE", "Rank": 1,
+        "Name": "R", "Canonical_Title": "prior", "Source": "NSE", "All_Sources": "NSE",
+        "Source_Type": "official_filing", "Published_Date": pd.Timestamp.now(),
+        "Age_Days": 1, "Recency_Bucket": "Recent_0_7D", "Event_Category": "X",
+        "URL": "https://x/f", "Is_Official_Filing": True,
+        "Relevance_Reason": "Official filing mapping", "Duplicate_Count": 1,
+        "First_Seen": "2026-07-01", "Last_Seen": "2026-07-01", "Fetched_At": "2026-07-01",
+    }], columns=CACHE_COLUMNS)
+    seed.to_csv(nmb.NEWS_CACHE, index=False)
+    _fail_all_sources(monkeypatch, nmb)
+    digest = nmb.build()
+    assert digest["refresh_status"] == "cached"
+    assert digest["cache_fallback_used"] is True
+
+
+def test_all_fail_without_cache_produces_failed(isolated_pipeline, monkeypatch):
+    nmb, tmp = isolated_pipeline
+    _fail_all_sources(monkeypatch, nmb)
+    digest = nmb.build()
+    assert digest["refresh_status"] == "failed"
+
+
+def test_last_success_survives_failure(isolated_pipeline, monkeypatch):
+    nmb, tmp = isolated_pipeline
+    # First: NSE succeeds → recorded Last_Success
+    monkeypatch.setattr(nmb.nse_announcements, "warm_session", lambda **kw: None)
+    monkeypatch.setattr(nmb.nse_announcements, "fetch_feed",
+                        lambda *a, **kw: ([], {"fetch_status": "success", "items_received": 0, "error": ""}))
+    monkeypatch.setattr(nmb.google_news_rss, "fetch",
+                        lambda *a, **kw: ([], {"fetch_status": "success", "items_received": 0, "error": ""}))
+    good = nmb.build()
+    nse_prev = [h for h in good["source_health"] if h["Source"] == "nse_announcements"][0]
+    assert nse_prev["Last_Success"]
+    prior = nse_prev["Last_Success"]
+
+    # Then: total failure — Last_Success must be preserved
+    _fail_all_sources(monkeypatch, nmb)
+    after = nmb.build()
+    nse_after = [h for h in after["source_health"] if h["Source"] == "nse_announcements"][0]
+    assert nse_after["Last_Success"] == prior
+
+
+def test_new_since_last_run_uses_previous_successful_refresh(isolated_pipeline, monkeypatch):
+    nmb, tmp = isolated_pipeline
+    counter = {"n": 0}
+    def one_hit(query, recent_days=30, limit=10, timeout=20):
+        counter["n"] += 1
+        if "RELIANCE" in query.upper():
+            return ([{
+                "Query": query,
+                "Canonical_Title": f"RELIANCE news item {counter['n']}",
+                "URL": f"https://example.com/r/{counter['n']}",
+                "Source": "Ex", "Source_Type": "media",
+                "Is_Official_Filing": False,
+                "Published_Date": pd.Timestamp.now(),
+            }], {"fetch_status": "success", "items_received": 1, "error": ""})
+        return ([], {"fetch_status": "success", "items_received": 0, "error": ""})
+    monkeypatch.setattr(nmb.nse_announcements, "warm_session", lambda **kw: None)
+    monkeypatch.setattr(nmb.nse_announcements, "fetch_feed",
+                        lambda *a, **kw: ([], {"fetch_status": "success", "items_received": 0, "error": ""}))
+    monkeypatch.setattr(nmb.google_news_rss, "fetch", one_hit)
+    first = nmb.build()
+    assert first["last_successful_refresh_at"]
+    second = nmb.build()
+    assert second["previous_successful_refresh_at"] == first["last_successful_refresh_at"]
+    assert second["last_successful_refresh_at"] >= first["last_successful_refresh_at"]
+
+
+def test_legacy_csv_aliases_match_modern_fields(isolated_pipeline, monkeypatch):
+    nmb, tmp = isolated_pipeline
+    def hit(query, recent_days=30, limit=10, timeout=20):
+        if "RELIANCE" in query.upper():
+            return ([{
+                "Query": query, "Canonical_Title": "RELIANCE result",
+                "URL": "https://example.com/r", "Source": "Ex",
+                "Source_Type": "media", "Is_Official_Filing": False,
+                "Published_Date": pd.Timestamp.now(),
+            }], {"fetch_status": "success", "items_received": 1, "error": ""})
+        return ([], {"fetch_status": "success", "items_received": 0, "error": ""})
+    monkeypatch.setattr(nmb.nse_announcements, "warm_session", lambda **kw: None)
+    monkeypatch.setattr(nmb.nse_announcements, "fetch_feed",
+                        lambda *a, **kw: ([], {"fetch_status": "success", "items_received": 0, "error": ""}))
+    monkeypatch.setattr(nmb.google_news_rss, "fetch", hit)
+    nmb.build()
+    df = pd.read_csv(nmb.TOP_CAND_OUT)
+    assert not df.empty
+    assert {"Title", "Link", "Published"}.issubset(df.columns)
+    assert (df["Title"] == df["Canonical_Title"]).all()
+    assert (df["Link"] == df["URL"]).all()
