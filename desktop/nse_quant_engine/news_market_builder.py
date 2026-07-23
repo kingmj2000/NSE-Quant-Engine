@@ -518,16 +518,34 @@ def _with_legacy_aliases(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _candidate_queries(name: str, symbol: str) -> list[str]:
+def _candidate_queries(name: str, symbol: str, aliases: list[str] | None = None) -> list[str]:
+    """Build media queries from approved aliases (symbol, full name, cleaned
+    name, manual overrides). Never emits a bare generic token as a query."""
+    from news.news_relevance import GENERIC_TOKENS  # local import: avoid cycle
     sym = (symbol or "").strip().upper()
     nm = (name or "").strip()
-    strict_bits = []
-    if sym:
-        strict_bits.append(f'"{sym}"')
-    if nm:
-        strict_bits.append(f'"{nm}"')
-    strict = " OR ".join(strict_bits) if strict_bits else sym or nm
-    broad = f'{strict} results earnings order acquisition regulatory'
+    seen: set[str] = set()
+    quoted: list[str] = []
+    for a in (aliases or []):
+        a = (a or "").strip()
+        if not a:
+            continue
+        toks = [t for t in a.lower().split() if t]
+        # reject bare generic single-tokens
+        if len(toks) == 1 and (toks[0] in GENERIC_TOKENS or len(toks[0]) < 4):
+            continue
+        key = a.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        quoted.append(f'"{a}"')
+    if not quoted:
+        if sym:
+            quoted.append(f'"{sym}"')
+        elif nm:
+            quoted.append(f'"{nm}"')
+    strict = " OR ".join(quoted)
+    broad = f'{strict} results earnings order acquisition regulatory' if strict else ""
     return [q for q in (strict, broad) if q]
 
 
