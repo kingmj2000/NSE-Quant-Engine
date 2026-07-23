@@ -119,9 +119,12 @@ def dedup(rows: pd.DataFrame, fuzzy_threshold: float = 0.9) -> pd.DataFrame:
 
 
 def cluster_key(row: pd.Series) -> str:
+    """Symbol-scoped cluster key so cache upserts and dedup never collapse
+    two different candidates' rows into one representative."""
+    sym = str(row.get("Symbol", "")).upper()
+    filing = "f" if bool(row.get("Is_Official_Filing", False)) else "m"
     u = canonical_url(str(row.get("URL", "")))
     if u:
-        return f"u::{u}"
+        return f"u::{sym}::{filing}::{u}"
     t = normalize_title(str(row.get("Canonical_Title", "")))
-    sym = str(row.get("Symbol", "")).upper()
-    return f"t::{sym}::{t}"
+    return f"t::{sym}::{filing}::{t}"
