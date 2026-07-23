@@ -434,7 +434,7 @@ def test_new_non_clean_risk_flag_included():
     latest = pd.DataFrame([
         {"Symbol": "AAA", "Opportunity_Eligible": "Yes", "Opportunity_Rank": 1,
          "Confidence_Adjusted_Score": 90},
-        {"Symbol": "ZZZ", "Opportunity_Eligible": "Yes", "Opportunity_Rank": 25,
+        {"Symbol": "ZZZ", "Opportunity_Eligible": "No", "Opportunity_Rank": 25,
          "Confidence_Adjusted_Score": 40},
     ])
     dc = {"new_risk_flags": [{"Symbol": "ZZZ", "flag": "avoid"}]}
