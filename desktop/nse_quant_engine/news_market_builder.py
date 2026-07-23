@@ -96,16 +96,25 @@ def add_recency(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------- candidate coverage ----------
-def select_candidates(latest: pd.DataFrame, rank_changes: pd.DataFrame | None,
-                      pins: Iterable[str] | None = None) -> pd.DataFrame:
-    """One deduplicated candidate set with deterministic priority.
+def _is_new_risk(flag: str) -> bool:
+    return bool(flag) and str(flag).strip().lower() not in NEUTRAL_RISK_FLAGS
 
-    Priority (fills the MAX_CANDIDATES cap in this order):
-      1. Official ranks 1–15  (top_official_candidates → canonical)
-      2. New Top-20 entrants  (Previous_Rank NaN & current Rank <= 20)
-      3. Rank gainers         (Rank_Change >= RANK_GAINER_MIN, ranked <= 30)
-      4. High-ranked with newly introduced review flags
-      5. User pins
+
+def select_candidates(
+    latest: pd.DataFrame,
+    rank_changes: pd.DataFrame | None = None,
+    pins: Iterable[str] | None = None,
+    daily_changes: dict | None = None,
+) -> pd.DataFrame:
+    """One deterministic deduplicated candidate set with fixed priority.
+
+    Priority (fills the MAX_CANDIDATES cap in this exact order):
+      1. Official ranks 1–15                       (canonical order)
+      2. New official Top-20 entrants              (from daily_changes.json)
+      3. Large official rank gainers               (rank_change >= RANK_GAINER_MIN)
+      4. Newly introduced non-clean risk flags     (from daily_changes.json)
+      5. Manually pinned symbols
+    Never reads news_cache.csv to infer candidates.
     """
     ordered_syms: list[str] = []
     priority_map: dict[str, str] = {}
@@ -113,35 +122,34 @@ def select_candidates(latest: pd.DataFrame, rank_changes: pd.DataFrame | None,
 
     def add(sym: str, why: str) -> None:
         sym = str(sym).strip().upper()
-        if not sym or sym in seen:
+        if not sym or sym in seen or len(ordered_syms) >= MAX_CANDIDATES:
             return
         seen.add(sym); ordered_syms.append(sym); priority_map[sym] = why
 
+    # 1. Official top 15 — canonical source of truth
     official = top_official_candidates(latest, n=15)
     for _, r in official.iterrows():
         add(r.get("Symbol", ""), "official_top15")
 
-    if rank_changes is not None and not rank_changes.empty:
-        rc = rank_changes.copy()
-        rc["Rank"] = pd.to_numeric(rc.get("Rank"), errors="coerce")
-        rc["Previous_Rank"] = pd.to_numeric(rc.get("Previous_Rank"), errors="coerce")
-        rc["Rank_Change"] = pd.to_numeric(rc.get("Rank_Change"), errors="coerce")
-        entrants = rc[(rc["Previous_Rank"].isna()) & (rc["Rank"] <= 20)]
-        for _, r in entrants.sort_values("Rank").iterrows():
-            add(r.get("Symbol", ""), "new_top20_entrant")
-        gainers = rc[(rc["Rank_Change"] >= RANK_GAINER_MIN) & (rc["Rank"] <= 30)]
-        for _, r in gainers.sort_values("Rank").iterrows():
-            add(r.get("Symbol", ""), "rank_gainer")
+    # 2/3/4. From structured daily_changes.json (never from news_cache.csv,
+    # never from any risk-flag heuristic on the current snapshot alone).
+    dc = daily_changes or {}
+    for sym in dc.get("top20_entries", []) or []:
+        add(sym, "new_top20_entrant")
+    for row in dc.get("largest_rank_gainers", []) or []:
+        try:
+            if int(row.get("rank_change", 0)) >= RANK_GAINER_MIN:
+                add(row.get("Symbol", ""), "rank_gainer")
+        except Exception:
+            continue
+    for row in dc.get("new_risk_flags", []) or []:
+        sym = str(row.get("Symbol", "")).strip().upper()
+        flag = str(row.get("flag", "")).strip()
+        if not sym or not _is_new_risk(flag):
+            continue
+        add(sym, "new_risk_flag")
 
-    # newly flagged high-ranked
-    if "Risk_Flag" in latest.columns and "Opportunity_Rank" in latest.columns:
-        flagged = latest.copy()
-        flagged["Opportunity_Rank"] = pd.to_numeric(flagged["Opportunity_Rank"], errors="coerce")
-        flagged = flagged[(flagged["Risk_Flag"].astype(str).str.len() > 0)
-                          & (flagged["Opportunity_Rank"] <= 20)]
-        for _, r in flagged.sort_values("Opportunity_Rank").iterrows():
-            add(r.get("Symbol", ""), "new_risk_flag")
-
+    # 5. Manual pins
     for p in (pins or []):
         add(p, "user_pin")
 
