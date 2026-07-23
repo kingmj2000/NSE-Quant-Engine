@@ -170,28 +170,61 @@ def select_candidates(
 
 # ---------- source health ----------
 class SourceHealth:
+    """Per-source health with preserved Last_Success across failures.
+
+    A failed refresh must NOT overwrite the previous success timestamp; a
+    failed refresh is also NOT reported as a successful zero-news run.
+    Callers can prime the registry with the previous digest's entries via
+    ``seed_from_previous`` so Last_Success survives outages.
+    """
+
     def __init__(self) -> None:
         self.entries: dict[str, dict] = {}
 
-    def record(self, source: str, *, status: str, items_received: int = 0,
-               items_retained: int = 0, error: str = "",
-               cache_fallback: bool = False) -> None:
-        now = pd.Timestamp.now().isoformat(timespec="seconds")
-        e = self.entries.setdefault(source, {
+    def _slot(self, source: str) -> dict:
+        return self.entries.setdefault(source, {
             "Source": source, "Last_Attempt": None, "Last_Success": None,
             "Fetch_Status": "unknown", "Items_Received": 0, "Items_Retained": 0,
             "Unknown_Date_Count": 0, "Duplicate_Count": 0,
             "Cache_Fallback_Used": False, "Error": "",
         })
+
+    def seed_from_previous(self, prev_entries: list[dict] | None) -> None:
+        for e in prev_entries or []:
+            if not isinstance(e, dict):
+                continue
+            name = str(e.get("Source", "")).strip()
+            if not name:
+                continue
+            slot = self._slot(name)
+            # Only carry forward the durable "Last_Success" timestamp; everything
+            # else is overwritten by the current attempt.
+            if e.get("Last_Success") and not slot.get("Last_Success"):
+                slot["Last_Success"] = e["Last_Success"]
+
+    def record(self, source: str, *, status: str, items_received: int = 0,
+               items_retained: int = 0, unknown_date_count: int = 0,
+               duplicate_count: int = 0, error: str = "",
+               cache_fallback: bool = False) -> None:
+        now = pd.Timestamp.now().isoformat(timespec="seconds")
+        e = self._slot(source)
         e["Last_Attempt"] = now
         e["Fetch_Status"] = status
         e["Items_Received"] = int(items_received)
         e["Items_Retained"] = int(items_retained)
+        e["Unknown_Date_Count"] = int(unknown_date_count)
+        e["Duplicate_Count"] = int(duplicate_count)
         e["Error"] = error or ""
         if status == "success":
             e["Last_Success"] = now
+        # NOTE: on non-success, Last_Success is intentionally left as-is
+        # so an outage never erases the prior good timestamp.
         if cache_fallback:
             e["Cache_Fallback_Used"] = True
+
+    def statuses(self) -> list[str]:
+        return [str(e.get("Fetch_Status", "unknown")) for e in self.entries.values()
+                if e.get("Source") != "pipeline"]
 
     def to_list(self) -> list[dict]:
         return list(self.entries.values())
