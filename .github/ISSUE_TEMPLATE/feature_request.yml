@@ -1,0 +1,69 @@
+name: Feature request
+description: Propose a new capability, alpha or signal
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ### Read this first
+
+        New alphas and signals **must be validated out-of-sample** and **must
+        not bypass survivor gates**. A signal that only looks good in-sample
+        will be rejected. News, filings and sentiment remain context-only and
+        must never influence scores or ranks.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+    validations:
+      required: true
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Type of change
+      options:
+        - New alpha / signal
+        - Data source
+        - Validation or evaluation method
+        - Portfolio / risk
+        - Desktop UI or dashboard
+        - Documentation / tooling
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence plan (required for new alphas or signals)
+      description: |
+        How will this be validated? Cover point-in-time computation, walk-forward
+        out-of-sample window, incremental/residual IC against existing survivors,
+        cost assumptions and shrinkage.
+      placeholder: |
+        - Point-in-time source and lag:
+        - Walk-forward windows:
+        - Residual IC vs existing survivors:
+        - Cost model applied:
+
+  - type: checkboxes
+    id: gates
+    attributes:
+      label: Acknowledgements
+      options:
+        - label: This proposal does not bypass survivor gates, shrinkage or cost modelling.
+          required: true
+        - label: This proposal does not make news or sentiment affect scores or ranks.
+          required: true
+        - label: This proposal does not enable adaptive weighting on the default branch.
+          required: true
+        - label: I understand out-of-sample validation is required before a signal is trusted.
+          required: true

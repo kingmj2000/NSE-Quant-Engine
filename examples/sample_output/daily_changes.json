@@ -1,0 +1,20 @@
+{
+  "_note": "SYNTHETIC EXAMPLE — fabricated movements, not real rank changes.",
+  "schema_version": 1,
+  "generated_at": "2026-01-15T06:33:05",
+  "previous_snapshot_date": "2026-01-14",
+  "ranking_column": "Confidence_Adjusted_Score",
+  "top5_entrants": ["CCCC"],
+  "top5_exits": ["EEEE"],
+  "top20_entrants": ["DDDD"],
+  "top20_exits": [],
+  "rank_gainers": [
+    { "Symbol": "CCCC", "previous_rank": 9, "current_rank": 3, "delta": 6 }
+  ],
+  "rank_losers": [
+    { "Symbol": "EEEE", "previous_rank": 4, "current_rank": 5, "delta": -1 }
+  ],
+  "new_risk_flags": [
+    { "Symbol": "EEEE", "previous_flag": "Clean", "current_flag": "Elevated Drawdown" }
+  ]
+}
