@@ -1,0 +1,20 @@
+{
+  "_note": "SYNTHETIC EXAMPLE — fabricated values, not a real validation result.",
+  "schema_version": 2,
+  "generated_at": "2026-01-15T06:30:00",
+  "ranking_column": "Confidence_Adjusted_Score",
+  "tie_breaker": "Symbol ascending",
+  "verdict": "No Proven Edge Yet",
+  "verdict_reason": "Effective validation dates (18) below required minimum (60).",
+  "effective_validation_dates": 18,
+  "required_validation_dates": 60,
+  "top_bucket_excess_return_after_costs": 0.0031,
+  "information_coefficient": 0.021,
+  "information_coefficient_shrunk": 0.008,
+  "hit_rate": 0.52,
+  "hit_rate_shrunk": 0.505,
+  "t_stat": 0.74,
+  "costs_included": true,
+  "live_trading_allowed": false,
+  "watchlist_only": true
+}

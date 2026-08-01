@@ -1,0 +1,83 @@
+name: Bug report
+description: Something in the engine, pipeline or desktop UI behaves incorrectly
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not paste real portfolio holdings, brokerage details or files from
+        `data/` and `output/`.** Redact symbols and amounts before sharing logs.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the incorrect behaviour.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. cd desktop/nse_quant_engine
+        2. python orchestrator.py --all --skip-fetch
+        3. ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Data fetching / optional sources
+        - Scoring / ranking
+        - Validation
+        - Portfolio / trade plan
+        - News & events (context only)
+        - Desktop UI
+        - Dashboard HTML
+        - Tests / CI
+        - Documentation
+    validations:
+      required: true
+
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      placeholder: "3.12.4"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "Windows 11 / macOS 15 / Ubuntu 24.04"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output (redacted)
+      render: text
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I have removed personal, portfolio and credential information from this report.
+          required: true
+        - label: I ran the test suite (`QT_QPA_PLATFORM=offscreen python -m pytest tests/ -q`) and included failures if any.

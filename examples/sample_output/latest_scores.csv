@@ -1,0 +1,6 @@
+Symbol,Company_Name,Close,Raw_Score,Confidence_Adjusted_Score,Rank,Opportunity_Rank,Raw_Score_Rank,Momentum_Score,Trend_Score,Fundamental_Score,RSI_14,Volatility_20D,Current_Drawdown_60D,Risk_Flag,Action
+BBBB,Synthetic Beta Industries,412.50,71.40,68.90,1,1,2,72.1,65.0,58.4,57.2,0.0184,-0.0412,Clean,Watchlist Only
+AAAA,Synthetic Alpha Corp,1285.00,74.20,66.10,2,2,1,80.3,61.5,49.8,63.8,0.0231,-0.0688,Clean,Watchlist Only
+CCCC,Synthetic Gamma Ltd,98.75,63.05,61.20,3,3,3,58.9,60.2,66.1,51.4,0.0159,-0.0295,Clean,Watchlist Only
+DDDD,Synthetic Delta ETF,245.10,55.80,54.35,4,4,4,49.7,57.3,0.0,48.9,0.0112,-0.0187,Clean,Watchlist Only
+EEEE,Synthetic Epsilon Ltd,37.20,41.60,33.05,5,5,5,30.2,38.4,44.9,42.6,0.0402,-0.1913,Elevated Drawdown,Watchlist Only
