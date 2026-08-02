@@ -168,15 +168,19 @@ def build_daily_changes(base_dir: str | Path, out_dir: str | Path | None = None,
     else:
         gainers, losers = [], []
 
-    # Risk flag additions / clearances.
+    # Risk changes. Blank / missing / NaN / "Clean" all mean no active risk.
+    #   new_risk_flags     — current flag is non-clean AND differs from previous
+    #                        (covers clean→risk and risk→different-risk).
+    #   cleared_risk_flags — previous flag was non-clean and current is clean.
     curr_flags = _risk_flag_set(curr)
     prev_flags = _risk_flag_set(prev)
     new_flags = [
-        {"Symbol": s, "flag": curr_flags[s]}
-        for s in sorted(set(curr_flags) - set(prev_flags))
+        {"Symbol": s, "flag": curr_flags[s], "previous_flag": prev_flags.get(s)}
+        for s in sorted(curr_flags)
+        if curr_flags[s] != prev_flags.get(s)
     ]
     cleared_flags = [
-        {"Symbol": s, "previous_flag": prev_flags[s]}
+        {"Symbol": s, "previous_flag": prev_flags[s], "flag": None}
         for s in sorted(set(prev_flags) - set(curr_flags))
     ]
 
@@ -189,9 +193,12 @@ def build_daily_changes(base_dir: str | Path, out_dir: str | Path | None = None,
 
     payload = {
         "schema_version": SCHEMA_VERSION,
-        "generated_at": datetime.utcnow().isoformat(timespec="seconds"),
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "ranking_column": RANKING_COLUMN,
+        "current_score_date": None if pd.isna(curr_date) else str(pd.Timestamp(curr_date).date()),
+        "previous_score_date": None if pd.isna(prev_date) else str(pd.Timestamp(prev_date).date()),
         "previous_snapshot_available": not prev.empty,
+
         "top5_entries": top5_entries,
         "top5_exits": top5_exits,
         "top20_entries": top20_entries,
