@@ -55,23 +55,33 @@ def _top_n(df: pd.DataFrame, n: int) -> list[str]:
     return [str(s) for s in ordered["Symbol"].head(n).tolist()]
 
 
+CLEAN_RISK_TOKENS = {"", "nan", "none", "null", "clean", "no risk", "no risk flag", "-"}
+
+
+def _is_clean_flag(raw) -> bool:
+    """True when a Risk_Flag value means 'no active risk'."""
+    if raw is None:
+        return True
+    if isinstance(raw, float) and pd.isna(raw):
+        return True
+    return str(raw).strip().lower() in CLEAN_RISK_TOKENS
+
+
 def _risk_flag_set(df: pd.DataFrame) -> dict[str, str]:
-    """{symbol: risk_flag_text} for rows where the flag is truly non-empty
-    (NaN / empty / whitespace all treated as no flag)."""
+    """{symbol: active_risk_flag_text} for rows carrying a non-clean flag.
+
+    Blank / missing / NaN / "Clean" all mean *no active risk* and are omitted.
+    """
     if df is None or df.empty or "Symbol" not in df.columns or "Risk_Flag" not in df.columns:
         return {}
     out: dict[str, str] = {}
     for r in df.itertuples(index=False):
         raw = getattr(r, "Risk_Flag", None)
-        if raw is None:
+        if _is_clean_flag(raw):
             continue
-        if isinstance(raw, float) and pd.isna(raw):
-            continue
-        flag = str(raw).strip()
-        if not flag or flag.lower() == "nan":
-            continue
-        out[str(getattr(r, "Symbol", ""))] = flag
+        out[str(getattr(r, "Symbol", ""))] = str(raw).strip()
     return out
+
 
 
 def _rank_map(df: pd.DataFrame) -> dict[str, int]:
