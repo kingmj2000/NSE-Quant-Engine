@@ -1925,7 +1925,10 @@ document.getElementById("cards").innerHTML = (DATA.cards||[]).map(c=>`
     ${c.sent ? `<div class="sub" style="margin-top:6px;font-size:11.5px">📰 ${c.sent.n} headlines · 🟢 ${c.sent.pos}% / 🔴 ${c.sent.neg}% · net=${fmt(c.sent.net,'',2)}</div>` : ''}
     <div class="flags">${(c.flags||[]).map(f=>`<div class="flag"><span class="fdot ${dotc[f[0]]||'d-dim'}"></span><b>${f[1]}:</b> ${f[2]}</div>`).join('')}</div>
     ${c.plain ? `<div class="plain">${c.plain}</div>` : ''}
- </div>`).join("") || `<div class="glass panel"><div class="sub">No trade-plan output yet — run the pipeline.</div></div>`;
+  </div>`).join("") || (DATA.ranking_unavailable
+    ? `<div class="glass panel"><div class="sub"><b>Official ranking unavailable.</b> ${DATA.ranking_column||'Confidence_Adjusted_Score'} is missing or invalid for every candidate. No raw-score fallback is used — resolve the data-quality issue and re-run.</div></div>`
+    : `<div class="glass panel"><div class="sub">No trade-plan output yet — run the pipeline.</div></div>`);
+
 
 // Plain-English summary card + permanent disclaimer panel — deterministic HTML built server-side.
 (function injectPlainLayer(){
