@@ -691,24 +691,26 @@ def _payload() -> dict:
     alpha_survivors = _safe_read_json(OUT / "alpha_zoo_survivors.json")
 
     # --- verdict / banner ---
-    # Verdict source order: structured JSON → markdown fallback → neutral chip.
-    # Missing sources must NEVER default to a positive verdict.
+    # validation_status.json (read through core.validation_status.read_status)
+    # is the SOLE verdict authority. The markdown report is never scraped:
+    # missing / corrupt status must degrade to a neutral, watchlist-only chip.
     verdict_source = "unavailable"
     verdict = None
     grade = None
-    if (OUT / "validation_status.json").exists() and val:
-        verdict = val.get("verdict")
-        grade = val.get("evidence_grade")
-        if verdict:
-            verdict_source = "validation_status.json"
-    if not verdict:
-        md_verdict = _verdict_from_markdown(OUT / "cross_sectional_validation_report.md")
-        if md_verdict:
-            verdict = md_verdict
-            verdict_source = "cross_sectional_validation_report.md"
+    try:
+        from core import validation_status as _vs
+        _status = _vs.read_status(OUT / "validation_status.json")
+    except Exception:
+        _status = {}
+    _v = str((_status or {}).get("verdict") or "").strip()
+    grade = (_status or {}).get("evidence_grade")
+    if _v in _VALID_VERDICTS:
+        verdict = _v
+        verdict_source = "validation_status.json"
     if not verdict:
         verdict = "Verdict not yet available"
         grade = grade or "Insufficient Evidence"
+
 
     grade = grade or "Insufficient Evidence"
     stats = val.get("stats", {}) or {}
