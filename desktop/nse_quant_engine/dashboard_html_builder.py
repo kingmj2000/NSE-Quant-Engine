@@ -945,9 +945,9 @@ def _payload() -> dict:
                 "in_shadow_top5": _norm_sym(r.get("Symbol")) in shadow_top5_symbols,
                 # Dual score display for transparency (see RANKING_COLUMN note in config).
                 "rank_score": _num(r.get(_rank_col), 2),
-                "raw_score":  _num(r.get(_fallback_col), 2),
+                "raw_score":  _num(r.get(_raw_col), 2),
                 "rank_col_name": _rank_col,
-                "raw_col_name":  _fallback_col,
+                "raw_col_name":  _raw_col,
                 "bench": None,
                 "flags": flags,
             })
@@ -1188,7 +1188,7 @@ def _payload() -> dict:
     for _c in shadow_unique_top5:
         _c["plain"] = _plain_card_line(_c, _vstate)
     # ── Top-5 alignment: dashboard cards vs trade plan Top-5 ─────────────────
-    top5_alignment = _assert_top5_alignment(cards, tp, _rank_col, _fallback_col)
+    top5_alignment = _assert_top5_alignment(cards, tp, _rank_col)
 
 
     return {
