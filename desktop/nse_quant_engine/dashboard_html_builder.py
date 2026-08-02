@@ -453,26 +453,8 @@ def _plain_disclaimer_html() -> str:
 
 
 
-def _verdict_from_markdown(md_path: Path) -> str | None:
-    """Fallback verdict extractor. Looks for a line naming one of VALID_VERDICTS."""
-    if not md_path.exists():
-        return None
-    try:
-        txt = md_path.read_text(encoding="utf-8", errors="replace")
-    except Exception:
-        return None
-    for line in txt.splitlines():
-        low = line.strip()
-        if not low:
-            continue
-        # Prefer lines that look like a verdict heading, but accept any exact match.
-        for v in _VALID_VERDICTS:
-            if v in line:
-                return v
-    return None
-
-
 def _delta_matured_from_history(history_csv: Path, matured_today: int) -> int | None:
+
     """Diff matured count vs the most recent DISTINCT prior date in score_history.
     Returns None when there is no strictly-prior distinct date (hides the chip)."""
     if not history_csv.exists():
