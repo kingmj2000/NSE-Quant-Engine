@@ -103,15 +103,33 @@ def build_daily_changes(base_dir: str | Path, out_dir: str | Path | None = None,
     hist = _safe_csv(out / "score_history.csv")
     macro = _safe_json(out / "macro_context.json")
 
+    # Current official score date. The scoring run appends the current snapshot
+    # to score_history.csv *before* this builder runs, so the previous snapshot
+    # must be the latest distinct history date STRICTLY EARLIER than the
+    # current official date — never the current run compared against itself.
+    curr_date = pd.NaT
+    if not curr.empty and "Date" in curr.columns:
+        curr_date = pd.to_datetime(curr["Date"], errors="coerce").dropna().max()
+
     prev = pd.DataFrame()
+    prev_date = pd.NaT
     if not hist.empty and "Date" in hist.columns:
         try:
+            hist = hist.copy()
             hist["Date"] = pd.to_datetime(hist["Date"], errors="coerce")
-            latest = hist["Date"].dropna().max()
-            if pd.notna(latest):
-                prev = hist[hist["Date"] == latest].copy()
+            dates = sorted(hist["Date"].dropna().unique())
+            if pd.isna(curr_date) and dates:
+                # No date on latest_scores.csv — treat the newest history date
+                # as the current run.
+                curr_date = dates[-1]
+            earlier = [d for d in dates if pd.notna(curr_date) and d < curr_date]
+            if earlier:
+                prev_date = earlier[-1]
+                prev = hist[hist["Date"] == prev_date].copy()
         except Exception:
             prev = pd.DataFrame()
+            prev_date = pd.NaT
+
 
     # Official Top-5 / Top-20 diffs — only meaningful when we have a prior
     # snapshot to diff against. On a first-ever run every current name would
