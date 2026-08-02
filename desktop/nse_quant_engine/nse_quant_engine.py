@@ -786,7 +786,12 @@ def score_candidates(latest: pd.DataFrame, benchmark_prices: pd.DataFrame, rules
     df["Final_Score"] = np.array(final_scores).clip(0, 100)
     df["Confidence_Adjusted_Score"] = (df["Final_Score"] * (df["Confidence_Score"] / 10)).clip(0, 100)
 
-    df["Bucket"] = df.apply(assign_bucket, axis=1)
+    # Buckets are derived from the RAW Final_Score and are DIAGNOSTIC ONLY.
+    # They never determine official ranking, Trade Plan order or validation.
+    # `Raw_Score_Bucket` is the explicit name; `Bucket` is retained as a
+    # backward-compatible alias for existing artifacts and UI readers.
+    df["Raw_Score_Bucket"] = df.apply(assign_bucket, axis=1)
+    df["Bucket"] = df["Raw_Score_Bucket"]
     # Diagnostic-only raw score rank (retained for transparency; never consumed downstream).
     df["Raw_Score_Rank"] = (
         df.sort_values(["Final_Score", "Symbol"], ascending=[False, True])
@@ -971,7 +976,13 @@ def save_outputs(scored: pd.DataFrame, failed_symbols: List[str], config: pd.Dat
     eligible = latest_scores[latest_scores["Opportunity_Eligible"].astype(str).str.lower().eq("yes")].copy()
     # Official Top-N uses the authoritative ranking column (Confidence_Adjusted_Score, Symbol asc).
     top_opportunities = eligible.sort_values(["Confidence_Adjusted_Score", "Symbol"], ascending=[False, True]).head(TOP_N)
-    top_confidence_adjusted = top_opportunities  # kept for sheet-name backward compatibility
+    # Non-authoritative raw-score view, retained for diagnostics only.
+    raw_score_diagnostic = eligible.sort_values(
+        ["Final_Score", "Symbol"], ascending=[False, True]).head(TOP_N).copy()
+    raw_score_diagnostic.insert(
+        0, "Authority_Note",
+        "DIAGNOSTIC ONLY - ordered by raw Final_Score; NOT the official ranking "
+        "(official = Confidence_Adjusted_Score desc, Symbol asc)")
     top_etfs = eligible[eligible["Universe"].str.lower().eq("etf")].sort_values(["Confidence_Adjusted_Score", "Symbol"], ascending=[False, True]).head(TOP_N)
     top_stocks = eligible[eligible["Universe"].str.lower().eq("stock")].sort_values(["Confidence_Adjusted_Score", "Symbol"], ascending=[False, True]).head(TOP_N)
     low_risk = eligible[
@@ -991,7 +1002,7 @@ def save_outputs(scored: pd.DataFrame, failed_symbols: List[str], config: pd.Dat
         with pd.ExcelWriter(path, engine="openpyxl") as writer:
             latest_scores.to_excel(writer, sheet_name="Latest Scores", index=False)
             top_opportunities.to_excel(writer, sheet_name="Top Opportunities", index=False)
-            top_confidence_adjusted.to_excel(writer, sheet_name="Top Confidence Adj", index=False)
+            raw_score_diagnostic.to_excel(writer, sheet_name="Raw Score Diagnostic", index=False)
             top_etfs.to_excel(writer, sheet_name="Top ETFs", index=False)
             top_stocks.to_excel(writer, sheet_name="Top Stocks", index=False)
             low_risk.to_excel(writer, sheet_name="Top Low Risk", index=False)

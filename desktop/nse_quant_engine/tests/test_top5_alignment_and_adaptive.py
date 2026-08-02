@@ -108,7 +108,7 @@ def test_top5_alignment_ok_when_same_sort():
     tp = _make_tp()
     # cards sorted by CAS (matches trade plan)
     cards = [{"sym": s} for s in ["A.NS", "B.NS", "C.NS", "D.NS", "E.NS"]]
-    r = _assert_top5_alignment(cards, tp, "Confidence_Adjusted_Score", "Final_Score")
+    r = _assert_top5_alignment(cards, tp, "Confidence_Adjusted_Score")
     assert r["ok"] is True
 
 
@@ -116,7 +116,7 @@ def test_top5_alignment_mismatch_when_different_sort():
     tp = _make_tp()
     # cards sorted by Final_Score → different order
     cards = [{"sym": s} for s in ["F.NS", "B.NS", "A.NS", "D.NS", "C.NS"]]
-    r = _assert_top5_alignment(cards, tp, "Confidence_Adjusted_Score", "Final_Score")
+    r = _assert_top5_alignment(cards, tp, "Confidence_Adjusted_Score")
     assert r["ok"] is False
     assert r["reason"]
     assert set(r["dash"]) != set(r["plan"][:5]) or r["dash"] != r["plan"]

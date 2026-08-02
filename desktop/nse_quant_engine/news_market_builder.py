@@ -390,17 +390,21 @@ def build(pins: Iterable[str] | None = None) -> dict:
         duplicates_dropped = max(0, pre - len(cand_df))
 
     # --- Aggregate refresh status across live sources ---
+    #   success : every configured live source succeeded
+    #   partial : at least one fresh live result exists AND something failed
+    #   cached  : no fresh live result, but usable cache was used
+    #   failed  : no fresh live result and no usable cache
+    # A source-level "partial" counts as live data for overall status.
     live_statuses = [nse_status, gnews_status]
-    ok = sum(1 for s in live_statuses if s == "success")
-    bad = sum(1 for s in live_statuses if s in ("failed",))
-    if ok == len(live_statuses):
+    live_ok = sum(1 for s in live_statuses if s in ("success", "partial"))
+    all_success = all(s == "success" for s in live_statuses)
+    if all_success:
         refresh_status = "success"
-    elif ok >= 1 and bad >= 1:
+    elif live_ok >= 1:
         refresh_status = "partial"
-    elif ok == 0:
-        refresh_status = "cached" if not cache.empty else "failed"
     else:
-        refresh_status = "partial"
+        refresh_status = "cached" if not cache.empty else "failed"
+
 
     cache_fallback_used = (refresh_status in ("cached", "partial", "failed")) and (not cache.empty)
 

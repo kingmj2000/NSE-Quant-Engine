@@ -92,30 +92,49 @@ def _cfg(name: str, default):
     except Exception:
         return default
 
-def _assert_top5_alignment(cards: list, trade_plan_df, rank_col: str, fallback_col: str) -> dict:
+def _assert_top5_alignment(cards: list, trade_plan_df, rank_col: str) -> dict:
     """Compare dashboard cards Top-5 symbols vs trade_plan_latest.csv Top-5 symbols.
 
-    Both sides must sort by the same ranking column (RANKING_COLUMN). If the
-    ordered symbol lists diverge, the dashboard renders a RED "Top-5 mismatch"
-    honesty chip listing both lists rather than silently papering over it.
+    Both sides must sort by the SAME authoritative order: ``rank_col``
+    (Confidence_Adjusted_Score) descending, then Symbol ascending. Final_Score
+    is never a tie-breaker or fallback. If the ordered symbol lists diverge, the
+    dashboard renders a RED "Top-5 mismatch" honesty chip listing both lists.
     """
-    import pandas as _pd
     dash_syms = [_norm_sym(c.get("sym")) for c in cards[:5]]
     plan_syms: list[str] = []
     try:
         if trade_plan_df is None or getattr(trade_plan_df, "empty", True) or "Symbol" not in trade_plan_df.columns:
             return {"ok": None, "dash": dash_syms, "plan": [], "reason": "trade plan not available"}
         tp = trade_plan_df[~trade_plan_df["Symbol"].apply(_veto_symbol)].copy()
-        sort_by = [c for c in [rank_col, fallback_col] if c in tp.columns]
-        if not sort_by:
-            return {"ok": None, "dash": dash_syms, "plan": [], "reason": f"neither {rank_col} nor {fallback_col} in trade plan"}
-        tp = tp.sort_values(sort_by, ascending=False)
-        plan_syms = [_norm_sym(s) for s in tp["Symbol"].head(5).tolist()]
+        if rank_col not in tp.columns:
+            return {"ok": None, "dash": dash_syms, "plan": [], "reason": f"{rank_col} not in trade plan"}
+        plan_syms = [_norm_sym(s) for s in _official_order(tp, rank_col)["Symbol"].head(5).tolist()]
     except Exception as e:
         return {"ok": None, "dash": dash_syms, "plan": [], "reason": f"alignment check errored: {e}"}
     ok = dash_syms == plan_syms and len(dash_syms) > 0
     return {"ok": ok, "dash": dash_syms, "plan": plan_syms,
             "reason": None if ok else "dashboard Top-5 ≠ trade plan Top-5"}
+
+
+def _official_order(df, rank_col: str = "Confidence_Adjusted_Score"):
+    """Authoritative official ordering: rank_col desc, then Symbol asc.
+
+    Rows with a missing/invalid rank score are dropped — Final_Score is never a
+    fallback ranking column, so an all-invalid rank column yields an empty
+    frame and the caller must render a data-quality/empty state.
+    """
+    import pandas as _pd
+    if df is None or getattr(df, "empty", True) or rank_col not in df.columns:
+        return df.iloc[0:0].copy() if df is not None and hasattr(df, "iloc") else _pd.DataFrame()
+    out = df.copy()
+    out["_rank_score"] = _pd.to_numeric(out[rank_col], errors="coerce")
+    out = out[out["_rank_score"].notna()].copy()
+    if out.empty:
+        return out.drop(columns=["_rank_score"])
+    out["_sym"] = out["Symbol"].astype(str) if "Symbol" in out.columns else ""
+    out = out.sort_values(["_rank_score", "_sym"], ascending=[False, True], kind="mergesort")
+    return out.drop(columns=["_rank_score", "_sym"])
+
 
 
 
@@ -453,26 +472,8 @@ def _plain_disclaimer_html() -> str:
 
 
 
-def _verdict_from_markdown(md_path: Path) -> str | None:
-    """Fallback verdict extractor. Looks for a line naming one of VALID_VERDICTS."""
-    if not md_path.exists():
-        return None
-    try:
-        txt = md_path.read_text(encoding="utf-8", errors="replace")
-    except Exception:
-        return None
-    for line in txt.splitlines():
-        low = line.strip()
-        if not low:
-            continue
-        # Prefer lines that look like a verdict heading, but accept any exact match.
-        for v in _VALID_VERDICTS:
-            if v in line:
-                return v
-    return None
-
-
 def _delta_matured_from_history(history_csv: Path, matured_today: int) -> int | None:
+
     """Diff matured count vs the most recent DISTINCT prior date in score_history.
     Returns None when there is no strictly-prior distinct date (hides the chip)."""
     if not history_csv.exists():
@@ -691,24 +692,26 @@ def _payload() -> dict:
     alpha_survivors = _safe_read_json(OUT / "alpha_zoo_survivors.json")
 
     # --- verdict / banner ---
-    # Verdict source order: structured JSON → markdown fallback → neutral chip.
-    # Missing sources must NEVER default to a positive verdict.
+    # validation_status.json (read through core.validation_status.read_status)
+    # is the SOLE verdict authority. The markdown report is never scraped:
+    # missing / corrupt status must degrade to a neutral, watchlist-only chip.
     verdict_source = "unavailable"
     verdict = None
     grade = None
-    if (OUT / "validation_status.json").exists() and val:
-        verdict = val.get("verdict")
-        grade = val.get("evidence_grade")
-        if verdict:
-            verdict_source = "validation_status.json"
-    if not verdict:
-        md_verdict = _verdict_from_markdown(OUT / "cross_sectional_validation_report.md")
-        if md_verdict:
-            verdict = md_verdict
-            verdict_source = "cross_sectional_validation_report.md"
+    try:
+        from core import validation_status as _vs
+        _status = _vs.read_status(OUT / "validation_status.json")
+    except Exception:
+        _status = {}
+    _v = str((_status or {}).get("verdict") or "").strip()
+    grade = (_status or {}).get("evidence_grade")
+    if _v in _VALID_VERDICTS:
+        verdict = _v
+        verdict_source = "validation_status.json"
     if not verdict:
         verdict = "Verdict not yet available"
         grade = grade or "Insufficient Evidence"
+
 
     grade = grade or "Insufficient Evidence"
     stats = val.get("stats", {}) or {}
@@ -887,22 +890,22 @@ def _payload() -> dict:
         shadow_top5_symbols = {_norm_sym(s) for s in shadow_top5["Symbol"].tolist()}
 
     # --- candidate cards (official top 5 post-veto) ---
-    # Ranking-truth: sort by RANKING_COLUMN (Confidence_Adjusted_Score) with
-    # Final_Score as tiebreaker. The same sort is used by trade_plan_builder,
-    # so dashboard Top-5 and trade-plan Top-5 must match — we assert below.
+    # Ranking-truth: Confidence_Adjusted_Score desc, Symbol asc. Final_Score is
+    # NEVER a tie-breaker, fallback or replacement. The same order is used by
+    # trade_plan_builder, so dashboard Top-5 and trade-plan Top-5 must match.
     _rank_col = _cfg("RANKING_COLUMN", "Confidence_Adjusted_Score")
-    _fallback_col = "Final_Score"
+    _raw_col = "Final_Score"   # display only (diagnostic)
     cards = []
+    _cas_unavailable = False
     if not tp.empty:
         tp_clean = tp[~tp["Symbol"].apply(_veto_symbol)].copy()
-        _sort_by = [c for c in [_rank_col, _fallback_col] if c in tp_clean.columns]
-        if _sort_by:
-            # Fallback to Final_Score alone if primary is entirely NaN (logged).
-            if _rank_col in tp_clean.columns and tp_clean[_rank_col].notna().sum() == 0:
-                print(f"[dashboard] {_rank_col} all-NaN; falling back to {_fallback_col} for Top-5 sort")
-                _sort_by = [_fallback_col] if _fallback_col in tp_clean.columns else _sort_by
-            tp_clean = tp_clean.sort_values(_sort_by, ascending=False)
+        tp_clean = _official_order(tp_clean, _rank_col)
+        if tp_clean.empty:
+            _cas_unavailable = True
+            print(f"[dashboard] {_rank_col} missing/invalid for all rows — official Top-5 "
+                  f"suppressed (no Final_Score fallback).")
         for _, r in tp_clean.head(5).iterrows():
+
             rsi = _num(r.get("RSI_14"), 1)
             vol = _num((r.get("Volatility_20D") or 0) * 100, 1)
             flags = []
@@ -942,9 +945,9 @@ def _payload() -> dict:
                 "in_shadow_top5": _norm_sym(r.get("Symbol")) in shadow_top5_symbols,
                 # Dual score display for transparency (see RANKING_COLUMN note in config).
                 "rank_score": _num(r.get(_rank_col), 2),
-                "raw_score":  _num(r.get(_fallback_col), 2),
+                "raw_score":  _num(r.get(_raw_col), 2),
                 "rank_col_name": _rank_col,
-                "raw_col_name":  _fallback_col,
+                "raw_col_name":  _raw_col,
                 "bench": None,
                 "flags": flags,
             })
@@ -1185,7 +1188,7 @@ def _payload() -> dict:
     for _c in shadow_unique_top5:
         _c["plain"] = _plain_card_line(_c, _vstate)
     # ── Top-5 alignment: dashboard cards vs trade plan Top-5 ─────────────────
-    top5_alignment = _assert_top5_alignment(cards, tp, _rank_col, _fallback_col)
+    top5_alignment = _assert_top5_alignment(cards, tp, _rank_col)
 
 
     return {
@@ -1211,6 +1214,8 @@ def _payload() -> dict:
         "cards": cards,
         "top5_alignment": top5_alignment,
         "ranking_column": _rank_col,
+        "ranking_unavailable": bool(_cas_unavailable),
+
         "shadow_unique_top5": shadow_unique_top5,
         "scatter": scatter,
         "avoid": avoid,
@@ -1920,7 +1925,10 @@ document.getElementById("cards").innerHTML = (DATA.cards||[]).map(c=>`
     ${c.sent ? `<div class="sub" style="margin-top:6px;font-size:11.5px">📰 ${c.sent.n} headlines · 🟢 ${c.sent.pos}% / 🔴 ${c.sent.neg}% · net=${fmt(c.sent.net,'',2)}</div>` : ''}
     <div class="flags">${(c.flags||[]).map(f=>`<div class="flag"><span class="fdot ${dotc[f[0]]||'d-dim'}"></span><b>${f[1]}:</b> ${f[2]}</div>`).join('')}</div>
     ${c.plain ? `<div class="plain">${c.plain}</div>` : ''}
- </div>`).join("") || `<div class="glass panel"><div class="sub">No trade-plan output yet — run the pipeline.</div></div>`;
+  </div>`).join("") || (DATA.ranking_unavailable
+    ? `<div class="glass panel"><div class="sub"><b>Official ranking unavailable.</b> ${DATA.ranking_column||'Confidence_Adjusted_Score'} is missing or invalid for every candidate. No raw-score fallback is used — resolve the data-quality issue and re-run.</div></div>`
+    : `<div class="glass panel"><div class="sub">No trade-plan output yet — run the pipeline.</div></div>`);
+
 
 // Plain-English summary card + permanent disclaimer panel — deterministic HTML built server-side.
 (function injectPlainLayer(){

@@ -161,8 +161,12 @@ def _synthetic_prices(seed=1):
 def test_portfolio_diversification_picks_uncorrelated():
     prices = _synthetic_prices()
     syms = [f"IT{i}" for i in range(5)] + [f"IND{i}" for i in range(5)]
+    # Confidence_Adjusted_Score is the authoritative score consumed by
+    # portfolio selection — Final_Score is diagnostic only.
     cand = pd.DataFrame({"Symbol": syms,
-                         "Final_Score": [95,94,93,92,91,88,86,84,82,80]})
+                         "Confidence_Adjusted_Score": [95,94,93,92,91,88,86,84,82,80],
+                         "Final_Score": [80,82,84,86,88,91,92,93,94,95]})
+
     corr = psel.pairwise_corr(prices, syms, window=60)
     assert not corr.empty and corr.shape == (10, 10)
     # correlated cluster must have avg |corr| >> independent

@@ -16,7 +16,7 @@ second ranking method.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -55,23 +55,33 @@ def _top_n(df: pd.DataFrame, n: int) -> list[str]:
     return [str(s) for s in ordered["Symbol"].head(n).tolist()]
 
 
+CLEAN_RISK_TOKENS = {"", "nan", "none", "null", "clean", "no risk", "no risk flag", "-"}
+
+
+def _is_clean_flag(raw) -> bool:
+    """True when a Risk_Flag value means 'no active risk'."""
+    if raw is None:
+        return True
+    if isinstance(raw, float) and pd.isna(raw):
+        return True
+    return str(raw).strip().lower() in CLEAN_RISK_TOKENS
+
+
 def _risk_flag_set(df: pd.DataFrame) -> dict[str, str]:
-    """{symbol: risk_flag_text} for rows where the flag is truly non-empty
-    (NaN / empty / whitespace all treated as no flag)."""
+    """{symbol: active_risk_flag_text} for rows carrying a non-clean flag.
+
+    Blank / missing / NaN / "Clean" all mean *no active risk* and are omitted.
+    """
     if df is None or df.empty or "Symbol" not in df.columns or "Risk_Flag" not in df.columns:
         return {}
     out: dict[str, str] = {}
     for r in df.itertuples(index=False):
         raw = getattr(r, "Risk_Flag", None)
-        if raw is None:
+        if _is_clean_flag(raw):
             continue
-        if isinstance(raw, float) and pd.isna(raw):
-            continue
-        flag = str(raw).strip()
-        if not flag or flag.lower() == "nan":
-            continue
-        out[str(getattr(r, "Symbol", ""))] = flag
+        out[str(getattr(r, "Symbol", ""))] = str(raw).strip()
     return out
+
 
 
 def _rank_map(df: pd.DataFrame) -> dict[str, int]:
@@ -93,15 +103,43 @@ def build_daily_changes(base_dir: str | Path, out_dir: str | Path | None = None,
     hist = _safe_csv(out / "score_history.csv")
     macro = _safe_json(out / "macro_context.json")
 
+    # Current official score date. The scoring run appends the current snapshot
+    # to score_history.csv *before* this builder runs, so the previous snapshot
+    # must be the latest distinct history date STRICTLY EARLIER than the
+    # current official date — never the current run compared against itself.
+    curr_date = pd.NaT
+    curr_date_known = False
+    if not curr.empty and "Date" in curr.columns:
+        curr_date = pd.to_datetime(curr["Date"], errors="coerce").dropna().max()
+        curr_date_known = pd.notna(curr_date)
+
     prev = pd.DataFrame()
+    prev_date = pd.NaT
     if not hist.empty and "Date" in hist.columns:
         try:
+            hist = hist.copy()
             hist["Date"] = pd.to_datetime(hist["Date"], errors="coerce")
-            latest = hist["Date"].dropna().max()
-            if pd.notna(latest):
-                prev = hist[hist["Date"] == latest].copy()
+            dates = sorted(hist["Date"].dropna().unique())
+            if pd.isna(curr_date) and dates:
+                # latest_scores.csv carries no Date. The newest history date is
+                # the current run only when it holds the same symbol set as the
+                # current snapshot (the engine appends before this runs);
+                # otherwise it is a genuine prior snapshot to diff against.
+                newest_syms = set(
+                    hist.loc[hist["Date"] == dates[-1], "Symbol"].astype(str)
+                ) if "Symbol" in hist.columns else set()
+                curr_syms = set(curr["Symbol"].astype(str)) if "Symbol" in curr.columns else set()
+                curr_date = dates[-1] if newest_syms == curr_syms and curr_syms else (
+                    dates[-1] + pd.Timedelta(days=1))
+
+            earlier = [d for d in dates if pd.notna(curr_date) and d < curr_date]
+            if earlier:
+                prev_date = earlier[-1]
+                prev = hist[hist["Date"] == prev_date].copy()
         except Exception:
             prev = pd.DataFrame()
+            prev_date = pd.NaT
+
 
     # Official Top-5 / Top-20 diffs — only meaningful when we have a prior
     # snapshot to diff against. On a first-ever run every current name would
@@ -140,15 +178,19 @@ def build_daily_changes(base_dir: str | Path, out_dir: str | Path | None = None,
     else:
         gainers, losers = [], []
 
-    # Risk flag additions / clearances.
+    # Risk changes. Blank / missing / NaN / "Clean" all mean no active risk.
+    #   new_risk_flags     — current flag is non-clean AND differs from previous
+    #                        (covers clean→risk and risk→different-risk).
+    #   cleared_risk_flags — previous flag was non-clean and current is clean.
     curr_flags = _risk_flag_set(curr)
     prev_flags = _risk_flag_set(prev)
     new_flags = [
-        {"Symbol": s, "flag": curr_flags[s]}
-        for s in sorted(set(curr_flags) - set(prev_flags))
+        {"Symbol": s, "flag": curr_flags[s], "previous_flag": prev_flags.get(s)}
+        for s in sorted(curr_flags)
+        if curr_flags[s] != prev_flags.get(s)
     ]
     cleared_flags = [
-        {"Symbol": s, "previous_flag": prev_flags[s]}
+        {"Symbol": s, "previous_flag": prev_flags[s], "flag": None}
         for s in sorted(set(prev_flags) - set(curr_flags))
     ]
 
@@ -161,9 +203,12 @@ def build_daily_changes(base_dir: str | Path, out_dir: str | Path | None = None,
 
     payload = {
         "schema_version": SCHEMA_VERSION,
-        "generated_at": datetime.utcnow().isoformat(timespec="seconds"),
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "ranking_column": RANKING_COLUMN,
+        "current_score_date": str(pd.Timestamp(curr_date).date()) if curr_date_known else None,
+        "previous_score_date": None if pd.isna(prev_date) else str(pd.Timestamp(prev_date).date()),
         "previous_snapshot_available": not prev.empty,
+
         "top5_entries": top5_entries,
         "top5_exits": top5_exits,
         "top20_entries": top20_entries,
