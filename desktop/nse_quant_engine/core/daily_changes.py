@@ -119,9 +119,17 @@ def build_daily_changes(base_dir: str | Path, out_dir: str | Path | None = None,
             hist["Date"] = pd.to_datetime(hist["Date"], errors="coerce")
             dates = sorted(hist["Date"].dropna().unique())
             if pd.isna(curr_date) and dates:
-                # No date on latest_scores.csv — treat the newest history date
-                # as the current run.
-                curr_date = dates[-1]
+                # latest_scores.csv carries no Date. The newest history date is
+                # the current run only when it holds the same symbol set as the
+                # current snapshot (the engine appends before this runs);
+                # otherwise it is a genuine prior snapshot to diff against.
+                newest_syms = set(
+                    hist.loc[hist["Date"] == dates[-1], "Symbol"].astype(str)
+                ) if "Symbol" in hist.columns else set()
+                curr_syms = set(curr["Symbol"].astype(str)) if "Symbol" in curr.columns else set()
+                curr_date = dates[-1] if newest_syms == curr_syms and curr_syms else (
+                    dates[-1] + pd.Timedelta(days=1))
+
             earlier = [d for d in dates if pd.notna(curr_date) and d < curr_date]
             if earlier:
                 prev_date = earlier[-1]
