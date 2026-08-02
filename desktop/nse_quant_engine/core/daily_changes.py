@@ -108,8 +108,10 @@ def build_daily_changes(base_dir: str | Path, out_dir: str | Path | None = None,
     # must be the latest distinct history date STRICTLY EARLIER than the
     # current official date — never the current run compared against itself.
     curr_date = pd.NaT
+    curr_date_known = False
     if not curr.empty and "Date" in curr.columns:
         curr_date = pd.to_datetime(curr["Date"], errors="coerce").dropna().max()
+        curr_date_known = pd.notna(curr_date)
 
     prev = pd.DataFrame()
     prev_date = pd.NaT
@@ -203,7 +205,7 @@ def build_daily_changes(base_dir: str | Path, out_dir: str | Path | None = None,
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "ranking_column": RANKING_COLUMN,
-        "current_score_date": None if pd.isna(curr_date) else str(pd.Timestamp(curr_date).date()),
+        "current_score_date": str(pd.Timestamp(curr_date).date()) if curr_date_known else None,
         "previous_score_date": None if pd.isna(prev_date) else str(pd.Timestamp(prev_date).date()),
         "previous_snapshot_available": not prev.empty,
 
