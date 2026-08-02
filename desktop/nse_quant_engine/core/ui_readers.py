@@ -217,7 +217,13 @@ def read_news_digest(out_dir: str | Path) -> dict:
     return {
         "schema_version": data.get("schema_version"),
         "generated_at": data.get("generated_at"),
+        # Refresh timestamps: "New since last run" must compare against the
+        # PREVIOUS successful refresh, not generated_at (which advances even on
+        # a failed refresh).
+        "last_successful_refresh_at": data.get("last_successful_refresh_at"),
+        "previous_successful_refresh_at": data.get("previous_successful_refresh_at"),
         "refresh_status": data.get("refresh_status") or "unknown",
+
         "ranking_column": data.get("ranking_column") or "Confidence_Adjusted_Score",
         "disclaimer": data.get("disclaimer") or "",
         "counts": data.get("counts") or {},
