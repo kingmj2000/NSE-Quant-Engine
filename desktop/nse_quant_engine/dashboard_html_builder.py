@@ -1214,6 +1214,8 @@ def _payload() -> dict:
         "cards": cards,
         "top5_alignment": top5_alignment,
         "ranking_column": _rank_col,
+        "ranking_unavailable": bool(_cas_unavailable),
+
         "shadow_unique_top5": shadow_unique_top5,
         "scatter": scatter,
         "avoid": avoid,
