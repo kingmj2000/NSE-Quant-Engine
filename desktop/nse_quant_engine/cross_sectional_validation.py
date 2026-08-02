@@ -325,14 +325,16 @@ def make_detail(scores: pd.DataFrame, fwd: pd.DataFrame) -> pd.DataFrame:
     if "Opportunity_Eligible" in work.columns:
         work = work[work["Opportunity_Eligible"].astype(str).str.lower().eq("yes")].copy()
 
-    # Authoritative verdict is computed on schema-v2 rows only (Confidence_Adjusted_Score
-    # is the ranking authority). Legacy schema-v1 rows remain in score_history.csv for
-    # audit, but are excluded here so a stale Final_Score-authored past cannot green-light
-    # the current CAS-authored model.
+    # Authoritative verdict is computed on schema-v2 rows ONLY (Confidence_Adjusted_Score
+    # is the ranking authority). Legacy schema-v1 rows remain in score_history.csv as
+    # archived diagnostic history, but are never authoritative — with no v2 rows the
+    # verdict must be Insufficient History, never a v1 fallback.
     if "Ranking_Schema_Version" in work.columns:
         v2 = pd.to_numeric(work["Ranking_Schema_Version"], errors="coerce").fillna(1).astype(int).eq(2)
-        if v2.any():
-            work = work[v2].copy()
+    else:
+        v2 = pd.Series(False, index=work.index)
+    work = work[v2].copy()
+
 
     detail = assign_buckets(work)
 
