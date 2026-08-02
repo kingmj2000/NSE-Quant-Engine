@@ -890,22 +890,22 @@ def _payload() -> dict:
         shadow_top5_symbols = {_norm_sym(s) for s in shadow_top5["Symbol"].tolist()}
 
     # --- candidate cards (official top 5 post-veto) ---
-    # Ranking-truth: sort by RANKING_COLUMN (Confidence_Adjusted_Score) with
-    # Final_Score as tiebreaker. The same sort is used by trade_plan_builder,
-    # so dashboard Top-5 and trade-plan Top-5 must match — we assert below.
+    # Ranking-truth: Confidence_Adjusted_Score desc, Symbol asc. Final_Score is
+    # NEVER a tie-breaker, fallback or replacement. The same order is used by
+    # trade_plan_builder, so dashboard Top-5 and trade-plan Top-5 must match.
     _rank_col = _cfg("RANKING_COLUMN", "Confidence_Adjusted_Score")
-    _fallback_col = "Final_Score"
+    _raw_col = "Final_Score"   # display only (diagnostic)
     cards = []
+    _cas_unavailable = False
     if not tp.empty:
         tp_clean = tp[~tp["Symbol"].apply(_veto_symbol)].copy()
-        _sort_by = [c for c in [_rank_col, _fallback_col] if c in tp_clean.columns]
-        if _sort_by:
-            # Fallback to Final_Score alone if primary is entirely NaN (logged).
-            if _rank_col in tp_clean.columns and tp_clean[_rank_col].notna().sum() == 0:
-                print(f"[dashboard] {_rank_col} all-NaN; falling back to {_fallback_col} for Top-5 sort")
-                _sort_by = [_fallback_col] if _fallback_col in tp_clean.columns else _sort_by
-            tp_clean = tp_clean.sort_values(_sort_by, ascending=False)
+        tp_clean = _official_order(tp_clean, _rank_col)
+        if tp_clean.empty:
+            _cas_unavailable = True
+            print(f"[dashboard] {_rank_col} missing/invalid for all rows — official Top-5 "
+                  f"suppressed (no Final_Score fallback).")
         for _, r in tp_clean.head(5).iterrows():
+
             rsi = _num(r.get("RSI_14"), 1)
             vol = _num((r.get("Volatility_20D") or 0) * 100, 1)
             flags = []
