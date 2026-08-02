@@ -231,14 +231,15 @@ ADAPTIVE_RIDGE_ALPHA        = _f("ADAPTIVE_RIDGE_ALPHA", 1.0)
 ALPHA_WEIGHTS               = {"momentum": 0.5, "trend": 0.3, "safety": 0.2}
 # Hard collinearity guardrail on the alpha panel handed to fit_adaptive_weights.
 ADAPTIVE_MAX_ALPHA_CORR     = _f("ADAPTIVE_MAX_ALPHA_CORR", 0.8)
-
-# ── Single source of ranking truth for Top-5 across dashboard / trade plan / validated ─
-# Confidence_Adjusted_Score embeds data-completeness and regime tilt, so a candidate
-# can rank lower for missing metadata rather than worse raw prospects. Raw Final_Score
-# is displayed alongside in the Top-5 UI for transparency. Falls back to Final_Score
-# only when the primary column is entirely NaN (logged).
+# ── Single source of ranking truth across dashboard / trade plan / validated ───
+# Official order = Confidence_Adjusted_Score descending, Symbol ascending.
+# Raw Final_Score is DIAGNOSTIC ONLY: it is never a tie-breaker, never a fallback
+# ranking column and never a replacement when the primary column is missing.
+# When Confidence_Adjusted_Score is missing/invalid, consumers must render a
+# data-quality/empty state instead of ranking by raw score.
 RANKING_COLUMN              = os.environ.get("RANKING_COLUMN", "Confidence_Adjusted_Score")
-RANKING_COLUMN_FALLBACK     = "Final_Score"
+RANKING_COLUMN_FALLBACK     = None   # deliberately no official fallback
+
 
 # ── Dashboard shadow-green gate ─────────────────────────────────────────────
 # Dashboard "GREEN" chip must not be easier to earn than the documented
