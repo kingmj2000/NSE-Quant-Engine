@@ -177,74 +177,26 @@ def load_rules() -> Dict[str, float]:
     return rules
 
 
-def extract_validation_section(text: str) -> str:
-    if not text:
-        return ""
-
-    match = re.search(
-        r"##\s*Validation Verdict\s*(.*?)(?:\n##\s+|\Z)",
-        text,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    if match:
-        return match.group(1)
-
-    # fallback: only inspect beginning of file, not interpretation rules
-    return text[:1200]
-
-
-def strict_extract_verdict(text: str) -> str:
-    section = extract_validation_section(text)
-
-    # In our report, the first bold verdict line is authoritative.
-    bolds = re.findall(r"\*\*(.*?)\*\*", section)
-    for raw in bolds:
-        value = raw.strip()
-        for verdict in VERDICTS:
-            if value.lower() == verdict.lower():
-                return verdict
-
-    # Fallback: scan only the validation section, never the whole document.
-    for verdict in VERDICTS:
-        if re.search(rf"\b{re.escape(verdict)}\b", section[:1000], flags=re.IGNORECASE):
-            return verdict
-
-    return "Insufficient History"
-
-
-def strict_extract_grade(text: str) -> str:
-    section = extract_validation_section(text)
-
-    match = re.search(r"Evidence grade:\s*\*\*(.*?)\*\*", section, flags=re.IGNORECASE)
-    if match:
-        return match.group(1).strip()
-
-    match = re.search(r"Evidence\s+Grade\s*:\s*([A-Za-z /-]+)", section, flags=re.IGNORECASE)
-    if match:
-        return match.group(1).strip()
-
-    return "Insufficient Evidence"
-
-
 def parse_validation_report() -> tuple[str, str, str]:
-    # PREFER structured validation_status.json (no markdown scraping).
+    """Return (verdict, evidence_grade, source).
+
+    `output/validation_status.json` (via core.validation_status.read_status) is
+    the SOLE verdict authority. The markdown report is a human rendering and is
+    never scraped — a report saying "Validation Positive" can never override a
+    missing, corrupt or negative status file. Any failure degrades safely to
+    Insufficient History / Insufficient Evidence (watchlist only).
+    """
     try:
         from core import validation_status as _vs
-        status_path = OUTPUT_DIR / "validation_status.json"
-        if status_path.exists():
-            data = _vs.read_status(status_path)
-            return data.get("verdict", "Insufficient History"), data.get("evidence_grade", "Insufficient Evidence"), "validation_status.json"
-    except Exception as _e:
-        print(f"validation_status.json read skipped: {_e}")
+        data = _vs.read_status(OUTPUT_DIR / "validation_status.json")
+        verdict = str(data.get("verdict") or "").strip()
+        if verdict in VERDICTS:
+            return verdict, str(data.get("evidence_grade") or "Insufficient Evidence"), "validation_status.json"
+        return "Insufficient History", "Insufficient Evidence", "validation_status.json (missing/invalid verdict)"
+    except Exception as exc:
+        print(f"validation_status.json unreadable ({exc}); defaulting to Insufficient History")
+        return "Insufficient History", "Insufficient Evidence", "validation_status.json (unreadable)"
 
-    if not VALIDATION_REPORT.exists():
-        return "Insufficient History", "Insufficient Evidence", "cross_sectional_validation_report.md missing"
-
-    text = VALIDATION_REPORT.read_text(encoding="utf-8", errors="ignore")
-    verdict = strict_extract_verdict(text)
-    grade = strict_extract_grade(text)
-
-    return verdict, grade, "cross_sectional_validation_report.md"
 
 
 def expected_data_state(verdict: str) -> str:
