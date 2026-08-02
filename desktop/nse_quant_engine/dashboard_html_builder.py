@@ -92,30 +92,49 @@ def _cfg(name: str, default):
     except Exception:
         return default
 
-def _assert_top5_alignment(cards: list, trade_plan_df, rank_col: str, fallback_col: str) -> dict:
+def _assert_top5_alignment(cards: list, trade_plan_df, rank_col: str) -> dict:
     """Compare dashboard cards Top-5 symbols vs trade_plan_latest.csv Top-5 symbols.
 
-    Both sides must sort by the same ranking column (RANKING_COLUMN). If the
-    ordered symbol lists diverge, the dashboard renders a RED "Top-5 mismatch"
-    honesty chip listing both lists rather than silently papering over it.
+    Both sides must sort by the SAME authoritative order: ``rank_col``
+    (Confidence_Adjusted_Score) descending, then Symbol ascending. Final_Score
+    is never a tie-breaker or fallback. If the ordered symbol lists diverge, the
+    dashboard renders a RED "Top-5 mismatch" honesty chip listing both lists.
     """
-    import pandas as _pd
     dash_syms = [_norm_sym(c.get("sym")) for c in cards[:5]]
     plan_syms: list[str] = []
     try:
         if trade_plan_df is None or getattr(trade_plan_df, "empty", True) or "Symbol" not in trade_plan_df.columns:
             return {"ok": None, "dash": dash_syms, "plan": [], "reason": "trade plan not available"}
         tp = trade_plan_df[~trade_plan_df["Symbol"].apply(_veto_symbol)].copy()
-        sort_by = [c for c in [rank_col, fallback_col] if c in tp.columns]
-        if not sort_by:
-            return {"ok": None, "dash": dash_syms, "plan": [], "reason": f"neither {rank_col} nor {fallback_col} in trade plan"}
-        tp = tp.sort_values(sort_by, ascending=False)
-        plan_syms = [_norm_sym(s) for s in tp["Symbol"].head(5).tolist()]
+        if rank_col not in tp.columns:
+            return {"ok": None, "dash": dash_syms, "plan": [], "reason": f"{rank_col} not in trade plan"}
+        plan_syms = [_norm_sym(s) for s in _official_order(tp, rank_col)["Symbol"].head(5).tolist()]
     except Exception as e:
         return {"ok": None, "dash": dash_syms, "plan": [], "reason": f"alignment check errored: {e}"}
     ok = dash_syms == plan_syms and len(dash_syms) > 0
     return {"ok": ok, "dash": dash_syms, "plan": plan_syms,
             "reason": None if ok else "dashboard Top-5 ≠ trade plan Top-5"}
+
+
+def _official_order(df, rank_col: str = "Confidence_Adjusted_Score"):
+    """Authoritative official ordering: rank_col desc, then Symbol asc.
+
+    Rows with a missing/invalid rank score are dropped — Final_Score is never a
+    fallback ranking column, so an all-invalid rank column yields an empty
+    frame and the caller must render a data-quality/empty state.
+    """
+    import pandas as _pd
+    if df is None or getattr(df, "empty", True) or rank_col not in df.columns:
+        return df.iloc[0:0].copy() if df is not None and hasattr(df, "iloc") else _pd.DataFrame()
+    out = df.copy()
+    out["_rank_score"] = _pd.to_numeric(out[rank_col], errors="coerce")
+    out = out[out["_rank_score"].notna()].copy()
+    if out.empty:
+        return out.drop(columns=["_rank_score"])
+    out["_sym"] = out["Symbol"].astype(str) if "Symbol" in out.columns else ""
+    out = out.sort_values(["_rank_score", "_sym"], ascending=[False, True], kind="mergesort")
+    return out.drop(columns=["_rank_score", "_sym"])
+
 
 
 
