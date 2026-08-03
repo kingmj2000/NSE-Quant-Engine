@@ -70,7 +70,17 @@ def diversified_top_n(candidates: pd.DataFrame,
     """
     if candidates is None or candidates.empty:
         return []
-    ranked = candidates.sort_values(score_col, ascending=False).reset_index(drop=True)
+    if score_col not in candidates.columns or symbol_col not in candidates.columns:
+        # No authoritative score column → fail safe. Final_Score is never a fallback.
+        return []
+    ranked = candidates.copy()
+    ranked["_score"] = pd.to_numeric(ranked[score_col], errors="coerce")
+    ranked = ranked[ranked["_score"].notna()]
+    if ranked.empty:
+        return []
+    ranked["_sym"] = ranked[symbol_col].astype(str)
+    ranked = (ranked.sort_values(["_score", "_sym"], ascending=[False, True], kind="mergesort")
+                    .drop(columns=["_score", "_sym"]).reset_index(drop=True))
     all_syms = ranked[symbol_col].astype(str).tolist()
     if corr is None or corr.empty:
         return all_syms[:n]
@@ -92,7 +102,7 @@ def diversified_top_n(candidates: pd.DataFrame,
         for s in remaining:
             max_c = max(abs(float(corr.loc[s, t])) for t in selected)
             val = alpha * norm[s] - (1.0 - alpha) * max_c
-            if val > best_val:
+            if val > best_val or (best_sym is not None and val == best_val and s < best_sym):
                 best_val, best_sym = val, s
         selected.append(best_sym)
         remaining.remove(best_sym)

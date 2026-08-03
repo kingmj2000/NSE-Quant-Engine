@@ -77,14 +77,22 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "Lovable App" },
-      { name: "description", content: "Lovable Generated Project" },
-      { name: "author", content: "Lovable" },
-      { property: "og:title", content: "Lovable App" },
-      { property: "og:description", content: "Lovable Generated Project" },
+      { title: "NSE Quant Engine" },
+      {
+        name: "description",
+        content:
+          "Offline-first NSE equity and ETF screener with cost-aware out-of-sample validation.",
+      },
+      { name: "author", content: "NSE Quant Engine contributors" },
+      { property: "og:title", content: "NSE Quant Engine" },
+      {
+        property: "og:description",
+        content:
+          "Offline-first NSE equity and ETF screener with cost-aware out-of-sample validation.",
+      },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary" },
-      { name: "twitter:site", content: "@Lovable" },
+
     ],
     links: [
       {

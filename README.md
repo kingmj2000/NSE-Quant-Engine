@@ -68,7 +68,7 @@ Headless:
 cd desktop/nse_quant_engine
 python orchestrator.py --all              # full pipeline incl. fetch
 python orchestrator.py --all --skip-fetch # re-score from cache
-python run_shadow_mode.py                 # dormant adaptive/shadow layer
+python nse_quant_engine_v4_shadow.py      # dormant adaptive/shadow layer
 ```
 
 Windows batch equivalents: `run_full_workflow.bat`, `run_shadow_mode.bat`.
@@ -95,9 +95,9 @@ Full detail: [`docs/VALIDATION_METHODOLOGY.md`](docs/VALIDATION_METHODOLOGY.md).
 
 | File | What it is |
 |---|---|
-| `nse_quant_scores.xlsx` | Official engine scores & ranks |
+| `latest_scores.xlsx` | Official engine scores & ranks |
 | `latest_scores.csv` | Latest per-symbol score row (UI + shadow input) |
-| `nse_quant_scores_v4_shadow.xlsx` | Shadow engine scores (never reorders official) |
+| `latest_scores_v4_shadow.xlsx` | Shadow engine scores (never reorders official) |
 | `validation_status.json` | Canonical verdict (authoritative) |
 | `cross_sectional_validation_report.md` | Human-readable validation narrative |
 | `trade_plan_report.md` / `.xlsx` | Trade plan (ship-gated) |
@@ -114,7 +114,10 @@ Synthetic examples of the main shapes: [`examples/sample_output/`](examples/samp
 
 No market data, price/delivery/option caches, validation history, evidence
 bundles or portfolio files are published here. `data/` and `output/` are
-git-ignored (see `desktop/.gitignore`) and are created on first run.
+git-ignored (see `desktop/.gitignore`) and are created on first run. A few
+runtime files from an earlier snapshot are still present in the Git index; run
+the `git rm --cached` commands in [`CONTRIBUTING.md`](CONTRIBUTING.md) once to
+untrack them (your local copies are kept).
 
 If you cloned an older snapshot that still tracked those folders, see
 [`CONTRIBUTING.md`](CONTRIBUTING.md) — untrack them with `git rm --cached`,

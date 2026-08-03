@@ -634,6 +634,30 @@ def build_consistency_features(latest: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def assign_official_ranks(df: pd.DataFrame) -> pd.DataFrame:
+    """OFFICIAL RANKING AUTHORITY.
+
+    Confidence_Adjusted_Score descending, Symbol ascending as the deterministic
+    tie-breaker. Final_Score is diagnostic only and MUST NOT influence official
+    ordering, tie-breaking or fallbacks. Returns a re-ordered copy carrying
+    Rank, Group_Rank and Opportunity_Rank.
+    """
+    out = df.sort_values(
+        ["Confidence_Adjusted_Score", "Symbol"], ascending=[False, True], kind="mergesort"
+    ).copy()
+    out["Rank"] = range(1, len(out) + 1)
+    if "Universe_Group" in out.columns:
+        out["Group_Rank"] = (
+            out.groupby("Universe_Group")["Confidence_Adjusted_Score"]
+               .rank(ascending=False, method="first").astype(int)
+        )
+    out["Opportunity_Rank"] = np.nan
+    eligible_mask = out["Opportunity_Eligible"].astype(str).str.lower().eq("yes")
+    out.loc[eligible_mask, "Opportunity_Rank"] = range(1, int(eligible_mask.sum()) + 1)
+    return out
+
+
+
 def score_candidates(latest: pd.DataFrame, benchmark_prices: pd.DataFrame, rules: Dict[str, float]) -> pd.DataFrame:
     df = latest.copy()
     regime_score, regime_label = market_regime_score(benchmark_prices)
@@ -798,23 +822,10 @@ def score_candidates(latest: pd.DataFrame, benchmark_prices: pd.DataFrame, rules
           .assign(_rr=lambda x: range(1, len(x) + 1))
           .sort_index()["_rr"]
     )
-    # ── OFFICIAL RANKING AUTHORITY ─────────────────────────────────────────────
-    # Confidence_Adjusted_Score desc, Symbol asc as deterministic tie-breaker.
-    # Final_Score is diagnostic only and MUST NOT influence official ordering.
-    df = df.sort_values(
-        ["Confidence_Adjusted_Score", "Symbol"], ascending=[False, True]
-    ).copy()
-    df["Rank"] = range(1, len(df) + 1)
+    df = assign_official_ranks(df)
     df["Reason"] = df.apply(build_reason, axis=1)
     df["Key_Risk"] = df.apply(build_key_risk, axis=1)
 
-    df["Group_Rank"] = (
-        df.groupby("Universe_Group")["Confidence_Adjusted_Score"]
-          .rank(ascending=False, method="first").astype(int)
-    )
-    df["Opportunity_Rank"] = np.nan
-    eligible_mask = df["Opportunity_Eligible"].astype(str).str.lower().eq("yes")
-    df.loc[eligible_mask, "Opportunity_Rank"] = range(1, eligible_mask.sum() + 1)
 
     df["Upside_Range_Low"] = 0.015
     df["Upside_Range_High"] = np.where(df["Momentum_Score"] >= 80, 0.05, 0.03)

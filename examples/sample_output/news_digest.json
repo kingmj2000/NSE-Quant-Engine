@@ -5,12 +5,48 @@
   "refresh_status": "partial",
   "last_successful_refresh_at": "2026-01-15T06:34:12",
   "previous_successful_refresh_at": "2026-01-14T06:31:40",
-  "affects_scores": false,
-  "source_health": [
-    { "source": "google_news_rss", "status": "ok", "last_success": "2026-01-15T06:34:10", "items": 12 },
-    { "source": "nse_announcements", "status": "cached", "last_success": "2026-01-14T06:31:38", "items": 4 }
+  "ranking_column": "Confidence_Adjusted_Score",
+  "ranking_source": "output/latest_scores.csv",
+  "disclaimer": "News is human-review context only. It never changes scores, ranks or the validation verdict.",
+  "cache_fallback_used": true,
+  "counts": {
+    "candidates": 2,
+    "candidate_stories": 2,
+    "official_filings": 1,
+    "unknown_date": 0,
+    "market_items": 0
+  },
+  "candidate_coverage": [
+    { "Symbol": "AAAA", "Priority": "official_top15", "Story_Count": 1 },
+    { "Symbol": "BBBB", "Priority": "official_top15", "Story_Count": 1 }
   ],
-  "items": [
+  "source_health": [
+    {
+      "Source": "google_news_rss",
+      "Fetch_Status": "ok",
+      "Last_Attempt": "2026-01-15T06:34:10",
+      "Last_Success": "2026-01-15T06:34:10",
+      "Items_Received": 12,
+      "Items_Retained": 1,
+      "Unknown_Date_Count": 0,
+      "Duplicate_Count": 2,
+      "Cache_Fallback_Used": false,
+      "Error": ""
+    },
+    {
+      "Source": "nse_announcements",
+      "Fetch_Status": "failed",
+      "Last_Attempt": "2026-01-15T06:34:11",
+      "Last_Success": "2026-01-14T06:31:38",
+      "Items_Received": 0,
+      "Items_Retained": 1,
+      "Unknown_Date_Count": 0,
+      "Duplicate_Count": 0,
+      "Cache_Fallback_Used": true,
+      "Error": "HTTPError: 503"
+    }
+  ],
+  "stories": [
     {
       "Symbol": "AAAA",
       "Canonical_Title": "Synthetic Alpha Corp reports higher quarterly revenue",
@@ -37,5 +73,6 @@
       "Relevance_Reason": "Official filing mapping",
       "Is_Official_Filing": true
     }
-  ]
+  ],
+  "market_items": []
 }
