@@ -114,7 +114,10 @@ Synthetic examples of the main shapes: [`examples/sample_output/`](examples/samp
 
 No market data, price/delivery/option caches, validation history, evidence
 bundles or portfolio files are published here. `data/` and `output/` are
-git-ignored (see `desktop/.gitignore`) and are created on first run.
+git-ignored (see `desktop/.gitignore`) and are created on first run. A few
+runtime files from an earlier snapshot are still present in the Git index; run
+the `git rm --cached` commands in [`CONTRIBUTING.md`](CONTRIBUTING.md) once to
+untrack them (your local copies are kept).
 
 If you cloned an older snapshot that still tracked those folders, see
 [`CONTRIBUTING.md`](CONTRIBUTING.md) — untrack them with `git rm --cached`,
