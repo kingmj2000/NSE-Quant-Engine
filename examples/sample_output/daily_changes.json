@@ -1,20 +1,26 @@
 {
   "_note": "SYNTHETIC EXAMPLE — fabricated movements, not real rank changes.",
-  "schema_version": 1,
-  "generated_at": "2026-01-15T06:33:05",
-  "previous_snapshot_date": "2026-01-14",
+  "schema_version": "nse_daily_changes_v1",
+  "generated_at": "2026-01-15T06:33:05+00:00",
   "ranking_column": "Confidence_Adjusted_Score",
-  "top5_entrants": ["CCCC"],
+  "current_score_date": "2026-01-15",
+  "previous_score_date": "2026-01-14",
+  "previous_snapshot_available": true,
+  "top5_entries": ["CCCC"],
   "top5_exits": ["EEEE"],
-  "top20_entrants": ["DDDD"],
+  "top20_entries": ["DDDD"],
   "top20_exits": [],
-  "rank_gainers": [
-    { "Symbol": "CCCC", "previous_rank": 9, "current_rank": 3, "delta": 6 }
+  "largest_rank_gainers": [
+    { "Symbol": "CCCC", "previous_rank": 9, "current_rank": 3, "rank_change": 6 }
   ],
-  "rank_losers": [
-    { "Symbol": "EEEE", "previous_rank": 4, "current_rank": 5, "delta": -1 }
+  "largest_rank_losers": [
+    { "Symbol": "EEEE", "previous_rank": 4, "current_rank": 5, "rank_change": -1 }
   ],
   "new_risk_flags": [
-    { "Symbol": "EEEE", "previous_flag": "Clean", "current_flag": "Elevated Drawdown" }
-  ]
+    { "Symbol": "EEEE", "flag": "Elevated Drawdown", "previous_flag": null }
+  ],
+  "cleared_risk_flags": [
+    { "Symbol": "DDDD", "previous_flag": "Thin Liquidity", "flag": null }
+  ],
+  "regime_change": null
 }

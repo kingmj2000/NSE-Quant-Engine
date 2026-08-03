@@ -23,6 +23,10 @@ export const Route = createFileRoute("/")({
   component: Index,
 });
 
+// Configure this once the repository is published (owner/name).
+const REPOSITORY_URL =
+  import.meta.env.VITE_REPOSITORY_URL ?? "https://github.com/your-org/nse-quant-engine";
+
 const pillars = [
   {
     icon: LineChart,
@@ -48,11 +52,13 @@ const pillars = [
 
 const outputs = [
   ["validation_status.json", "Canonical, authoritative verdict"],
-  ["nse_quant_scores.xlsx", "Official scores and ranks"],
+  ["latest_scores.xlsx", "Official scores and ranks"],
+  ["latest_scores_v4_shadow.xlsx", "Shadow scores (never reorders official)"],
   ["daily_changes.json", "Entrants, exits, rank gainers, new risk flags"],
   ["news_digest.json", "Context-only news and exchange filings"],
   ["dashboard_latest.html", "Dashboard, embedded in the desktop app"],
 ];
+
 
 function Index() {
   return (
@@ -72,8 +78,9 @@ function Index() {
         <div className="mt-8 flex flex-wrap gap-3">
           <a
             className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90"
-            href="https://github.com/"
+            href={REPOSITORY_URL}
           >
+
             <Github className="size-4" aria-hidden="true" />
             View the repository
           </a>

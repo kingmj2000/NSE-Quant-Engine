@@ -46,19 +46,38 @@ desktop.ini
 
 # ---------------------------------------------------------------------------
 # Runtime data caches (LOCAL EVIDENCE — keep on disk, never publish)
+# Directory contents are ignored per-file so individual templates can be
+# re-included below.
 # ---------------------------------------------------------------------------
-nse_quant_engine/data/
+nse_quant_engine/data/*
 !nse_quant_engine/data/.gitkeep
 !nse_quant_engine/data/news_alias_overrides.csv
 
 # ---------------------------------------------------------------------------
 # Runtime engine outputs: scores, validation history, dashboards, evidence
 # ---------------------------------------------------------------------------
-nse_quant_engine/output/
+nse_quant_engine/output/*
 !nse_quant_engine/output/.gitkeep
 
 # Generated dashboards anywhere under the engine
 **/dashboard_*.html
+
+# Runtime score / validation / history artifacts anywhere
+**/latest_scores*.csv
+**/latest_scores*.xlsx
+**/score_history.csv
+**/alpha_score_history.csv
+**/forward_return_history.csv
+**/validation_status.json
+**/daily_changes.json
+**/news_digest.json
+**/cleanup_log.csv
+
+# Delivery and price caches
+**/delivery_pct_daily.csv
+**/iv_rank_daily.csv
+**/raw_prices_latest.csv
+**/price_cache/
 
 # Manual backup files produced by the engine's CSV editors
 nse_quant_engine/*_backup_*.csv

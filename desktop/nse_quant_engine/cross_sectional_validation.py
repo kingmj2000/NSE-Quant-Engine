@@ -661,11 +661,29 @@ def write_validated_workbook(detail: pd.DataFrame, bucket_perf: pd.DataFrame, sp
             else:
                 eligible = latest.copy()
 
-            if "Final_Score" in eligible.columns:
-                eligible.sort_values("Final_Score", ascending=False).head(25).to_excel(writer, sheet_name="Top Opportunities", index=False)
-
+            # Official sheet: Confidence_Adjusted_Score desc, Symbol asc.
+            # Final_Score is NEVER an ordering column here.
             if "Confidence_Adjusted_Score" in eligible.columns:
-                eligible.sort_values("Confidence_Adjusted_Score", ascending=False).head(25).to_excel(writer, sheet_name="Top Confidence Adj", index=False)
+                official = eligible.copy()
+                official["_cas"] = pd.to_numeric(official["Confidence_Adjusted_Score"], errors="coerce")
+                official = official[official["_cas"].notna()]
+                official = official.sort_values(
+                    ["_cas", "Symbol"], ascending=[False, True], kind="mergesort"
+                ).drop(columns=["_cas"]).head(25)
+                official.to_excel(writer, sheet_name="Top Opportunities", index=False)
+
+            # Non-authoritative raw-score view (diagnostic only).
+            if "Final_Score" in eligible.columns:
+                raw = eligible.copy()
+                raw["_fs"] = pd.to_numeric(raw["Final_Score"], errors="coerce")
+                raw = raw.sort_values(
+                    ["_fs", "Symbol"], ascending=[False, True], kind="mergesort"
+                ).drop(columns=["_fs"]).head(25)
+                raw.insert(
+                    0, "Authority_Note",
+                    "DIAGNOSTIC ONLY - ordered by raw Final_Score; NOT the official "
+                    "ranking (official = Confidence_Adjusted_Score desc, Symbol asc)")
+                raw.to_excel(writer, sheet_name="Raw Score Diagnostic", index=False)
 
         verdict_df.to_excel(writer, sheet_name="Validation Verdict", index=False)
 

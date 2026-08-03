@@ -68,7 +68,7 @@ Headless:
 cd desktop/nse_quant_engine
 python orchestrator.py --all              # full pipeline incl. fetch
 python orchestrator.py --all --skip-fetch # re-score from cache
-python run_shadow_mode.py                 # dormant adaptive/shadow layer
+python nse_quant_engine_v4_shadow.py      # dormant adaptive/shadow layer
 ```
 
 Windows batch equivalents: `run_full_workflow.bat`, `run_shadow_mode.bat`.
@@ -95,9 +95,9 @@ Full detail: [`docs/VALIDATION_METHODOLOGY.md`](docs/VALIDATION_METHODOLOGY.md).
 
 | File | What it is |
 |---|---|
-| `nse_quant_scores.xlsx` | Official engine scores & ranks |
+| `latest_scores.xlsx` | Official engine scores & ranks |
 | `latest_scores.csv` | Latest per-symbol score row (UI + shadow input) |
-| `nse_quant_scores_v4_shadow.xlsx` | Shadow engine scores (never reorders official) |
+| `latest_scores_v4_shadow.xlsx` | Shadow engine scores (never reorders official) |
 | `validation_status.json` | Canonical verdict (authoritative) |
 | `cross_sectional_validation_report.md` | Human-readable validation narrative |
 | `trade_plan_report.md` / `.xlsx` | Trade plan (ship-gated) |
