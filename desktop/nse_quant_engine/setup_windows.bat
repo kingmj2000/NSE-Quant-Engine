@@ -1,6 +1,6 @@
 @echo off
-REM One-time dependency installer for the NSE Quant Engine.
-REM Double-click this file once after unzipping the project.
+REM One-time environment setup for the NSE Quant Engine (Windows).
+REM Creates .venv and installs exactly what requirements.txt declares.
 setlocal
 cd /d "%~dp0"
 
@@ -15,13 +15,34 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo Upgrading pip...
-python -m pip install --upgrade pip
+echo Checking Python version (3.11 or 3.12 required)...
+python -c "import sys; sys.exit(0 if sys.version_info[:2] in ((3,11),(3,12)) else 1)"
+if errorlevel 1 (
+    echo.
+    python -c "import sys; print('Found Python ' + sys.version.split()[0])"
+    echo This project requires Python 3.11 or 3.12.
+    echo Install a supported version from https://python.org and re-run this file.
+    echo.
+    pause
+    exit /b 1
+)
+
+if not exist ".venv\Scripts\python.exe" (
+    echo Creating virtual environment in .venv ...
+    python -m venv .venv
+    if errorlevel 1 goto :fail
+) else (
+    echo Reusing existing .venv
+)
+
+echo.
+echo Upgrading pip inside the virtual environment...
+.venv\Scripts\python.exe -m pip install --upgrade pip
 if errorlevel 1 goto :fail
 
 echo.
-echo Installing project dependencies (one-time, takes ~2 min)...
-python -m pip install PySide6 PySide6-WebEngine pandas numpy yfinance requests beautifulsoup4 lxml openpyxl
+echo Installing project dependencies from requirements.txt (takes ~2 min)...
+.venv\Scripts\python.exe -m pip install -r requirements.txt
 if errorlevel 1 goto :fail
 
 echo.
@@ -33,7 +54,7 @@ exit /b 0
 
 :fail
 echo.
-echo Dependency install failed. Scroll up to read the error,
-echo or run this file from an Administrator Command Prompt.
+echo Setup failed. Scroll up to read the error, or run this file
+echo from an Administrator Command Prompt.
 pause
 exit /b 1

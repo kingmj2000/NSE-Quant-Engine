@@ -20,7 +20,6 @@ import pandas as pd
 _CANDIDATE_FILES = [
     "trade_plan_latest.csv",
     "top5_horizon.csv",
-    "top5_sentiment.csv",
     "top5_benchmark_stats.csv",
     "top5_corr_matrix.csv",
     "top5_fundamentals.csv",
@@ -39,7 +38,13 @@ _CANDIDATE_FILES = [
     "backtest_equity_curve.csv",
     "cross_sectional_validation_report.md",
     "validation_status.json",
-    "news_market_latest.csv",
+    # News is human-review context only (upgraded news architecture).
+    "news_digest.json",
+    "news_market_context.md",
+    # Structured daily diff + shadow record (included when available).
+    "daily_changes.json",
+    "shadow_vs_official.md",
+    "shadow_vs_official.json",
     # Part A (tightened plan) artifacts
     "alpha_promotion_log.json",
     "alpha_weights_current.json",
@@ -51,6 +56,12 @@ _CANDIDATE_FILES = [
 
 
 def _read_top5(output_dir: Path) -> pd.DataFrame:
+    """Official Top-5 for the bundle.
+
+    Ranking authority: Opportunity_Rank ascending where valid, else
+    Confidence_Adjusted_Score descending, then Symbol ascending.
+    Final_Score is NEVER consulted. "Avoid" rows stay filtered out.
+    """
     tp = output_dir / "trade_plan_latest.csv"
     if not tp.exists():
         return pd.DataFrame()
@@ -62,11 +73,21 @@ def _read_top5(output_dir: Path) -> pd.DataFrame:
         return df
     reviewable = df[~df.get("Trade_Status", pd.Series(dtype=str)).astype(str)
                     .str.contains("Avoid", case=False, na=False)].copy()
-    sort_cols = [c for c in ["Confidence_Adjusted_Score", "Final_Score"]
-                 if c in reviewable.columns]
-    if sort_cols:
-        reviewable = reviewable.sort_values(sort_cols, ascending=False)
+    if reviewable.empty:
+        return reviewable
+    try:
+        from core.candidate_selection import canonical_order
+        reviewable = canonical_order(reviewable)
+    except Exception:
+        cols, asc = [], []
+        if "Confidence_Adjusted_Score" in reviewable.columns:
+            cols.append("Confidence_Adjusted_Score"); asc.append(False)
+        if "Symbol" in reviewable.columns:
+            cols.append("Symbol"); asc.append(True)
+        if cols:
+            reviewable = reviewable.sort_values(cols, ascending=asc, kind="mergesort")
     return reviewable.head(5)
+
 
 
 def _row_lookup(df: pd.DataFrame, sym: str) -> dict:
@@ -92,7 +113,6 @@ def build_evidence_json(output_dir: Path, top5: pd.DataFrame) -> dict:
             return pd.DataFrame()
 
     horizon = _read("top5_horizon.csv")
-    sent = _read("top5_sentiment.csv")
     bench = _read("top5_benchmark_stats.csv")
     fund = _read("top5_fundamentals.csv")
     sizing = _read("top5_position_sizing.csv")
@@ -159,7 +179,6 @@ def build_evidence_json(output_dir: Path, top5: pd.DataFrame) -> dict:
             "target_1": None if pd.isna(r.get("Target_1", None)) else float(r.get("Target_1")),
             "target_2": None if pd.isna(r.get("Target_2", None)) else float(r.get("Target_2")),
             "horizon": _row_lookup(horizon, sym),
-            "sentiment": _row_lookup(sent, sym),
             "benchmark_stats": _row_lookup(bench, sym),
             "fundamentals": _row_lookup(fund, sym),
             "sizing": _row_lookup(sizing, sym),
@@ -288,3 +307,34 @@ def build_bundle(output_dir: Path,
         pass
 
     return zip_path
+
+
+def run_post_news_bundle(base_dir: Optional[Path] = None) -> Optional[Path]:
+    """Pipeline step: build the evidence bundle AFTER the news step.
+
+    Runs late in the pipeline so `news_digest.json` / `news_market_context.md`
+    reflect the current run instead of the previous one. Never raises; if news
+    is unavailable the bundle is still written and the missing news files are
+    listed in `run_manifest.json -> missing_files`.
+    """
+    base = Path(base_dir) if base_dir else Path(__file__).resolve().parent.parent
+    try:
+        from core import config as C
+    except Exception:
+        C = None
+    if C is not None and not getattr(C, "EVIDENCE_BUNDLE_ON", True):
+        return None
+    try:
+        zpath = build_bundle(
+            base / "output", base / "prompts",
+            bundle_max_mb=float(getattr(C, "BUNDLE_MAX_MB", 5.0)) if C else 5.0,
+            keep_last_n=int(getattr(C, "BUNDLE_KEEP_LAST_N", 10)) if C else 10,
+        )
+    except Exception as e:
+        print(f"[evidence_bundle] skipped: {type(e).__name__}: {e}")
+        return None
+    if zpath and zpath.exists():
+        print(f"Saved: {zpath.name} ({zpath.stat().st_size / 1024.0:.0f} KB)")
+        print(f"[evidence_bundle] Upload {zpath.name} to any LLM with the "
+              f"included README_for_AI.md as the system prompt.")
+    return zpath

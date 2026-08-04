@@ -1016,7 +1016,7 @@ def save_outputs(scored: pd.DataFrame, failed_symbols: List[str], config: pd.Dat
             raw_score_diagnostic.to_excel(writer, sheet_name="Raw Score Diagnostic", index=False)
             top_etfs.to_excel(writer, sheet_name="Top ETFs", index=False)
             top_stocks.to_excel(writer, sheet_name="Top Stocks", index=False)
-            low_risk.to_excel(writer, sheet_name="Top Low Risk", index=False)
+            low_risk.to_excel(writer, sheet_name="Raw Score Low-Risk Diag", index=False)
             etf_quality_review.to_excel(writer, sheet_name="ETF Quality Review", index=False)
             parking.to_excel(writer, sheet_name="Parking Debt ETFs", index=False)
             avoid.to_excel(writer, sheet_name="Avoid Review", index=False)

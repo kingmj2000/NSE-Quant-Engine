@@ -686,7 +686,9 @@ def _payload() -> dict:
     top5_bench_df = _safe_read_csv(OUT / "top5_benchmark_stats.csv")
     top5_corr_df = _safe_read_csv(OUT / "top5_corr_matrix.csv")
     top5_horizon_df = _safe_read_csv(OUT / "top5_horizon.csv")
-    top5_sent_df = _safe_read_csv(OUT / "top5_sentiment.csv")
+    # Retired: numerical news sentiment. Kept as an empty frame so any
+    # downstream section renders as "not available" instead of breaking.
+    top5_sent_df = _safe_read_csv(OUT / "top5_sentiment.csv") if (OUT / "top5_sentiment.csv").exists() else __import__("pandas").DataFrame()
     macro_ctx = _safe_read_json(OUT / "macro_context.json")
     alpha_ic_df = _safe_read_csv(OUT / "alpha_zoo_ic_report.csv")
     alpha_survivors = _safe_read_json(OUT / "alpha_zoo_survivors.json")

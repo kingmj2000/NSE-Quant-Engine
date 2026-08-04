@@ -125,7 +125,10 @@ class CandidatesWorkbench(QWidget):
         self.cb_type.currentIndexChanged.connect(self._apply_filters)
         h.addWidget(self.cb_type)
 
-        self.cb_bucket = QComboBox(); self.cb_bucket.addItems(["All buckets"])
+        self.cb_bucket = QComboBox(); self.cb_bucket.addItems(["All raw score buckets"])
+        self.cb_bucket.setToolTip("Raw Score Bucket — diagnostic only; official standing "
+                                  "is rank + Confidence_Adjusted_Score.")
+
         self.cb_bucket.currentIndexChanged.connect(self._apply_filters)
         h.addWidget(self.cb_bucket)
 
@@ -246,7 +249,7 @@ class CandidatesWorkbench(QWidget):
         df = self._df_all
         self._reload_combo(self.cb_universe, "All universes",
                            sorted(df["Universe"].dropna().astype(str).unique().tolist()) if "Universe" in df.columns else [])
-        self._reload_combo(self.cb_bucket, "All buckets",
+        self._reload_combo(self.cb_bucket, "All raw score buckets",
                            sorted(df["Bucket"].dropna().astype(str).unique().tolist()) if "Bucket" in df.columns else [])
 
         self._apply_filters()
@@ -257,7 +260,7 @@ class CandidatesWorkbench(QWidget):
         df = self._df_all
         self._reload_combo(self.cb_universe, "All universes",
                            sorted(df["Universe"].dropna().astype(str).unique().tolist()) if "Universe" in df.columns else [])
-        self._reload_combo(self.cb_bucket, "All buckets",
+        self._reload_combo(self.cb_bucket, "All raw score buckets",
                            sorted(df["Bucket"].dropna().astype(str).unique().tolist()) if "Bucket" in df.columns else [])
         self._apply_filters()
 
@@ -329,7 +332,7 @@ class CandidatesWorkbench(QWidget):
     def _populate_table(self, df: pd.DataFrame):
         mode = self.cb_mode.currentText()
         headers = [
-            "Rank", "ΔRank", "Symbol", "Name", "Universe", "Bucket",
+            "Rank", "ΔRank", "Symbol", "Name", "Universe", "Raw Score Bucket",
             "Adj Score", "Raw Score", "Confidence", "RSI", "Vol", "DD",
             "Risk", "News", "Event",
         ]
