@@ -20,7 +20,7 @@ Steps 3–16 in one shot; Steps 1–2 always run.
 | 1 | Universe & prices | `universe_builder.py`, `core/price_cache.py` | `config.csv`, `data/raw_prices_latest.csv` |
 | 2 | Scoring + correlation-aware top-5 | `nse_quant_engine.py`, `core/portfolio_selection.py` | `latest_scores.csv`, `top5_corr_matrix.csv`, `top5_benchmark_stats.csv` |
 | 3 | Hold-horizon optimizer | `core/horizon_optimizer.py` | `top5_horizon.csv` |
-| 4 | Sentiment + macro regime | `core/sentiment_overlay.py`, `core/regime.py` | `top5_sentiment.csv`, `macro_context.json` |
+| 4 | Macro regime context (news sentiment scoring retired) | `core/sentiment_overlay.py` (macro only), `core/regime.py` | `macro_context.json` |
 | 5 | Alpha zoo IC evaluation | `core/alpha_evaluator.py` | `alpha_zoo_ic_report.csv`, `alpha_zoo_survivors.json` |
 | 6 | Fundamentals & quality overlay | `core/fundamentals_overlay.py` | `top5_fundamentals.csv` |
 | 7 | Evidence bundle (AI handoff) | `core/evidence_bundle.py` | `insight_bundle_<ts>.zip` |
