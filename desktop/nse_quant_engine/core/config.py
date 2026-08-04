@@ -120,11 +120,16 @@ HORIZON_GRID       = [3, 5, 10, 21, 42, 63]
 HORIZON_HIST_DAYS  = _i("HORIZON_HIST_DAYS", 250)
 HORIZON_RISK_CAP_PCT = _f("HORIZON_RISK_CAP_PCT", 6.0)
 
-# ── Step 4: Sentiment / macro overlay ───────────────────────────────────────
-SENTIMENT_OVERLAY_ON = (not _SAFE_MODE) and (
-    os.environ.get("SENTIMENT_OVERLAY_ON", "1") not in ("0", "false", "False"))
-SENTIMENT_VETO_ON    = (not _SAFE_MODE) and (
-    os.environ.get("SENTIMENT_VETO_ON", "1") not in ("0", "false", "False"))
+# ── Step 4: Macro regime context ────────────────────────────────────────────
+# Macro/regime context is independent of news scoring and stays ON.
+MACRO_CONTEXT_ON = (not _SAFE_MODE) and (
+    os.environ.get("MACRO_CONTEXT_ON", "1") not in ("0", "false", "False"))
+# RETIRED: numerical news-sentiment polarity + sentiment veto. The news
+# architecture is human-review context only and must never affect rankings,
+# recommendations, trade levels or rebalance decisions. Deprecated/experimental
+# code remains in core/sentiment_overlay.py but is OFF by default.
+SENTIMENT_OVERLAY_ON = os.environ.get("SENTIMENT_OVERLAY_ON", "0") in ("1", "true", "True")
+SENTIMENT_VETO_ON    = os.environ.get("SENTIMENT_VETO_ON", "0") in ("1", "true", "True")
 SENT_LOOKBACK_DAYS = _i("SENT_LOOKBACK_DAYS", 7)
 SENT_NEG_VETO_PCT  = _f("SENT_NEG_VETO_PCT", 0.60)
 SENT_MIN_HEADLINES = _i("SENT_MIN_HEADLINES", 3)

@@ -51,11 +51,9 @@ TRADE_PLAN_MD = OUTPUT_DIR / "trade_plan_report.md"
 TOP5_CORR_CSV = OUTPUT_DIR / "top5_corr_matrix.csv"
 TOP5_BENCH_CSV = OUTPUT_DIR / "top5_benchmark_stats.csv"
 TOP5_HORIZON_CSV = OUTPUT_DIR / "top5_horizon.csv"
-TOP5_SENT_CSV = OUTPUT_DIR / "top5_sentiment.csv"
 MACRO_CTX_JSON = OUTPUT_DIR / "macro_context.json"
 ALPHA_IC_CSV = OUTPUT_DIR / "alpha_zoo_ic_report.csv"
 ALPHA_SURVIVORS_JSON = OUTPUT_DIR / "alpha_zoo_survivors.json"
-NEWS_LATEST_CSV = OUTPUT_DIR / "news_market_latest.csv"
 RAW_PRICES = BASE_DIR / "data" / "raw_prices_latest.csv"
 TOP5_FUND_CSV = OUTPUT_DIR / "top5_fundamentals.csv"
 TOP5_SIZING_CSV = OUTPUT_DIR / "top5_position_sizing.csv"
@@ -672,8 +670,11 @@ def _emit_horizon_sentiment_alpha(plan: pd.DataFrame) -> None:
         except Exception as e:
             print(f"[step3] horizon optimizer skipped: {e}")
 
-    # ── Step 4: Sentiment + macro overlay ──
-    if getattr(C, "SENTIMENT_OVERLAY_ON", True):
+    # ── Step 4: Macro tape context (regime only) ──
+    # Numerical news-sentiment scoring and the sentiment veto are RETIRED: the
+    # news architecture is human-review context only (see news_digest.json).
+    # Macro regime generation is independent and stays on by default.
+    if getattr(C, "MACRO_CONTEXT_ON", True):
         try:
             from core import sentiment_overlay as sent
             macro = sent.macro_tape_score(prices)
@@ -681,30 +682,9 @@ def _emit_horizon_sentiment_alpha(plan: pd.DataFrame) -> None:
             MACRO_CTX_JSON.write_text(_j.dumps(macro, default=str, indent=2),
                                        encoding="utf-8")
             print(f"[fincept] Saved: {MACRO_CTX_JSON.name} (regime={macro.get('regime')})")
-
-            if NEWS_LATEST_CSV.exists() and top5_syms:
-                try:
-                    news = pd.read_csv(NEWS_LATEST_CSV)
-                except Exception:
-                    news = pd.DataFrame()
-                s_df = sent.score_headlines(
-                    news[news.get("Symbol", pd.Series(dtype=str)).astype(str).isin(top5_syms)]
-                    if not news.empty else news,
-                    lookback_days=int(getattr(C, "SENT_LOOKBACK_DAYS", 7)),
-                )
-                if not s_df.empty:
-                    s_df.to_csv(TOP5_SENT_CSV, index=False)
-                    print(f"Saved: {TOP5_SENT_CSV.name}")
-                    if getattr(C, "SENTIMENT_VETO_ON", True):
-                        vetoed = sent.sentiment_veto(
-                            s_df,
-                            min_headlines=int(getattr(C, "SENT_MIN_HEADLINES", 3)),
-                            neg_pct_veto=float(getattr(C, "SENT_NEG_VETO_PCT", 0.60)),
-                        )
-                        if vetoed:
-                            print(f"[step4] sentiment veto would demote: {sorted(vetoed)}")
         except Exception as e:
-            print(f"[step4] sentiment overlay skipped: {e}")
+            print(f"[step4] macro context skipped: {e}")
+
 
     # ── Step 5: Alpha-Zoo evaluator (report only — tilt gated on survivors) ──
     if getattr(C, "ALPHA_ZOO_ON", True):
@@ -959,7 +939,8 @@ def _emit_fundamentals_sizing_backtest_bundle(plan: pd.DataFrame) -> None:
     if getattr(C, "REBALANCE_DIFF_ON", True) and not top5.empty:
         try:
             from core import rebalance_diff as rd
-            sent_df = pd.read_csv(TOP5_SENT_CSV) if TOP5_SENT_CSV.exists() else None
+            # News is human-review context only: no numerical sentiment input.
+            sent_df = None
             ev_df = pd.read_csv(TOP5_EVENTS_CSV) if TOP5_EVENTS_CSV.exists() else None
             hz_df = pd.read_csv(TOP5_HORIZON_CSV) if TOP5_HORIZON_CSV.exists() else None
             all_curr = plan if isinstance(plan, pd.DataFrame) else None
@@ -978,24 +959,12 @@ def _emit_fundamentals_sizing_backtest_bundle(plan: pd.DataFrame) -> None:
         except Exception as e:
             print(f"[step16] rebalance diff skipped: {e}")
 
+    # NOTE: the evidence bundle is intentionally NOT built here. It is a
+    # post-news pipeline step (core.evidence_bundle.run_post_news_bundle),
+    # invoked by orchestrator.py after news_market_builder, so a standalone
+    # trade-plan run can never package stale news.
 
 
-
-    if getattr(C, "EVIDENCE_BUNDLE_ON", True):
-        try:
-            from core import evidence_bundle as eb
-            zpath = eb.build_bundle(
-                OUTPUT_DIR, PROMPTS_DIR,
-                bundle_max_mb=float(getattr(C, "BUNDLE_MAX_MB", 5.0)),
-                keep_last_n=int(getattr(C, "BUNDLE_KEEP_LAST_N", 10)),
-            )
-            if zpath and zpath.exists():
-                size_kb = zpath.stat().st_size / 1024.0
-                print(f"Saved: {zpath.name} ({size_kb:.0f} KB)")
-                print(f"[step7] Upload {zpath.name} to Claude with the "
-                      f"included README_for_AI.md as the system prompt.")
-        except Exception as e:
-            print(f"[step7] evidence bundle skipped: {e}")
 
 
 def main() -> None:

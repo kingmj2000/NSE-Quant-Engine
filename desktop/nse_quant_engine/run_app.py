@@ -919,6 +919,7 @@ class TradePlanView(QWidget):
         bucket = str(r.get("Bucket", "") or "")
         bt = "teal" if "Top" in bucket else "amber" if "Risky" in bucket else "blue"
         pill = _make_pill(bucket or "—", bt)
+        pill.setToolTip("Raw Score Bucket — diagnostic only. Official standing is the rank + Confidence_Adjusted_Score shown on this card.")
         top.addWidget(sym); top.addStretch(); top.addWidget(pill)
         v.addLayout(top)
         name = QLabel(str(r.get("Name", "") or "")); name.setStyleSheet("color:#8A92A6;font-size:11px;"); name.setWordWrap(True)
@@ -1459,7 +1460,9 @@ class MainWindow(QMainWindow):
         self.btn_reload = QPushButton("⟳ Reload last run"); self.btn_reload.setObjectName("Ghost")
         self.btn_browser = QPushButton("Open in browser ↗"); self.btn_browser.setObjectName("Ghost")
         self.btn_evidence = QPushButton("📦 Evidence zip"); self.btn_evidence.setObjectName("Ghost")
-        self.btn_evidence.setToolTip("Reveal the newest evidence bundle (hand this zip to Claude / any LLM)")
+        self.btn_evidence.setToolTip("Reveal the newest output/insight_bundle_*.zip "
+                                     "(built after the news step — hand this zip to any LLM)")
+
         self.btn_run = QPushButton("▶  Run Full Pipeline"); self.btn_run.setObjectName("Primary")
         self.btn_drawer = QToolButton(); self.btn_drawer.setObjectName("Drawer")
         self.btn_drawer.setText("☰  Activity")
@@ -1656,17 +1659,15 @@ class MainWindow(QMainWindow):
         """Reveal the newest evidence bundle zip in the OS file browser.
         This is the artifact the user hands to Claude / any LLM for rationale."""
         try:
-            zips = sorted(OUT.glob("evidence_bundle_*.zip"),
+            # Only the real artifact name — never fall back to an unrelated zip.
+            zips = sorted(OUT.glob("insight_bundle_*.zip"),
                           key=lambda p: p.stat().st_mtime, reverse=True)
             if not zips:
-                # fallback: try any zip in output/
-                zips = sorted(OUT.glob("*.zip"),
-                              key=lambda p: p.stat().st_mtime, reverse=True)
-            if not zips:
                 QMessageBox.information(
-                    self, "No evidence zip yet",
-                    "No evidence_bundle_*.zip found in output/. Run the pipeline first — "
-                    "the bundle is written by Step 11 (evidence_bundle).")
+                    self, "No evidence bundle yet",
+                    "No insight_bundle_*.zip found in output/. Run the pipeline first — "
+                    "the bundle is written by the 'evidence_bundle' step, which runs "
+                    "after the news step.")
                 return
             target = zips[0]
             self.status.showMessage(f"Revealing {target.name}")

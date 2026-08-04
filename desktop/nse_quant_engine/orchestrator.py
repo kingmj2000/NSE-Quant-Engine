@@ -128,8 +128,19 @@ def build_steps(include_shadow: bool = True, include_fetch: bool = True) -> list
         ))
         steps.append(Step("shadow_vs_official_report", _module("shadow_vs_official_report"),
                           gate=_gate_normal_scores_ready))
+
+    # AI evidence bundle — MUST run after news_market_builder (and after the
+    # shadow report) so the zip carries this run's news, never the previous one.
+    def _run_evidence_bundle():
+        if str(BASE) not in sys.path:
+            sys.path.insert(0, str(BASE))
+        from core.evidence_bundle import run_post_news_bundle
+        run_post_news_bundle(BASE)
+    steps.append(Step("evidence_bundle", _run_evidence_bundle, skippable=True))
+
     # Always last — consumes every artifact produced above.
     steps.append(Step("dashboard_html_builder", _module("dashboard_html_builder")))
+
 
     # Output retention: prune dated artifacts to config.RETENTION_KEEP_N.
     # skippable=True so a cleanup failure can never fail a pipeline run.
