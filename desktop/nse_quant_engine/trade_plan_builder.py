@@ -738,6 +738,15 @@ def _emit_fundamentals_sizing_backtest_bundle(plan: pd.DataFrame) -> None:
     except Exception:
         top5 = pd.DataFrame(); top5_syms = []
 
+    # Official validation gate — validation_status.json is the sole authority.
+    try:
+        from core import validation_status as _vs
+        _official_status = _vs.read_status(OUTPUT_DIR / "validation_status.json")
+    except Exception:
+        _official_status = {"verdict": "Insufficient History"}
+    _official_verdict = str(_official_status.get("verdict", "") or "Unknown")
+    _validation_positive = _official_verdict.strip().lower() == "validation positive"
+
     prices = None
     if RAW_PRICES.exists():
         try:
@@ -787,6 +796,7 @@ def _emit_fundamentals_sizing_backtest_bundle(plan: pd.DataFrame) -> None:
                 vol_target=float(getattr(C, "PORTFOLIO_VOL_TARGET", 0.12)),
                 max_weight=float(getattr(C, "MAX_WEIGHT", 0.30)),
                 cash_buffer=float(getattr(C, "CASH_BUFFER", 0.10)),
+                validation_positive=_validation_positive,
             )
             if not sizing.empty:
                 sizing.to_csv(TOP5_SIZING_CSV, index=False)
@@ -863,6 +873,7 @@ def _emit_fundamentals_sizing_backtest_bundle(plan: pd.DataFrame) -> None:
             evr = ev.top5_ev_report(
                 top5[["Symbol"]], bt_sc, hz_df, sz_df,
                 kelly_cap_of_weight=float(getattr(C, "KELLY_CAP_OF_WEIGHT", 0.25)),
+                validation_verdict=_official_verdict,
             )
             if not evr.empty:
                 evr.to_csv(TOP5_EV_CSV, index=False)
@@ -880,7 +891,7 @@ def _emit_fundamentals_sizing_backtest_bundle(plan: pd.DataFrame) -> None:
                 "max_single_sector_pct":  float(getattr(C, "PV_MAX_SINGLE_SECTOR_PCT", 60.0)),
                 "min_backtest_hit_rate":  float(getattr(C, "PV_MIN_BACKTEST_HIT_RATE", 0.50)),
                 "min_alpha_survivors":    int(getattr(C, "PV_MIN_ALPHA_SURVIVORS", 2)),
-            })
+            }, validation_status=_official_status)
             pv.write_report(OUTPUT_DIR, report)
             print(f"[vibe] Saved: {PORTFOLIO_VAL_JSON.name} — Batch_Verdict={report['verdict']}")
             if report["reasons"]:
@@ -945,6 +956,7 @@ def _emit_fundamentals_sizing_backtest_bundle(plan: pd.DataFrame) -> None:
                 all_curr=all_curr, sentiment=sent_df, events=ev_df,
                 horizon_df=hz_df,
                 round_trip_cost_pct=float(getattr(C, "REBAL_ROUND_TRIP_COST_PCT", 0.35)),
+                validation_positive=_validation_positive,
             )
             import json as _j
             REBALANCE_DIFF_JSON.write_text(_j.dumps(rep, default=str, indent=2),
