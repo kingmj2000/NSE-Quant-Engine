@@ -117,9 +117,13 @@ def size_portfolio(top5: pd.DataFrame,
                    vol_target: float = 0.12,
                    max_weight: float = 0.30,
                    cash_buffer: float = 0.10,
-                   window: int = 63) -> pd.DataFrame:
+                   window: int = 63,
+                   validation_positive: bool = False) -> pd.DataFrame:
     """Produce a per-name sizing frame. `top5` must have Symbol + Price +
-    Stop_Loss. Never raises; returns an empty frame if inputs are unusable."""
+    Stop_Loss. Never raises; returns an empty frame if inputs are unusable.
+
+    Unless `validation_positive` is True the output is explicitly labelled
+    HYPOTHETICAL_WATCHLIST_SIZING: it is risk analysis, not an allocation."""
     if top5 is None or top5.empty:
         return pd.DataFrame()
 
@@ -184,8 +188,11 @@ def size_portfolio(top5: pd.DataFrame,
     else:
         df["Risk_Contribution_%"] = np.nan
 
+    df["Sizing_Basis"] = ("VALIDATED_SIZING" if validation_positive
+                          else "HYPOTHETICAL_WATCHLIST_SIZING")
+
     keep = ["Symbol", "Price", "Weight_%", "Capital_INR", "Shares",
             "Stop_Loss_INR", "Max_Loss_INR", "Max_Loss_%_of_NAV",
-            "Risk_Contribution_%"]
+            "Risk_Contribution_%", "Sizing_Basis"]
     keep = [c for c in keep if c in df.columns]
     return df[keep]

@@ -140,7 +140,8 @@ def top5_ev_report(top5: pd.DataFrame,
                    backtest: pd.DataFrame | None,
                    horizon_df: pd.DataFrame | None = None,
                    sizing: pd.DataFrame | None = None,
-                   kelly_cap_of_weight: float = 0.25) -> pd.DataFrame:
+                   kelly_cap_of_weight: float = 0.25,
+                   validation_verdict: str = "") -> pd.DataFrame:
     """Per-pick EV_% (per-trade) and Kelly_Fraction_Capped.
 
     Formula:
@@ -154,7 +155,8 @@ def top5_ev_report(top5: pd.DataFrame,
     """
     cols = ["Symbol", "EV_%", "P_Win", "AvgWin_%", "AvgLoss_%",
             "Downside_Vol_%", "Weight_%", "Kelly_Raw", "Kelly_Fraction_Capped",
-            "EV_Sizing_Agree"]
+            "EV_Sizing_Agree", "Validation_Verdict", "Decision_Use", "Basis"]
+    validated = str(validation_verdict).strip().lower() == "validation positive"
     if top5 is None or top5.empty:
         return pd.DataFrame(columns=cols)
 
@@ -201,14 +203,19 @@ def top5_ev_report(top5: pd.DataFrame,
         w = wmap.get(sym, np.nan)
         cap = (kelly_cap_of_weight * (w / 100.0)) if pd.notna(w) else np.nan
         kc = min(kelly_raw, cap) if (pd.notna(kelly_raw) and pd.notna(cap)) else np.nan
+        if not validated:
+            # Historical style diagnostics only — no sizing instruction.
+            kc = np.nan
         agree = ""
         if pd.notna(ev) and pd.notna(w):
             if ev > 0 and w > 0:
-                agree = "Yes"
+                agree = "Consistent"
             elif ev <= 0 and w > 0:
-                agree = "No — EV≤0 but sized"
+                agree = "Inconsistent — EV≤0 but sized"
             else:
                 agree = "Neutral"
+        if agree and not validated:
+            agree += " (no approval implied)"
         rows.append({
             "Symbol": sym,
             "EV_%": round(ev, 3) if pd.notna(ev) else np.nan,
@@ -220,5 +227,10 @@ def top5_ev_report(top5: pd.DataFrame,
             "Kelly_Raw": round(kelly_raw, 4) if pd.notna(kelly_raw) else np.nan,
             "Kelly_Fraction_Capped": round(kc, 4) if pd.notna(kc) else np.nan,
             "EV_Sizing_Agree": agree,
+            "Validation_Verdict": str(validation_verdict or "Unknown"),
+            "Decision_Use": ("Decision_Input" if validated
+                             else "Not_For_Decisions_Watchlist_Only"),
+            "Basis": ("VALIDATED_EV" if validated
+                      else "STYLE_BACKTEST_DIAGNOSTIC"),
         })
     return pd.DataFrame(rows, columns=cols)
