@@ -56,38 +56,14 @@ _CANDIDATE_FILES = [
 
 
 def _read_top5(output_dir: Path) -> pd.DataFrame:
-    """Official Top-5 for the bundle.
+    """Official Top-5 for the bundle — same contract as every top5_* artifact.
 
     Ranking authority: Opportunity_Rank ascending where valid, else
     Confidence_Adjusted_Score descending, then Symbol ascending.
     Final_Score is NEVER consulted. "Avoid" rows stay filtered out.
     """
-    tp = output_dir / "trade_plan_latest.csv"
-    if not tp.exists():
-        return pd.DataFrame()
-    try:
-        df = pd.read_csv(tp)
-    except Exception:
-        return pd.DataFrame()
-    if df.empty:
-        return df
-    reviewable = df[~df.get("Trade_Status", pd.Series(dtype=str)).astype(str)
-                    .str.contains("Avoid", case=False, na=False)].copy()
-    if reviewable.empty:
-        return reviewable
-    try:
-        from core.candidate_selection import canonical_order
-        reviewable = canonical_order(reviewable)
-    except Exception:
-        cols, asc = [], []
-        if "Confidence_Adjusted_Score" in reviewable.columns:
-            cols.append("Confidence_Adjusted_Score"); asc.append(False)
-        if "Symbol" in reviewable.columns:
-            cols.append("Symbol"); asc.append(True)
-        if cols:
-            reviewable = reviewable.sort_values(cols, ascending=asc, kind="mergesort")
-    return reviewable.head(5)
-
+    from .top5_contract import read_official_top5
+    return read_official_top5(output_dir)
 
 
 def _row_lookup(df: pd.DataFrame, sym: str) -> dict:
