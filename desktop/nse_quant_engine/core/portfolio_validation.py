@@ -61,9 +61,29 @@ def _avg_abs_corr(corr: pd.DataFrame) -> float:
         return float("nan")
 
 
+def _symbols(df: pd.DataFrame) -> list[str]:
+    if df is None or df.empty or "Symbol" not in df.columns:
+        return []
+    return sorted({str(s) for s in df["Symbol"].dropna().tolist()})
+
+
+def _corr_symbols(corr: pd.DataFrame) -> list[str]:
+    if corr is None or corr.empty:
+        return []
+    try:
+        return sorted({str(s) for s in corr.index.tolist()})
+    except Exception:
+        return []
+
+
 def validate_batch(output_dir: Path,
-                   thresholds: Optional[dict] = None) -> dict:
-    """Return {"verdict","checks","reasons","thresholds"}. Never raises."""
+                   thresholds: Optional[dict] = None,
+                   validation_status: Optional[dict] = None) -> dict:
+    """Return {"verdict","checks","reasons","thresholds"}. Never raises.
+
+    `validation_status` is the parsed validation_status.json (the sole verdict
+    authority). When it is not "Validation Positive" the batch can never be
+    Ship / Ship_With_Caveats."""
     thr = dict(DEFAULT_THRESHOLDS)
     if thresholds:
         thr.update({k: v for k, v in thresholds.items() if v is not None})
@@ -78,6 +98,9 @@ def validate_batch(output_dir: Path,
     events = _read_csv(output_dir / "top5_events.csv")
     survivors = _read_json(output_dir / "alpha_zoo_survivors.json")
     macro = _read_json(output_dir / "macro_context.json")
+    ev = _read_csv(output_dir / "top5_expected_value.csv")
+    if validation_status is None:
+        validation_status = _read_json(output_dir / "validation_status.json")
 
     checks: dict = {}
     reasons: list[str] = []
@@ -167,6 +190,44 @@ def validate_batch(output_dir: Path,
     if n_in_window >= 2:
         caveats.append(f"{n_in_window} names have earnings inside hold window")
 
+    # 8) Official Top-5 symbol-set consistency across artifacts
+    try:
+        from .top5_contract import read_official_top5
+        expected = _symbols(read_official_top5(output_dir))
+    except Exception:
+        expected = []
+    corr_syms = _corr_symbols(corr)
+    sizing_syms = _symbols(sizing)
+    sector_syms = _symbols(sector)
+    event_syms = _symbols(events)
+    ev_syms = _symbols(ev)
+
+    present = {"corr_symbols": corr_syms, "sizing_symbols": sizing_syms,
+               "sector_symbols": sector_syms, "event_symbols": event_syms,
+               "ev_symbols": ev_syms}
+    aligned = True
+    mismatched: list[str] = []
+    if expected:
+        for name, syms in present.items():
+            if syms and syms != expected:
+                aligned = False
+                mismatched.append(name)
+
+    checks["expected_symbols"] = expected
+    checks.update(present)
+    checks["symbol_set_aligned"] = aligned
+    if not aligned:
+        reasons.append(
+            "symbol-set mismatch vs official Top-5 in: " + ", ".join(mismatched)
+        )
+
+    # 9) Official validation gate (validation_status.json is the authority)
+    official_verdict = str((validation_status or {}).get("verdict", "") or "Unknown")
+    checks["official_validation_verdict"] = official_verdict
+    validation_ok = official_verdict.strip().lower() == "validation positive"
+    if not validation_ok:
+        reasons.append(f"official validation not positive ({official_verdict})")
+
     # Verdict
     if reasons:
         verdict = "Downgrade_To_Watch"
@@ -177,6 +238,14 @@ def validate_batch(output_dir: Path,
 
     return {
         "verdict": verdict,
+        "expected_symbols": expected,
+        "corr_symbols": corr_syms,
+        "sizing_symbols": sizing_syms,
+        "sector_symbols": sector_syms,
+        "event_symbols": event_syms,
+        "ev_symbols": ev_syms,
+        "symbol_set_aligned": aligned,
+        "official_validation_verdict": official_verdict,
         "checks": checks,
         "reasons": reasons,
         "caveats": caveats,

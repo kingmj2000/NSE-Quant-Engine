@@ -77,43 +77,102 @@ def apply_bayes_shrink(stats: dict) -> dict:
     return out
 
 
-def decide_verdict(stats: dict) -> tuple[str, str]:
+def active_rules(rules: dict | None = None) -> dict:
+    """Resolve the ONE active threshold set.
+
+    `rules` is the parsed scoring_rules.csv mapping (authoritative when
+    supplied). Anything absent falls back to core.config. This guarantees the
+    structured verdict and scoring_rules.csv can never diverge.
     """
-    Apply the validation gates from config to the computed cross-sectional stats.
+    r = rules or {}
+
+    def pick(key: str, cfg_default):
+        v = r.get(key)
+        try:
+            return type(cfg_default)(v) if v is not None else cfg_default
+        except Exception:
+            return cfg_default
+
+    return {
+        "CrossVal_Min_Dates": pick("CrossVal_Min_Dates", int(C.CROSSVAL_MIN_DATES)),
+        "CrossVal_Min_Effective_Dates": pick("CrossVal_Min_Effective_Dates", int(C.CROSSVAL_MIN_EFFECTIVE_DATES)),
+        "CrossVal_Min_Obs": pick("CrossVal_Min_Obs", int(C.CROSSVAL_MIN_OBS)),
+        "CrossVal_Min_Spread": pick("CrossVal_Min_Spread", float(C.CROSSVAL_MIN_SPREAD)),
+        "CrossVal_Min_HitRate": pick("CrossVal_Min_HitRate", float(C.CROSSVAL_MIN_HITRATE)),
+        "CrossVal_Min_TStat": pick("CrossVal_Min_TStat", float(C.CROSSVAL_MIN_TSTAT)),
+        "CrossVal_Min_Bootstrap_Prob": pick("CrossVal_Min_Bootstrap_Prob", float(C.CROSSVAL_MIN_BOOTSTRAP_PROB)),
+    }
+
+
+def _isnan(v) -> bool:
+    return v is None or (isinstance(v, float) and v != v)
+
+
+def decide_verdict(stats: dict, rules: dict | None = None) -> tuple[str, str]:
+    """
+    Apply the active validation gates to cross-sectional stats.
     `stats` keys: validation_dates, effective_validation_dates, avg_obs,
     spread, hit_rate, adj_tstat, bootstrap_prob.
-    Returns (verdict, evidence_grade).
+
+    NOTE: callers must pass ALREADY-SHRUNK stats when Bayesian shrinkage is on
+    (see resolve_validation). Returns (verdict, evidence_grade).
     """
+    t = active_rules(rules)
     g = stats.get
-    if g("validation_dates", 0) < C.CROSSVAL_MIN_DATES:
+
+    if (g("validation_dates") or 0) < t["CrossVal_Min_Dates"]:
         return "Insufficient History", "Insufficient Evidence"
-    if g("effective_validation_dates", 0) < C.CROSSVAL_MIN_EFFECTIVE_DATES:
+    if (g("effective_validation_dates") or 0) < t["CrossVal_Min_Effective_Dates"]:
         return "Insufficient Independent History", "Insufficient Evidence"
-    if g("avg_obs", 0) < C.CROSSVAL_MIN_OBS:
+    if (g("avg_obs") or 0) < t["CrossVal_Min_Obs"]:
         return "Insufficient Breadth", "Insufficient Evidence"
 
-    passes = (
-        g("spread", -1) >= C.CROSSVAL_MIN_SPREAD
-        and g("hit_rate", 0) >= C.CROSSVAL_MIN_HITRATE
-        and g("adj_tstat", 0) >= C.CROSSVAL_MIN_TSTAT
-        and g("bootstrap_prob", 0) >= C.CROSSVAL_MIN_BOOTSTRAP_PROB
-    )
-    if passes:
-        return "Validation Positive", "Sufficient Evidence"
+    spread, hit, adj_t, boot = (g("spread"), g("hit_rate"),
+                                g("adj_tstat"), g("bootstrap_prob"))
+    if any(_isnan(x) for x in (spread, hit, adj_t, boot)):
+        return "Insufficient Statistical Evidence", "Insufficient Evidence"
 
-    # Enough data, but the edge isn't there after costs.
-    if g("spread", 0) < 0:
-        return "Validation Negative", "Sufficient Evidence"
-    return "No Proven Edge Yet", "Sufficient Evidence"
+    if (spread >= t["CrossVal_Min_Spread"]
+            and hit >= t["CrossVal_Min_HitRate"]
+            and adj_t >= t["CrossVal_Min_TStat"]
+            and boot >= t["CrossVal_Min_Bootstrap_Prob"]):
+        strong = ((g("effective_validation_dates") or 0) >= 20 and adj_t >= 2.0)
+        return "Validation Positive", "Strong Evidence" if strong else "Moderate Evidence"
+
+    # Materially negative spread with a non-positive t-stat: the ranking is
+    # actively wrong, not merely unproven.
+    if spread <= -t["CrossVal_Min_Spread"] and adj_t <= 0:
+        return "Validation Negative", "Weak or Negative Evidence"
+
+    return "No Proven Edge Yet", "Weak or Negative Evidence"
+
+
+def resolve_validation(raw_stats: dict, rules: dict | None = None) -> tuple[str, str, dict]:
+    """THE authoritative validation path.
+
+    1. take raw cross-sectional statistics
+    2. apply Bayesian shrinkage
+    3. decide the verdict from the SHRUNK statistics
+
+    Returns (verdict, evidence_grade, stats) where `stats` keeps both shrunk
+    values and their `*_raw` counterparts.
+    """
+    raw_stats = dict(raw_stats or {})
+    shrunk = apply_bayes_shrink(raw_stats)
+    verdict, grade = decide_verdict(shrunk, rules)
+    return verdict, grade, shrunk
 
 
 def write_status(path: str | Path, verdict: str, grade: str, stats: dict,
                  horizon: int = 10,
                  ranking_column: str = "Confidence_Adjusted_Score",
                  ranking_schema_version: int = 2) -> dict:
+    shrink_on = bool(getattr(C, "VALIDATION_BAYES_SHRINK", True))
     status = {
         "verdict": verdict,
         "evidence_grade": grade,
+        "verdict_basis": "bayesian_adjusted" if shrink_on else "raw",
+        "bayesian_shrinkage_applied": shrink_on,
         "horizon_days": horizon,
         "ranking_column": ranking_column,
         "ranking_schema_version": int(ranking_schema_version),
@@ -124,6 +183,7 @@ def write_status(path: str | Path, verdict: str, grade: str, stats: dict,
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     Path(path).write_text(json.dumps(status, indent=2), encoding="utf-8")
     return status
+
 
 
 def read_status(path: str | Path) -> dict:

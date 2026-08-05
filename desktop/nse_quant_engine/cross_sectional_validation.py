@@ -537,65 +537,54 @@ def build_spread_summary(spread_by_date: pd.DataFrame, rules: Dict[str, float]) 
     return out[SPREAD_SUMMARY_COLUMNS]
 
 
-def validation_verdict(spread_summary: pd.DataFrame, rules: Dict[str, float]) -> str:
-    if spread_summary.empty:
-        return "Insufficient History"
-
+def extract_raw_stats(spread_summary: pd.DataFrame, rules: Dict[str, float]) -> Dict[str, float]:
+    """Raw (unshrunk) statistics for the selected validation horizon."""
+    if spread_summary is None or spread_summary.empty or "Horizon_Days" not in spread_summary.columns:
+        return {}
     horizon = int(rules.get("CrossVal_Horizon", 10))
     row_df = spread_summary[spread_summary["Horizon_Days"].eq(horizon)]
-
     if row_df.empty:
-        return "Insufficient History"
+        return {}
+    r = row_df.iloc[0]
 
-    row = row_df.iloc[0]
+    def num(key):
+        v = pd.to_numeric(pd.Series([r.get(key)]), errors="coerce").iloc[0]
+        return float("nan") if pd.isna(v) else float(v)
 
-    validation_dates = row.get("Validation_Dates", 0)
-    effective_dates = row.get("Effective_Validation_Dates", 0)
-    avg_obs = row.get("Avg_Obs_All", 0)
-    spread = row.get("Avg_TopMinusBottom_Quintile", np.nan)
-    hit_rate = row.get("Hit_Rate_TopBeatsBottom", np.nan)
-    adj_t = row.get("Adjusted_TStat_TopMinusBottom", np.nan)
-    boot_prob = row.get("Bootstrap_Prob_Positive", np.nan)
+    return {
+        "validation_dates": num("Validation_Dates"),
+        "effective_validation_dates": num("Effective_Validation_Dates"),
+        "avg_obs": num("Avg_Obs_All"),
+        "spread": num("Avg_TopMinusBottom_Quintile"),
+        "hit_rate": num("Hit_Rate_TopBeatsBottom"),
+        "adj_tstat": num("Adjusted_TStat_TopMinusBottom"),
+        "bootstrap_prob": num("Bootstrap_Prob_Positive"),
+    }
 
-    if validation_dates < rules.get("CrossVal_Min_Dates", 10):
-        return "Insufficient History"
-    if effective_dates < rules.get("CrossVal_Min_Effective_Dates", 6):
-        return "Insufficient Independent History"
-    if avg_obs < rules.get("CrossVal_Min_Obs", 50):
-        return "Insufficient Breadth"
-    if pd.isna(spread) or pd.isna(hit_rate) or pd.isna(adj_t) or pd.isna(boot_prob):
-        return "Insufficient Statistical Evidence"
 
-    if (
-        spread >= rules.get("CrossVal_Min_Spread", 0.005)
-        and hit_rate >= rules.get("CrossVal_Min_HitRate", 0.55)
-        and adj_t >= rules.get("CrossVal_Min_TStat", 1.5)
-        and boot_prob >= rules.get("CrossVal_Min_Bootstrap_Prob", 0.70)
-    ):
-        return "Validation Positive"
+def resolve_validation(spread_summary: pd.DataFrame,
+                       rules: Dict[str, float]) -> tuple[str, str, Dict[str, float]]:
+    """THE single validation path used by every output of this module.
 
-    if spread <= -rules.get("CrossVal_Min_Spread", 0.005) and adj_t <= -rules.get("CrossVal_Min_TStat", 1.5):
-        return "Validation Negative"
+    Raw stats -> Bayesian shrinkage -> verdict/grade from the SHRUNK stats.
+    Thresholds come from scoring_rules.csv (`rules`) so there is exactly one
+    threshold definition in play.
+    """
+    from core import validation_status as _vs
+    raw = extract_raw_stats(spread_summary, rules)
+    if not raw:
+        return "Insufficient History", "Insufficient Evidence", {}
+    return _vs.resolve_validation(raw, rules)
 
-    return "No Proven Edge Yet"
+
+def validation_verdict(spread_summary: pd.DataFrame, rules: Dict[str, float]) -> str:
+    """Backwards-compatible accessor — same authoritative path."""
+    return resolve_validation(spread_summary, rules)[0]
 
 
 def evidence_grade(spread_summary: pd.DataFrame, rules: Dict[str, float]) -> str:
-    verdict = validation_verdict(spread_summary, rules)
+    return resolve_validation(spread_summary, rules)[1]
 
-    if verdict == "Validation Positive":
-        horizon = int(rules.get("CrossVal_Horizon", 10))
-        row = spread_summary[spread_summary["Horizon_Days"].eq(horizon)].iloc[0]
-
-        if row.get("Effective_Validation_Dates", 0) >= 20 and row.get("Adjusted_TStat_TopMinusBottom", 0) >= 2:
-            return "Strong Evidence"
-
-        return "Moderate Evidence"
-
-    if verdict in ["No Proven Edge Yet", "Validation Negative"]:
-        return "Weak or Negative Evidence"
-
-    return "Insufficient Evidence"
 
 
 def write_report(bucket_perf: pd.DataFrame, spread_by_date: pd.DataFrame, spread_summary: pd.DataFrame, verdict: str, grade: str, missing: pd.DataFrame) -> None:
@@ -711,33 +700,20 @@ def write_validated_workbook(detail: pd.DataFrame, bucket_perf: pd.DataFrame, sp
             missing.head(2000).to_excel(writer, sheet_name="Missing Signals", index=False)
 
 
-def _write_validation_status(spread_summary: pd.DataFrame, verdict: str, grade: str, rules: Dict[str, float]) -> None:
-    """Always emit validation_status.json — never let this be skipped by an uninitialised variable."""
+def _write_validation_status(spread_summary: pd.DataFrame, verdict: str, grade: str,
+                             rules: Dict[str, float],
+                             stats: Dict[str, float] | None = None) -> None:
+    """Always emit validation_status.json — with the SAME verdict/stats the
+    report, workbook and console used."""
     try:
         from core import validation_status as _vs
         horizon = int(rules.get("CrossVal_Horizon", 10))
-        stats_payload: Dict[str, float] = {}
-        if isinstance(spread_summary, pd.DataFrame) and not spread_summary.empty and "Horizon_Days" in spread_summary.columns:
-            row = spread_summary[spread_summary["Horizon_Days"].eq(horizon)]
-            if not row.empty:
-                r = row.iloc[0]
-                stats_payload = {
-                    "validation_dates": float(r.get("Validation_Dates", 0) or 0),
-                    "effective_validation_dates": float(r.get("Effective_Validation_Dates", 0) or 0),
-                    "avg_obs": float(r.get("Avg_Obs_All", 0) or 0),
-                    "spread": float(r.get("Avg_TopMinusBottom_Quintile", 0) or 0),
-                    "hit_rate": float(r.get("Hit_Rate_TopBeatsBottom", 0) or 0),
-                    "adj_tstat": float(r.get("Adjusted_TStat_TopMinusBottom", 0) or 0),
-                    "bootstrap_prob": float(r.get("Bootstrap_Prob_Positive", 0) or 0),
-                }
-        try:
-            stats_payload = _vs.apply_bayes_shrink(stats_payload)
-        except Exception:
-            pass
+        stats_payload = dict(stats) if stats else resolve_validation(spread_summary, rules)[2]
         _vs.write_status(OUTPUT_DIR / "validation_status.json", verdict, grade, stats_payload, horizon=horizon)
         print("Saved: " + str(OUTPUT_DIR / "validation_status.json"))
     except Exception as _e:
         print(f"validation_status.json write skipped: {_e}")
+
 
 
 def main() -> None:
@@ -772,8 +748,7 @@ def main() -> None:
     bucket_perf = build_bucket_performance(detail)
     spread_by_date = build_spread_by_date(detail)
     spread_summary = build_spread_summary(spread_by_date, rules)
-    verdict = validation_verdict(spread_summary, rules)
-    grade = evidence_grade(spread_summary, rules)
+    verdict, grade, stats = resolve_validation(spread_summary, rules)
 
     write_csv_with_headers(detail, DETAIL_OUT, DETAIL_COLUMNS)
     write_csv_with_headers(bucket_perf, BUCKET_PERF_OUT, BUCKET_PERF_COLUMNS)
@@ -782,7 +757,8 @@ def main() -> None:
     write_report(bucket_perf, spread_by_date, spread_summary, verdict, grade, missing)
     write_validated_workbook(detail, bucket_perf, spread_by_date, spread_summary, verdict, grade, missing)
 
-    _write_validation_status(spread_summary, verdict, grade, rules)
+    _write_validation_status(spread_summary, verdict, grade, rules, stats)
+
 
     print(f"Saved: {DETAIL_OUT}")
     print(f"Saved: {BUCKET_PERF_OUT}")

@@ -587,15 +587,10 @@ def _emit_corr_and_benchmark(plan: pd.DataFrame) -> None:
         return
 
     try:
-        reviewable = plan[
-            ~plan["Trade_Status"].astype(str).str.contains("Avoid", case=False, na=False)
-        ].copy()
+        from core import top5_contract as t5c
+        reviewable = t5c.official_order(plan)
         if reviewable.empty:
             return
-        sort_cols = [c for c in ["Confidence_Adjusted_Score", "Symbol"] if c in reviewable.columns]
-        if sort_cols:
-            ascending = [False if c == "Confidence_Adjusted_Score" else True for c in sort_cols]
-            reviewable = reviewable.sort_values(sort_cols, ascending=ascending)
         pool_n = int(getattr(C, "CORR_AWARE_POOL_N", 25))
         pool = reviewable.head(pool_n)
         pool_syms = pool["Symbol"].astype(str).tolist()
@@ -603,22 +598,35 @@ def _emit_corr_and_benchmark(plan: pd.DataFrame) -> None:
         corr = psel.pairwise_corr(prices, pool_syms,
                                   window=int(getattr(C, "CORR_WINDOW_DAYS", 60)))
         if not corr.empty:
-            if getattr(C, "CORR_AWARE_TOP5", True):
-                top5 = psel.diversified_top_n(
-                    pool, corr, n=5,
-                    alpha=float(getattr(C, "CORR_AWARE_ALPHA", 0.65)),
-                    score_col="Confidence_Adjusted_Score",
-                )
-            else:
-                top5 = pool_syms[:5]
-            top5 = [s for s in top5 if s in corr.index][:5]
-            sub_corr = corr.loc[top5, top5] if top5 else corr
+            # OFFICIAL top5_* artifacts always follow the Top-5 contract.
+            official = [s for s in t5c.official_top5_symbols(plan) if s in corr.index]
+            sub_corr = corr.loc[official, official] if official else corr
             sub_corr.to_csv(TOP5_CORR_CSV, index=True)
 
-            bench = psel.benchmark_stats(prices, top5)
+            bench = psel.benchmark_stats(prices, official)
             bench.to_csv(TOP5_BENCH_CSV, index=False)
             print(f"Saved: {TOP5_CORR_CSV.name} (avg|corr|={psel.avg_abs_offdiag(sub_corr):.2f})")
             print(f"Saved: {TOP5_BENCH_CSV.name}")
+
+            # Correlation-aware diversified basket — NON-AUTHORITATIVE proposal.
+            if getattr(C, "CORR_AWARE_TOP5", True):
+                try:
+                    div = psel.diversified_top_n(
+                        pool, corr, n=5,
+                        alpha=float(getattr(C, "CORR_AWARE_ALPHA", 0.65)),
+                        score_col="Confidence_Adjusted_Score",
+                    )
+                    div = [s for s in div if s in corr.index][:5]
+                    if div:
+                        pd.DataFrame({
+                            "Symbol": div,
+                            "Proposal_Rank": range(1, len(div) + 1),
+                            "Authority": "NON_AUTHORITATIVE_DIVERSIFIED_PROPOSAL",
+                        }).to_csv(OUTPUT_DIR / t5c.DIVERSIFIED_PROPOSAL_CSV, index=False)
+                        corr.loc[div, div].to_csv(OUTPUT_DIR / t5c.DIVERSIFIED_CORR_CSV, index=True)
+                        print(f"Saved: {t5c.DIVERSIFIED_PROPOSAL_CSV} (non-authoritative)")
+                except Exception as _e:
+                    print(f"[step2] diversified proposal skipped: {_e}")
     except Exception as e:
         print(f"[step2] corr/benchmark stage skipped: {e}")
 
@@ -640,14 +648,8 @@ def _emit_horizon_sentiment_alpha(plan: pd.DataFrame) -> None:
 
     # top-5 symbols (post-veto, already correlation-diversified when step 2 ran)
     try:
-        reviewable = plan[
-            ~plan["Trade_Status"].astype(str).str.contains("Avoid", case=False, na=False)
-        ].copy()
-        sort_cols = [c for c in ["Confidence_Adjusted_Score", "Symbol"] if c in reviewable.columns]
-        if sort_cols:
-            ascending = [False if c == "Confidence_Adjusted_Score" else True for c in sort_cols]
-            reviewable = reviewable.sort_values(sort_cols, ascending=ascending)
-        top5_syms = reviewable["Symbol"].astype(str).head(5).tolist()
+        from core import top5_contract as t5c
+        top5_syms = t5c.official_top5_symbols(plan)
     except Exception:
         top5_syms = []
 
@@ -730,17 +732,20 @@ def _emit_fundamentals_sizing_backtest_bundle(plan: pd.DataFrame) -> None:
 
     # top-5 slice reused across steps
     try:
-        reviewable = plan[
-            ~plan["Trade_Status"].astype(str).str.contains("Avoid", case=False, na=False)
-        ].copy()
-        sort_cols = [c for c in ["Confidence_Adjusted_Score", "Symbol"]
-                     if c in reviewable.columns]
-        if sort_cols:
-            reviewable = reviewable.sort_values(sort_cols, ascending=[False if c == "Confidence_Adjusted_Score" else True for c in sort_cols])
-        top5 = reviewable.head(5).copy()
-        top5_syms = top5["Symbol"].astype(str).tolist()
+        from core import top5_contract as t5c
+        top5 = t5c.official_top5(plan)
+        top5_syms = [str(s) for s in top5["Symbol"].tolist()] if not top5.empty else []
     except Exception:
         top5 = pd.DataFrame(); top5_syms = []
+
+    # Official validation gate — validation_status.json is the sole authority.
+    try:
+        from core import validation_status as _vs
+        _official_status = _vs.read_status(OUTPUT_DIR / "validation_status.json")
+    except Exception:
+        _official_status = {"verdict": "Insufficient History"}
+    _official_verdict = str(_official_status.get("verdict", "") or "Unknown")
+    _validation_positive = _official_verdict.strip().lower() == "validation positive"
 
     prices = None
     if RAW_PRICES.exists():
@@ -791,6 +796,7 @@ def _emit_fundamentals_sizing_backtest_bundle(plan: pd.DataFrame) -> None:
                 vol_target=float(getattr(C, "PORTFOLIO_VOL_TARGET", 0.12)),
                 max_weight=float(getattr(C, "MAX_WEIGHT", 0.30)),
                 cash_buffer=float(getattr(C, "CASH_BUFFER", 0.10)),
+                validation_positive=_validation_positive,
             )
             if not sizing.empty:
                 sizing.to_csv(TOP5_SIZING_CSV, index=False)
@@ -867,6 +873,7 @@ def _emit_fundamentals_sizing_backtest_bundle(plan: pd.DataFrame) -> None:
             evr = ev.top5_ev_report(
                 top5[["Symbol"]], bt_sc, hz_df, sz_df,
                 kelly_cap_of_weight=float(getattr(C, "KELLY_CAP_OF_WEIGHT", 0.25)),
+                validation_verdict=_official_verdict,
             )
             if not evr.empty:
                 evr.to_csv(TOP5_EV_CSV, index=False)
@@ -884,7 +891,7 @@ def _emit_fundamentals_sizing_backtest_bundle(plan: pd.DataFrame) -> None:
                 "max_single_sector_pct":  float(getattr(C, "PV_MAX_SINGLE_SECTOR_PCT", 60.0)),
                 "min_backtest_hit_rate":  float(getattr(C, "PV_MIN_BACKTEST_HIT_RATE", 0.50)),
                 "min_alpha_survivors":    int(getattr(C, "PV_MIN_ALPHA_SURVIVORS", 2)),
-            })
+            }, validation_status=_official_status)
             pv.write_report(OUTPUT_DIR, report)
             print(f"[vibe] Saved: {PORTFOLIO_VAL_JSON.name} — Batch_Verdict={report['verdict']}")
             if report["reasons"]:
@@ -949,6 +956,7 @@ def _emit_fundamentals_sizing_backtest_bundle(plan: pd.DataFrame) -> None:
                 all_curr=all_curr, sentiment=sent_df, events=ev_df,
                 horizon_df=hz_df,
                 round_trip_cost_pct=float(getattr(C, "REBAL_ROUND_TRIP_COST_PCT", 0.35)),
+                validation_positive=_validation_positive,
             )
             import json as _j
             REBALANCE_DIFF_JSON.write_text(_j.dumps(rep, default=str, indent=2),
