@@ -2,6 +2,8 @@
   "_note": "SYNTHETIC EXAMPLE — fabricated values, not a real validation result.",
   "verdict": "No Proven Edge Yet",
   "evidence_grade": "Insufficient Evidence",
+  "verdict_basis": "bayesian_adjusted",
+  "bayesian_shrinkage_applied": true,
   "horizon_days": 10,
   "ranking_column": "Confidence_Adjusted_Score",
   "ranking_schema_version": 2,

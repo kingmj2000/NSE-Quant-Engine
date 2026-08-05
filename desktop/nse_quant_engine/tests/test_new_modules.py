@@ -441,7 +441,8 @@ def test_expected_value_top5_report():
     }])
     hz = pd.DataFrame({"Symbol": ["A", "B"], "Downside_Vol_%": [1.2, 2.1]})
     sizing = pd.DataFrame({"Symbol": ["A", "B"], "Weight_%": [55.0, 35.0]})
-    out = ev.top5_ev_report(top5, backtest, hz, sizing, kelly_cap_of_weight=0.25)
+    out = ev.top5_ev_report(top5, backtest, hz, sizing, kelly_cap_of_weight=0.25,
+                            validation_verdict="Validation Positive")
     assert not out.empty
     # EV = 0.6*3 - 0.4*2 = 1.0 (%)
     assert abs(float(out["EV_%"].iloc[0]) - 1.0) < 0.01, out["EV_%"].tolist()
@@ -468,6 +469,14 @@ def test_portfolio_validation_verdicts():
     (tmp / "alpha_zoo_survivors.json").write_text(
         _j.dumps([{"alpha": "a1"}, {"alpha": "a2"}, {"alpha": "a3"}]))
     (tmp / "macro_context.json").write_text('{"regime":"NEUTRAL"}')
+    # Official verdict authority + the official symbol set both have to be
+    # present before a batch may ship.
+    (tmp / "validation_status.json").write_text(
+        _j.dumps({"verdict": "Validation Positive",
+                  "evidence_grade": "Strong Evidence"}))
+    pd.DataFrame({"Symbol": ["A", "B"], "Trade_Status": ["Watch", "Watch"],
+                  "Confidence_Adjusted_Score": [90.0, 80.0]}) \
+        .to_csv(tmp / "trade_plan_latest.csv", index=False)
     r = pv.validate_batch(tmp)
     assert r["verdict"] == "Ship", r
     # Downgrade path: RISK_OFF
@@ -555,14 +564,15 @@ def test_rebalance_diff_first_and_second_run():
                          "Final_Score": [90, 85, 80], "Price": [100, 200, 300]})
     hz = pd.DataFrame({"Symbol": ["A", "B", "C"], "Exp_Ret_%": [3.0, 2.5, 2.0]})
     # first run
-    r1 = rd.build(curr, snap, horizon_df=hz)
+    r1 = rd.build(curr, snap, horizon_df=hz, validation_positive=True)
     assert r1["estimated_turnover_%"] == 100.0
     assert r1["recommendation"] == "First_Run_Establish_Positions"
     assert snap.exists()
     # second run: B dropped, D entered
     curr2 = pd.DataFrame({"Symbol": ["A", "C", "D"],
                           "Final_Score": [92, 79, 88], "Price": [100, 300, 400]})
-    r2 = rd.build(curr2, snap, horizon_df=hz, all_curr=curr2)
+    r2 = rd.build(curr2, snap, horizon_df=hz, all_curr=curr2,
+                  validation_positive=True)
     assert set(r2["holds"]) == {"A", "C"}
     assert r2["exits"] == ["B"]
     assert r2["entries"] == ["D"]
