@@ -700,33 +700,20 @@ def write_validated_workbook(detail: pd.DataFrame, bucket_perf: pd.DataFrame, sp
             missing.head(2000).to_excel(writer, sheet_name="Missing Signals", index=False)
 
 
-def _write_validation_status(spread_summary: pd.DataFrame, verdict: str, grade: str, rules: Dict[str, float]) -> None:
-    """Always emit validation_status.json — never let this be skipped by an uninitialised variable."""
+def _write_validation_status(spread_summary: pd.DataFrame, verdict: str, grade: str,
+                             rules: Dict[str, float],
+                             stats: Dict[str, float] | None = None) -> None:
+    """Always emit validation_status.json — with the SAME verdict/stats the
+    report, workbook and console used."""
     try:
         from core import validation_status as _vs
         horizon = int(rules.get("CrossVal_Horizon", 10))
-        stats_payload: Dict[str, float] = {}
-        if isinstance(spread_summary, pd.DataFrame) and not spread_summary.empty and "Horizon_Days" in spread_summary.columns:
-            row = spread_summary[spread_summary["Horizon_Days"].eq(horizon)]
-            if not row.empty:
-                r = row.iloc[0]
-                stats_payload = {
-                    "validation_dates": float(r.get("Validation_Dates", 0) or 0),
-                    "effective_validation_dates": float(r.get("Effective_Validation_Dates", 0) or 0),
-                    "avg_obs": float(r.get("Avg_Obs_All", 0) or 0),
-                    "spread": float(r.get("Avg_TopMinusBottom_Quintile", 0) or 0),
-                    "hit_rate": float(r.get("Hit_Rate_TopBeatsBottom", 0) or 0),
-                    "adj_tstat": float(r.get("Adjusted_TStat_TopMinusBottom", 0) or 0),
-                    "bootstrap_prob": float(r.get("Bootstrap_Prob_Positive", 0) or 0),
-                }
-        try:
-            stats_payload = _vs.apply_bayes_shrink(stats_payload)
-        except Exception:
-            pass
+        stats_payload = dict(stats) if stats else resolve_validation(spread_summary, rules)[2]
         _vs.write_status(OUTPUT_DIR / "validation_status.json", verdict, grade, stats_payload, horizon=horizon)
         print("Saved: " + str(OUTPUT_DIR / "validation_status.json"))
     except Exception as _e:
         print(f"validation_status.json write skipped: {_e}")
+
 
 
 def main() -> None:
