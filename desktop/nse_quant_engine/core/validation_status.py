@@ -139,8 +139,11 @@ def decide_verdict(stats: dict, rules: dict | None = None) -> tuple[str, str]:
         strong = ((g("effective_validation_dates") or 0) >= 20 and adj_t >= 2.0)
         return "Validation Positive", "Strong Evidence" if strong else "Moderate Evidence"
 
-    if spread <= -t["CrossVal_Min_Spread"] and adj_t <= -t["CrossVal_Min_TStat"]:
+    # Materially negative spread with a non-positive t-stat: the ranking is
+    # actively wrong, not merely unproven.
+    if spread <= -t["CrossVal_Min_Spread"] and adj_t <= 0:
         return "Validation Negative", "Weak or Negative Evidence"
+
     return "No Proven Edge Yet", "Weak or Negative Evidence"
 
 
