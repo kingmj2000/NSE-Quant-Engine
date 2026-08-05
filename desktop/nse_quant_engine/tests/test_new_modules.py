@@ -446,7 +446,7 @@ def test_expected_value_top5_report():
     assert not out.empty
     # EV = 0.6*3 - 0.4*2 = 1.0 (%)
     assert abs(float(out["EV_%"].iloc[0]) - 1.0) < 0.01, out["EV_%"].tolist()
-    assert (out["EV_Sizing_Agree"] == "Yes").all()
+    assert (out["EV_Sizing_Agree"] == "Consistent").all()
     assert out["Kelly_Fraction_Capped"].notna().all()
     _ok(f"EV report: EV_%={out['EV_%'].tolist()}")
 
