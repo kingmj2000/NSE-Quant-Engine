@@ -44,8 +44,10 @@ def _exit_reason(sym: str, prev_row: pd.Series, all_curr: pd.DataFrame,
     if not all_curr.empty and "Symbol" in all_curr.columns:
         sub = all_curr[all_curr["Symbol"].astype(str) == sym]
         if not sub.empty:
-            prev_score = pd.to_numeric(prev_row.get("Confidence_Adjusted_Score", prev_row.get("Final_Score")), errors="coerce")
-            curr_score = pd.to_numeric(sub.iloc[0].get("Confidence_Adjusted_Score", sub.iloc[0].get("Final_Score")), errors="coerce")
+            # Confidence_Adjusted_Score is the ONLY score compared here.
+            # Final_Score is diagnostic and must never be a fallback.
+            prev_score = pd.to_numeric(prev_row.get("Confidence_Adjusted_Score"), errors="coerce")
+            curr_score = pd.to_numeric(sub.iloc[0].get("Confidence_Adjusted_Score"), errors="coerce")
             if pd.notna(prev_score) and pd.notna(curr_score) and curr_score < prev_score - 3:
                 reasons.append(f"score decay ({prev_score:.1f}→{curr_score:.1f})")
         else:
@@ -59,8 +61,13 @@ def build(curr_top5: pd.DataFrame,
           sentiment: pd.DataFrame | None = None,
           events: pd.DataFrame | None = None,
           horizon_df: pd.DataFrame | None = None,
-          round_trip_cost_pct: float = 0.35) -> dict:
-    """Returns report dict. Also archives current top-5 snapshot."""
+          round_trip_cost_pct: float = 0.35,
+          validation_positive: bool = False) -> dict:
+    """Returns report dict. Also archives current top-5 snapshot.
+
+    When `validation_positive` is False the report still describes entries,
+    exits, rank changes and turnover, but the recommendation is forced to
+    Watchlist_Changes_Only — never an action instruction."""
     out = {
         "as_of": pd.Timestamp.now().isoformat(timespec="seconds"),
         "prior_snapshot": None,
@@ -71,6 +78,9 @@ def build(curr_top5: pd.DataFrame,
         "expected_new_basket_return_%": None,
         "net_edge_after_cost_%": None,
         "recommendation": "Insufficient_History",
+        "validation_positive": bool(validation_positive),
+        "decision_use": ("Decision_Input" if validation_positive
+                         else "Watchlist_Context_Only"),
     }
     prev = pd.DataFrame()
     prev_snapshot = Path(prev_snapshot)
@@ -89,7 +99,8 @@ def build(curr_top5: pd.DataFrame,
     if prev.empty:
         out["entries"] = curr["Symbol"].tolist()
         out["estimated_turnover_%"] = 100.0
-        out["recommendation"] = "First_Run_Establish_Positions"
+        out["recommendation"] = ("First_Run_Establish_Positions" if validation_positive
+                                 else "Watchlist_Changes_Only")
     else:
         holds, exits, entries = _diff(prev, curr)
         out["holds"] = holds
@@ -117,7 +128,9 @@ def build(curr_top5: pd.DataFrame,
 
         # Recommendation
         edge = out["net_edge_after_cost_%"]
-        if out["estimated_turnover_%"] <= 20:
+        if not validation_positive:
+            out["recommendation"] = "Watchlist_Changes_Only"
+        elif out["estimated_turnover_%"] <= 20:
             out["recommendation"] = "Hold_Minor_Adjustment"
         elif edge is not None and edge > 0.5:
             out["recommendation"] = "Rotate_Edge_Positive"
