@@ -748,8 +748,7 @@ def main() -> None:
     bucket_perf = build_bucket_performance(detail)
     spread_by_date = build_spread_by_date(detail)
     spread_summary = build_spread_summary(spread_by_date, rules)
-    verdict = validation_verdict(spread_summary, rules)
-    grade = evidence_grade(spread_summary, rules)
+    verdict, grade, stats = resolve_validation(spread_summary, rules)
 
     write_csv_with_headers(detail, DETAIL_OUT, DETAIL_COLUMNS)
     write_csv_with_headers(bucket_perf, BUCKET_PERF_OUT, BUCKET_PERF_COLUMNS)
@@ -758,7 +757,8 @@ def main() -> None:
     write_report(bucket_perf, spread_by_date, spread_summary, verdict, grade, missing)
     write_validated_workbook(detail, bucket_perf, spread_by_date, spread_summary, verdict, grade, missing)
 
-    _write_validation_status(spread_summary, verdict, grade, rules)
+    _write_validation_status(spread_summary, verdict, grade, rules, stats)
+
 
     print(f"Saved: {DETAIL_OUT}")
     print(f"Saved: {BUCKET_PERF_OUT}")
