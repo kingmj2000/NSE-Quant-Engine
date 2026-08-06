@@ -1710,8 +1710,12 @@ class MainWindow(QMainWindow):
         # header age pill
         finished = manifest.get("completed_at")
         if finished:
-            champ = manifest.get("champion", "official").title()
-            self.lbl_lastrun.setText(f"last run: {_human_age(finished)} · champion: {champ}")
+            champ = str(manifest.get("champion", "official")).title()
+            lead = str(manifest.get("experimental_leader", "") or "")
+            extra = ("  ·  shadow currently ahead (experimental) — manual review suggested"
+                     if lead == "shadow" else "")
+            self.lbl_lastrun.setText(
+                f"last run: {_human_age(finished)} · official engine: {champ}{extra}")
         else:
             self.lbl_lastrun.setText("no runs yet — click ▶ Run Full Pipeline")
 
