@@ -40,14 +40,31 @@ def build() -> dict:
         REPORT.write_text("# Shadow vs Official\n\nMissing one of the score files — run the pipeline first.\n")
         return {"recommendation": "INSUFFICIENT_DATA"}
 
-    def _score_col(frame: pd.DataFrame) -> str:
-        # Official ranking authority = Confidence_Adjusted_Score; shadow keeps its own composite.
-        for c in ("Confidence_Adjusted_Score", "Final_Score", "Opportunity_Score"):
+    # Official ranking authority is Confidence_Adjusted_Score, full stop.
+    # There is NO Final_Score fallback: without CAS the comparison is a
+    # data-quality failure, not a raw-score comparison.
+    if "Confidence_Adjusted_Score" not in off.columns:
+        REPORT.write_text(
+            "# Shadow vs Official\n\nOfficial scores are missing "
+            "`Confidence_Adjusted_Score` — comparison skipped (data quality).\n")
+        return {"recommendation": "INSUFFICIENT_DATA",
+                "reason": "official_missing_Confidence_Adjusted_Score"}
+
+    def _shadow_score_col(frame: pd.DataFrame) -> str | None:
+        # Shadow keeps its own composite; CAS preferred when present.
+        for c in ("Confidence_Adjusted_Score", "Shadow_Score", "Final_Score", "Opportunity_Score"):
             if c in frame.columns:
                 return c
-        return frame.columns[-1]
-    score_col_off = _score_col(off)
-    score_col_sha = _score_col(sha)
+        return None
+    score_col_off = "Confidence_Adjusted_Score"
+    score_col_sha = _shadow_score_col(sha)
+    if score_col_sha is None:
+        REPORT.write_text(
+            "# Shadow vs Official\n\nShadow scores carry no usable score column "
+            "— comparison skipped (data quality).\n")
+        return {"recommendation": "INSUFFICIENT_DATA",
+                "reason": "shadow_missing_score_column"}
+
     merged = off[["Symbol", score_col_off]].rename(columns={score_col_off: "score_off"}).merge(
         sha[["Symbol", score_col_sha]].rename(columns={score_col_sha: "score_sha"}),
         on="Symbol", how="inner",
