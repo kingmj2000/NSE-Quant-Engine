@@ -186,12 +186,19 @@ def read_shadow_summary(out_dir: str | Path) -> dict:
     data = read_json(Path(out_dir) / "shadow_vs_official.json")
     rec = str(data.get("recommendation") or "")
     rec_low = rec.lower()
+    # `experimental_leader` is DISPLAY ONLY. The official engine variant is a
+    # persistent user configuration and is never changed by report wording.
     if "shadow leads" in rec_low:
-        champion = "shadow"
+        experimental_leader = "shadow"
     elif "official still leads" in rec_low or "keep current champion" in rec_low:
-        champion = "official"
+        experimental_leader = "official"
     else:
-        champion = "review"
+        experimental_leader = "review"
+    try:
+        from core import config as _C
+        champion = getattr(_C, "OFFICIAL_ENGINE_VARIANT", "official")
+    except Exception:
+        champion = "official"
     return {
         "jaccard_top25": data.get("jaccard_top25"),
         "spearman_full": data.get("spearman_full"),
@@ -201,6 +208,7 @@ def read_shadow_summary(out_dir: str | Path) -> dict:
         "ev_per_day_shadow": data.get("ev_per_day_shadow"),
         "recommendation": rec or None,
         "champion": champion,
+        "experimental_leader": experimental_leader,
         "empty": not data,
     }
 

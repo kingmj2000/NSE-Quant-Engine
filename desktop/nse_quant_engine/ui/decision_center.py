@@ -307,10 +307,12 @@ class DecisionCenterView(QWidget):
             bullets.append((f"Regime tilt: {note}", "violet"))
 
         # Shadow vs official (from structured summary)
-        champ = shadow_j.get("champion")
-        if champ and champ != "review":
-            tone = "green" if champ == "official" else "amber"
-            bullets.append((f"Shadow vs official: {champ} leads on filtered EV/day", tone))
+        lead = shadow_j.get("experimental_leader")
+        if lead and lead != "review":
+            tone = "green" if lead == "official" else "amber"
+            note = ("shadow currently ahead — manual review suggested"
+                    if lead == "shadow" else "official still ahead")
+            bullets.append((f"Shadow vs official (experimental): {note}", tone))
 
         # Data-source failures
         if health.get("reds"):
@@ -449,8 +451,9 @@ class DecisionCenterView(QWidget):
                               "violet"))
         except Exception:
             pass
-        if cmp_j.get("champion") == "shadow":
-            items.append(("⇄ Shadow model leads official on filtered EV/day", "violet"))
+        if cmp_j.get("experimental_leader") == "shadow":
+            items.append(("⇄ Shadow currently ahead (experimental) — manual review suggested",
+                          "violet"))
 
         # 5. Data quality reds/amber (structured feeds dict)
         health = read_data_health(self.BASE)
