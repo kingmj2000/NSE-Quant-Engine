@@ -414,8 +414,8 @@ class DecisionCenterView(QWidget):
 
         items: list[tuple[str, str]] = []
 
-        # 1. Earnings inside hold window (top5_event_calendar.csv Event_Risk_Flag == In_Window)
-        ev = _read_csv(self.OUT / "top5_event_calendar.csv")
+        # 1. Earnings inside hold window (top5_events.csv Event_Risk_Flag == In_Window)
+        ev = _read_csv(self.OUT / OP.TOP5_EVENTS_CSV)
         if not ev.empty and "Event_Risk_Flag" in ev.columns:
             inwin = ev[ev["Event_Risk_Flag"].astype(str) == "In_Window"]
             for r in inwin.itertuples(index=False):

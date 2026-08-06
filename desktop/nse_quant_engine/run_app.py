@@ -1210,9 +1210,9 @@ class PortfolioView(QWidget):
         self._v.addWidget(vcard)
 
         # --- Sizing (Step 8) ---
-        self._v.addWidget(_section_header("Position sizing · top5_sizing.csv  ·  inspired by Vibe Trading"))
+        self._v.addWidget(_section_header("Position sizing · top5_position_sizing.csv  ·  inspired by Vibe Trading"))
         if sizing_df is None or sizing_df.empty:
-            self._v.addWidget(_empty_card("No sizing output — Step 8 did not produce top5_sizing.csv.", "amber"))
+            self._v.addWidget(_empty_card("No sizing output — Step 8 did not produce top5_position_sizing.csv.", "amber"))
         else:
             cols = [c for c in ("Symbol", "Price", "Weight_%", "Capital_INR", "Shares",
                                 "Stop_Loss_INR", "Max_Loss_INR", "Max_Loss_%_of_NAV",
@@ -1227,7 +1227,7 @@ class PortfolioView(QWidget):
             self._v.addWidget(_table_card(sector_df, "violet"))
 
         # --- Events + EV merged (Steps 12/13) ---
-        self._v.addWidget(_section_header("Event risk & expected value · top5_event_calendar.csv + top5_expected_value.csv  ·  inspired by Fincept Terminal + Vibe Trading"))
+        self._v.addWidget(_section_header("Event risk & expected value · top5_events.csv + top5_expected_value.csv  ·  inspired by Fincept Terminal + Vibe Trading"))
         merged = pd.DataFrame()
         if events_df is not None and not events_df.empty and ev_df is not None and not ev_df.empty:
             try:
@@ -1776,11 +1776,11 @@ class MainWindow(QMainWindow):
             _log_crash(f"Compare tab render failed: {e}")
 
         # New tabs: Portfolio + Macro & Rotation (Steps 8, 10–16)
-        sizing_df   = load_csv(OUT / "top5_sizing.csv")
-        sector_df   = load_csv(OUT / "top5_sector_context.csv")
-        events_df   = load_csv(OUT / "top5_event_calendar.csv")
-        ev_df       = load_csv(OUT / "top5_expected_value.csv")
-        inst_df     = load_csv(OUT / "top5_institutional_flow.csv")
+        sizing_df   = load_csv(OUT / OP.TOP5_POSITION_SIZING_CSV)
+        sector_df   = load_csv(OUT / OP.TOP5_SECTOR_CONTEXT_CSV)
+        events_df   = load_csv(OUT / OP.TOP5_EVENTS_CSV)
+        ev_df       = load_csv(OUT / OP.TOP5_EXPECTED_VALUE_CSV)
+        inst_df     = load_csv(OUT / OP.TOP5_INSTITUTIONAL_FLOW_CSV)
         pv_json     = _safe_json(OUT / "portfolio_validation.json")
         macro_json  = _safe_json(OUT / "macro_context.json")
         tilt_json   = _safe_json(OUT / "regime_tilt_report.json")
