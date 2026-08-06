@@ -37,6 +37,8 @@ import re
 import numpy as np
 import pandas as pd
 
+from core import output_paths as OP
+
 BASE_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = BASE_DIR / "output"
 SCORING_RULES_CSV = BASE_DIR / "scoring_rules.csv"
@@ -56,15 +58,15 @@ ALPHA_IC_CSV = OUTPUT_DIR / "alpha_zoo_ic_report.csv"
 ALPHA_SURVIVORS_JSON = OUTPUT_DIR / "alpha_zoo_survivors.json"
 RAW_PRICES = BASE_DIR / "data" / "raw_prices_latest.csv"
 TOP5_FUND_CSV = OUTPUT_DIR / "top5_fundamentals.csv"
-TOP5_SIZING_CSV = OUTPUT_DIR / "top5_position_sizing.csv"
+TOP5_SIZING_CSV = OUTPUT_DIR / OP.TOP5_POSITION_SIZING_CSV
 BACKTEST_CSV = OUTPUT_DIR / "backtest_scorecard.csv"
 BACKTEST_CURVE_CSV = OUTPUT_DIR / "backtest_equity_curve.csv"
 FUND_CACHE_CSV = OUTPUT_DIR / "fundamentals_cache.csv"
-TOP5_SECTOR_CSV = OUTPUT_DIR / "top5_sector_context.csv"
-TOP5_EVENTS_CSV = OUTPUT_DIR / "top5_events.csv"
-TOP5_EV_CSV = OUTPUT_DIR / "top5_expected_value.csv"
-PORTFOLIO_VAL_JSON = OUTPUT_DIR / "portfolio_validation.json"
-TOP5_INSTFLOW_CSV = OUTPUT_DIR / "top5_institutional_flow.csv"
+TOP5_SECTOR_CSV = OUTPUT_DIR / OP.TOP5_SECTOR_CONTEXT_CSV
+TOP5_EVENTS_CSV = OUTPUT_DIR / OP.TOP5_EVENTS_CSV
+TOP5_EV_CSV = OUTPUT_DIR / OP.TOP5_EXPECTED_VALUE_CSV
+PORTFOLIO_VAL_JSON = OUTPUT_DIR / OP.PORTFOLIO_VALIDATION_JSON
+TOP5_INSTFLOW_CSV = OUTPUT_DIR / OP.TOP5_INSTITUTIONAL_FLOW_CSV
 REGIME_TILT_JSON = OUTPUT_DIR / "regime_tilt_report.json"
 REBALANCE_DIFF_JSON = OUTPUT_DIR / "rebalance_diff.json"
 PREV_TOP5_SNAPSHOT = OUTPUT_DIR / "history" / "top5_prev.csv"
