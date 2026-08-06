@@ -219,13 +219,23 @@ def write_manifest(summary: dict) -> Path:
             return "partial"
         return "ok"
 
-    champion = "official"
+    # Champion is a persistent user configuration (core.config.OFFICIAL_ENGINE_VARIANT).
+    # The shadow report NEVER promotes itself: at most it is flagged as the
+    # experimental leader for manual review.
+    try:
+        if str(BASE) not in sys.path:
+            sys.path.insert(0, str(BASE))
+        from core import config as _C
+        champion = getattr(_C, "OFFICIAL_ENGINE_VARIANT", "official")
+    except Exception:
+        champion = "official"
+    experimental_leader = "official"
     cmp_path = OUT / "shadow_vs_official.json"
     if cmp_path.exists():
         try:
             rec = json.loads(cmp_path.read_text()).get("recommendation", "").lower()
-            if "shadow leads" in rec or "switch" in rec:
-                champion = "shadow"
+            if "shadow leads" in rec:
+                experimental_leader = "shadow"
         except Exception:
             pass
 
@@ -240,6 +250,9 @@ def write_manifest(summary: dict) -> Path:
         "official_status": _status_of("nse_quant_engine"),
         "shadow_status": _status_of("shadow"),
         "champion": champion,
+        "experimental_leader": experimental_leader,
+        "shadow_note": ("shadow currently ahead — manual review suggested"
+                        if experimental_leader == "shadow" else ""),
         "steps": summary["steps"],
         "artifacts": {
             "dashboard_html": _exists("dashboard_latest.html"),
