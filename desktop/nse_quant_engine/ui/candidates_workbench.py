@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QPushButton, QAbstractItemView,
 )
 
+from core import output_paths as OP
 from core.candidate_selection import (
     canonical_order, is_eligible,
     PRIMARY_SCORE_COL, SECONDARY_SCORE_COL,

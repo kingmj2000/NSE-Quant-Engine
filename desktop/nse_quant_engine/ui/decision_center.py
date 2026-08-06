@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QPushButton, QProgressBar, QSizePolicy,
 )
 
+from core import output_paths as OP
 from core.candidate_selection import (
     top_official_candidates, canonical_order,
     PRIMARY_SCORE_COL, SECONDARY_SCORE_COL,

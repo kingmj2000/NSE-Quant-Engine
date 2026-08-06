@@ -50,6 +50,7 @@ except ImportError:
 
 import pandas as pd
 import orchestrator
+from core import output_paths as OP
 import md_to_widgets
 from core.candidate_selection import (
     canonical_order, top_official_candidates,
