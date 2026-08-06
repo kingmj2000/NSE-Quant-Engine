@@ -132,3 +132,12 @@ Every run now:
 
 Env flag to enable the adaptive shadow: set `ADAPTIVE_ENABLED=1`. The
 primary engine remains untouched regardless.
+
+**Engine governance.** `core/config.OFFICIAL_ENGINE_VARIANT` (default
+`official`, override via the environment variable of the same name) is the only
+thing that decides which engine is official. `shadow_vs_official_report.py` can
+report "shadow currently ahead — manual review suggested", but nothing in the
+pipeline promotes the shadow automatically. The official comparison score is
+`Confidence_Adjusted_Score`; if it is missing the report returns
+`INSUFFICIENT_DATA` instead of falling back to `Final_Score`.
+
