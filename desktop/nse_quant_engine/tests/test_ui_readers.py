@@ -73,11 +73,15 @@ def test_shadow_summary_champion_from_recommendation(tmp_path):
     }
     (out / "shadow_vs_official.json").write_text(json.dumps(payload))
     s = read_shadow_summary(out)
+    assert s["experimental_leader"] == "official"
     assert s["champion"] == "official"
 
     payload["recommendation"] = "RECOMMEND: shadow leads on filtered EV/day — consider manual switch"
     (out / "shadow_vs_official.json").write_text(json.dumps(payload))
-    assert read_shadow_summary(out)["champion"] == "shadow"
+    s2 = read_shadow_summary(out)
+    assert s2["experimental_leader"] == "shadow"
+    # display-only: the official engine variant is never promoted by wording
+    assert s2["champion"] == "official"
 
 
 # ─── data_health enumerates nested feeds dict, ignores metadata keys ────────

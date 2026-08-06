@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QPushButton, QAbstractItemView,
 )
 
+from core import output_paths as OP
 from core.candidate_selection import (
     canonical_order, is_eligible,
     PRIMARY_SCORE_COL, SECONDARY_SCORE_COL,
@@ -627,7 +628,7 @@ class CandidatesWorkbench(QWidget):
         if rf: bullets.append((f"Risk flag: {rf}", "amber"))
 
         # Earnings inside hold window?
-        ev = _read_csv(self.OUT / "top5_event_calendar.csv")
+        ev = _read_csv(self.OUT / OP.TOP5_EVENTS_CSV)
         if not ev.empty and "Symbol" in ev.columns:
             m = ev[ev["Symbol"].astype(str) == sym]
             if not m.empty and "Event_Risk_Flag" in m.columns:
@@ -636,7 +637,7 @@ class CandidatesWorkbench(QWidget):
                     bullets.append(("Earnings inside proposed holding window", "amber"))
 
         # Sector context
-        sec = _read_csv(self.OUT / "top5_sector_context.csv")
+        sec = _read_csv(self.OUT / OP.TOP5_SECTOR_CONTEXT_CSV)
         if not sec.empty and "Symbol" in sec.columns:
             m = sec[sec["Symbol"].astype(str) == sym]
             if not m.empty:

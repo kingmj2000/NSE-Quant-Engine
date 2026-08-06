@@ -23,11 +23,11 @@
 
 ## Analytical fixes (root-cause)
 - `cross_sectional_validation.py` — now writes the canonical `output/validation_status.json` after every run (single source of truth).
-- `trade_plan_builder.py` — reads `validation_status.json` first; markdown-scrape is now a fallback. Kills the false "Validation Positive" bug.
+- `trade_plan_builder.py` — reads `validation_status.json` as the SOLE verdict authority. Markdown reports are never scraped for a verdict.
 - Existing v4 fixes (no momentum triple-counting, neutral tracking-error, falling-knife cap, fundamentals coverage guard, EV gated on validation) remain wired through `core/`.
 
 ## Champion / shadow comparison
-- **`shadow_vs_official_report.py`** — writes `output/shadow_vs_official.md` + `.csv` + `.json` with Top-25 Jaccard overlap, full-rank Spearman ρ, side-by-side validation verdicts, filtered EV/day (top quintile only, gated on validation positive), and a plain-English recommendation. **No auto-switch.** Flip `Engine_Champion` in `config.csv` manually when ready.
+- **`shadow_vs_official_report.py`** — writes `output/shadow_vs_official.md` + `.csv` + `.json` with Top-25 Jaccard overlap, full-rank Spearman ρ, side-by-side validation verdicts, filtered EV/day (top quintile only, gated on validation positive), and a plain-English recommendation. **No auto-switch.** Flip `OFFICIAL_ENGINE_VARIANT` in `core/config.py` (or the matching environment variable) manually when ready — nothing promotes the shadow automatically.
 
 ## Tests
 - New `tests/test_new_modules.py` — 9 tests for regime, sector RS, microstructure, dq flags, orchestrator wiring. All pass.

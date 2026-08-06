@@ -120,6 +120,14 @@ HORIZON_GRID       = [3, 5, 10, 21, 42, 63]
 HORIZON_HIST_DAYS  = _i("HORIZON_HIST_DAYS", 250)
 HORIZON_RISK_CAP_PCT = _f("HORIZON_RISK_CAP_PCT", 6.0)
 
+# ── Engine governance ───────────────────────────────────────────────────────
+# The official engine variant is a PERSISTENT USER CHOICE. Nothing in the
+# pipeline may promote the shadow engine automatically: the shadow report can
+# only say "shadow currently ahead — manual review suggested".
+OFFICIAL_ENGINE_VARIANT = os.environ.get("OFFICIAL_ENGINE_VARIANT", "official").strip().lower()
+if OFFICIAL_ENGINE_VARIANT not in ("official", "shadow"):
+    OFFICIAL_ENGINE_VARIANT = "official"
+
 # ── Step 4: Macro regime context ────────────────────────────────────────────
 # Macro/regime context is independent of news scoring and stays ON.
 MACRO_CONTEXT_ON = (not _SAFE_MODE) and (

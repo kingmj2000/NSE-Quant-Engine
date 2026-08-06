@@ -425,19 +425,6 @@ def _plain_card_line(row: dict, verdict_state: str) -> str:
         elif "elevated" in text or "vol" in text:
             frags.append("recent price swings are on the wide side")
 
-    sent = row.get("sent") or {}
-    if sent:
-        try:
-            neg = float(sent.get("neg") or 0)
-            pos = float(sent.get("pos") or 0)
-            if neg >= 40:
-                frags.append("some negative news flagged in recent headlines")
-            elif pos >= 40:
-                frags.append("news tone is broadly positive")
-            else:
-                frags.append("no strong news signal either way")
-        except Exception:
-            pass
 
     if risk_text and risk_text.lower() != "no major technical risk flagged":
         frags.append(f"risk note: {risk_text.rstrip('.').lower()}")
@@ -686,9 +673,8 @@ def _payload() -> dict:
     top5_bench_df = _safe_read_csv(OUT / "top5_benchmark_stats.csv")
     top5_corr_df = _safe_read_csv(OUT / "top5_corr_matrix.csv")
     top5_horizon_df = _safe_read_csv(OUT / "top5_horizon.csv")
-    # Retired: numerical news sentiment. Kept as an empty frame so any
-    # downstream section renders as "not available" instead of breaking.
-    top5_sent_df = _safe_read_csv(OUT / "top5_sentiment.csv") if (OUT / "top5_sentiment.csv").exists() else __import__("pandas").DataFrame()
+    # Numerical news sentiment is RETIRED — no sentiment is read or rendered.
+    # Historical top5_sentiment.csv files on disk are left untouched.
     macro_ctx = _safe_read_json(OUT / "macro_context.json")
     alpha_ic_df = _safe_read_csv(OUT / "alpha_zoo_ic_report.csv")
     alpha_survivors = _safe_read_json(OUT / "alpha_zoo_survivors.json")
@@ -992,20 +978,6 @@ def _payload() -> dict:
                 "sharpe": _num(row.get("Sharpe_like"), 2),
                 "grid": hor if isinstance(hor, list) else None,
                 "curve": curve if isinstance(curve, list) else None,
-            }
-
-    # attach sentiment chip per card
-    if not top5_sent_df.empty and "Symbol" in top5_sent_df.columns:
-        smap = {str(row["Symbol"]): row for _, row in top5_sent_df.iterrows()}
-        for c in cards:
-            row = smap.get(str(c["sym"]))
-            if row is None:
-                continue
-            c["sent"] = {
-                "n": int(row.get("Headlines_7D") or 0),
-                "pos": _num((row.get("PosPct") or 0) * 100, 0),
-                "neg": _num((row.get("NegPct") or 0) * 100, 0),
-                "net": _num(row.get("Net_Sent"), 2),
             }
 
     # correlation matrix payload for the top-5 (or fewer)
@@ -1567,7 +1539,7 @@ canvas{margin-top:4px}
 <h2 id="corrTitle">Top-5 correlation &mdash; diversification check</h2>
 <div class="glass panel" id="corrPanel" style="display:none">
   <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
-    <div class="sub">60-session daily-return correlation across the picked top-5. Lower off-diagonal magnitude = more diversified basket.</div>
+    <div class="sub">60-session daily-return correlation across the official top-5. Diagnostic only &mdash; the official top-5 is ranked by Confidence_Adjusted_Score and is NOT correlation-diversified.</div>
     <div id="corrAvg" class="lblchip"></div>
   </div>
   <div id="corrTable"></div>
@@ -1924,7 +1896,6 @@ document.getElementById("cards").innerHTML = (DATA.cards||[]).map(c=>`
       <div class="pd"><div class="l">Downside vol</div><div class="n">${fmt(c.horizon.down_vol,'%',2)}</div></div>
       <div class="pd"><div class="l">Sharpe-like</div><div class="n">${fmt(c.horizon.sharpe,'',2)}</div></div>
     </div>${c.horizon.curve ? `<div class="sub" style="margin-top:4px;font-size:11px">Curve %: ${c.horizon.grid.map((h,i)=>`${h}d=${c.horizon.curve[i]==null?'—':c.horizon.curve[i]}`).join(' · ')}</div>` : ''}` : ''}
-    ${c.sent ? `<div class="sub" style="margin-top:6px;font-size:11.5px">📰 ${c.sent.n} headlines · 🟢 ${c.sent.pos}% / 🔴 ${c.sent.neg}% · net=${fmt(c.sent.net,'',2)}</div>` : ''}
     <div class="flags">${(c.flags||[]).map(f=>`<div class="flag"><span class="fdot ${dotc[f[0]]||'d-dim'}"></span><b>${f[1]}:</b> ${f[2]}</div>`).join('')}</div>
     ${c.plain ? `<div class="plain">${c.plain}</div>` : ''}
   </div>`).join("") || (DATA.ranking_unavailable
