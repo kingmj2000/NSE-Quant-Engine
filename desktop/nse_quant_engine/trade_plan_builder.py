@@ -648,7 +648,9 @@ def _emit_horizon_sentiment_alpha(plan: pd.DataFrame) -> None:
     except Exception:
         return
 
-    # top-5 symbols (post-veto, already correlation-diversified when step 2 ran)
+    # Official top-5 symbols (governance-veto applied, ranked by
+    # Confidence_Adjusted_Score). NOT correlation-diversified: the diversified
+    # basket is a separate, non-authoritative proposal artifact.
     try:
         from core import top5_contract as t5c
         top5_syms = t5c.official_top5_symbols(plan)

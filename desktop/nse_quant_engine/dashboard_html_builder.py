@@ -1539,7 +1539,7 @@ canvas{margin-top:4px}
 <h2 id="corrTitle">Top-5 correlation &mdash; diversification check</h2>
 <div class="glass panel" id="corrPanel" style="display:none">
   <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
-    <div class="sub">60-session daily-return correlation across the picked top-5. Lower off-diagonal magnitude = more diversified basket.</div>
+    <div class="sub">60-session daily-return correlation across the official top-5. Diagnostic only &mdash; the official top-5 is ranked by Confidence_Adjusted_Score and is NOT correlation-diversified.</div>
     <div id="corrAvg" class="lblchip"></div>
   </div>
   <div id="corrTable"></div>
