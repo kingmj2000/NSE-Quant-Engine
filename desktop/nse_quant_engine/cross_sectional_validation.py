@@ -246,6 +246,11 @@ def load_inputs() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     return scores, fwd, missing
 
 
+#: Populated by make_detail(); surfaced in validation_status.json so a zero
+#: raw-date count is always explainable rather than mysterious.
+SCHEMA_FILTER_DIAGNOSTICS: dict = {}
+
+
 def assign_buckets(work: pd.DataFrame) -> pd.DataFrame:
     pieces = []
 
@@ -333,6 +338,35 @@ def make_detail(scores: pd.DataFrame, fwd: pd.DataFrame) -> pd.DataFrame:
         v2 = pd.to_numeric(work["Ranking_Schema_Version"], errors="coerce").fillna(1).astype(int).eq(2)
     else:
         v2 = pd.Series(False, index=work.index)
+
+    # Explain the gate. A silent zero here is indistinguishable from a bug: the
+    # v2 clock starts when the schema stamp was introduced, so matured v1-era
+    # forward returns are excluded on purpose and "Raw dates 0" is the CORRECT
+    # answer until v2-stamped signal dates clear the forward horizon.
+    _total = int(len(work))
+    _v2_rows = int(v2.sum())
+    _matched = int(work["Confidence_Adjusted_Score"].notna().sum()) if "Confidence_Adjusted_Score" in work.columns else 0
+    global SCHEMA_FILTER_DIAGNOSTICS
+    SCHEMA_FILTER_DIAGNOSTICS = {
+        "forward_rows_joined": _total,
+        "rows_with_score_history_match": _matched,
+        "rows_schema_v2": _v2_rows,
+        "rows_dropped_schema_v1_or_unmatched": _total - _v2_rows,
+        "distinct_dates_all": int(work["Signal_Date"].nunique()) if "Signal_Date" in work.columns else 0,
+        "distinct_dates_schema_v2": int(work.loc[v2, "Signal_Date"].nunique()) if "Signal_Date" in work.columns else 0,
+    }
+    print(f"[crossval] schema gate — joined forward rows: {_total}, "
+          f"schema-v2: {_v2_rows}, dropped (v1/unmatched): {_total - _v2_rows}, "
+          f"v2 dates: {SCHEMA_FILTER_DIAGNOSTICS['distinct_dates_schema_v2']} "
+          f"of {SCHEMA_FILTER_DIAGNOSTICS['distinct_dates_all']}")
+    if _total and not _v2_rows:
+        print("[crossval] NOTE: every joined row is schema-v1 or unmatched, so the "
+              "authoritative v2 verdict has zero evidence. This is expected while "
+              "v2-stamped signal dates are still inside the forward horizon; it is "
+              "NOT expected if v2 dates should already have matured — in that case "
+              "check that score_history.csv carries Ranking_Schema_Version=2 rows "
+              "whose Date matches Signal_Date in forward_return_history.csv.")
+
     work = work[v2].copy()
 
 
@@ -709,6 +743,8 @@ def _write_validation_status(spread_summary: pd.DataFrame, verdict: str, grade: 
         from core import validation_status as _vs
         horizon = int(rules.get("CrossVal_Horizon", 10))
         stats_payload = dict(stats) if stats else resolve_validation(spread_summary, rules)[2]
+        if SCHEMA_FILTER_DIAGNOSTICS:
+            stats_payload["schema_filter_diagnostics"] = dict(SCHEMA_FILTER_DIAGNOSTICS)
         _vs.write_status(OUTPUT_DIR / "validation_status.json", verdict, grade, stats_payload, horizon=horizon)
         print("Saved: " + str(OUTPUT_DIR / "validation_status.json"))
     except Exception as _e:

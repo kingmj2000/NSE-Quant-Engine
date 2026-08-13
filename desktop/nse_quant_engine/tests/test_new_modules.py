@@ -464,6 +464,12 @@ def test_portfolio_validation_verdicts():
         .to_csv(tmp / "top5_position_sizing.csv", index=False)
     pd.DataFrame({"Symbol": ["A", "B"], "Sector": ["Tech", "Banks"]}) \
         .to_csv(tmp / "top5_sector_context.csv", index=False)
+    # Ship now requires COMPLETE evidence: every critical top5_* artifact must
+    # exist and carry the official symbols in official order.
+    pd.DataFrame({"Symbol": ["A", "B"], "Event_Risk_Flag": ["None", "None"]}) \
+        .to_csv(tmp / "top5_events.csv", index=False)
+    pd.DataFrame({"Symbol": ["A", "B"], "EV_%": [1.0, 1.0]}) \
+        .to_csv(tmp / "top5_expected_value.csv", index=False)
     pd.DataFrame([{"Variant": "Style_Backtest_Top5_EW", "Hit_Rate": 0.62}]) \
         .to_csv(tmp / "backtest_scorecard.csv", index=False)
     (tmp / "alpha_zoo_survivors.json").write_text(

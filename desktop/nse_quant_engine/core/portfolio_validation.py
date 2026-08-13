@@ -6,6 +6,20 @@ single go/no-go verdict for the whole top-5 batch. Reads whatever exists in
 output/. Never raises.
 
 Batch_Verdict ∈ {Ship, Ship_With_Caveats, Downgrade_To_Watch}
+
+FAIL-CLOSED CONTRACT
+--------------------
+Missing evidence is never passing evidence. A batch is downgraded to
+Downgrade_To_Watch whenever any of the following holds, regardless of how clean
+the metrics that *could* be computed look:
+
+  * ``validation_status.json`` verdict is not "Validation Positive"
+  * the official Top-5 (``trade_plan_latest.csv``) is missing or unreadable
+  * any critical ``top5_*`` artifact is absent or carries no symbols
+  * any artifact's symbol set differs from the official Top-5
+  * any artifact's symbol ORDER differs from the official Top-5
+
+Only a batch whose evidence is complete AND consistent can reach Ship.
 """
 from __future__ import annotations
 import json
@@ -14,6 +28,17 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+
+# Artifacts that MUST exist and MUST carry the official Top-5 symbols before a
+# batch may ship. A missing or symbol-less file is NOT "no breach detected" — it
+# is unverifiable evidence, and unverifiable evidence fails closed.
+CRITICAL_TOP5_ARTIFACTS = {
+    "corr_symbols": "top5_corr_matrix.csv",
+    "sizing_symbols": "top5_position_sizing.csv",
+    "sector_symbols": "top5_sector_context.csv",
+    "event_symbols": "top5_events.csv",
+    "ev_symbols": "top5_expected_value.csv",
+}
 
 DEFAULT_THRESHOLDS = {
     "max_avg_abs_corr": 0.70,          # concentration ceiling
@@ -62,16 +87,33 @@ def _avg_abs_corr(corr: pd.DataFrame) -> float:
 
 
 def _symbols(df: pd.DataFrame) -> list[str]:
+    """Symbols in on-disk ROW ORDER (de-duplicated, order of first appearance).
+
+    Order matters: every ``top5_*`` artifact must describe the official Top-5 in
+    the official order, otherwise downstream per-row joins can silently pair the
+    wrong numbers to the wrong symbol.
+    """
     if df is None or df.empty or "Symbol" not in df.columns:
         return []
-    return sorted({str(s) for s in df["Symbol"].dropna().tolist()})
+    seen: list[str] = []
+    for s in df["Symbol"].dropna().tolist():
+        s = str(s)
+        if s not in seen:
+            seen.append(s)
+    return seen
 
 
 def _corr_symbols(corr: pd.DataFrame) -> list[str]:
+    """Correlation-matrix symbols in index order."""
     if corr is None or corr.empty:
         return []
     try:
-        return sorted({str(s) for s in corr.index.tolist()})
+        seen: list[str] = []
+        for s in corr.index.tolist():
+            s = str(s)
+            if s not in seen:
+                seen.append(s)
+        return seen
     except Exception:
         return []
 
@@ -190,10 +232,17 @@ def validate_batch(output_dir: Path,
     if n_in_window >= 2:
         caveats.append(f"{n_in_window} names have earnings inside hold window")
 
-    # 8) Official Top-5 symbol-set consistency across artifacts
+    # 8) Official Top-5 artifact completeness + symbol/order consistency
+    #
+    # FAIL CLOSED. Three distinct failure modes, all hard reasons:
+    #   (a) the official Top-5 itself is unavailable -> nothing to check against
+    #   (b) a critical artifact is absent or carries no symbols -> unverifiable
+    #   (c) an artifact's symbols or their order disagree with the official Top-5
+    #
+    # An empty symbol list must NEVER be treated as "no mismatch found".
     try:
-        from .top5_contract import read_official_top5
-        expected = _symbols(read_official_top5(output_dir))
+        from .top5_contract import official_top5_symbols
+        expected = official_top5_symbols(_read_csv(output_dir / "trade_plan_latest.csv"))
     except Exception:
         expected = []
     corr_syms = _corr_symbols(corr)
@@ -205,20 +254,65 @@ def validate_batch(output_dir: Path,
     present = {"corr_symbols": corr_syms, "sizing_symbols": sizing_syms,
                "sector_symbols": sector_syms, "event_symbols": event_syms,
                "ev_symbols": ev_syms}
+
+    # (b) completeness
+    missing_artifacts = [CRITICAL_TOP5_ARTIFACTS[k]
+                         for k in CRITICAL_TOP5_ARTIFACTS
+                         if not present.get(k)]
+    artifact_completeness = not missing_artifacts
+
+    # (a) official Top-5 availability is itself part of completeness
+    top5_available = bool(expected)
+    if not top5_available:
+        artifact_completeness = False
+        if "trade_plan_latest.csv" not in missing_artifacts:
+            missing_artifacts.insert(0, "trade_plan_latest.csv")
+
+    # (c) set + order alignment, evaluated only over artifacts that exist
     aligned = True
+    order_aligned = True
     mismatched: list[str] = []
-    if expected:
+    misordered: list[str] = []
+    if top5_available:
+        expected_set = sorted(set(expected))
         for name, syms in present.items():
-            if syms and syms != expected:
+            if not syms:
+                continue  # absence is handled by completeness, not alignment
+            if sorted(set(syms)) != expected_set:
                 aligned = False
                 mismatched.append(name)
+            elif syms != expected:
+                order_aligned = False
+                misordered.append(name)
+    else:
+        # Cannot verify either property without the official set.
+        aligned = False
+        order_aligned = False
 
     checks["expected_symbols"] = expected
     checks.update(present)
+    checks["missing_artifacts"] = missing_artifacts
+    checks["artifact_completeness"] = artifact_completeness
     checks["symbol_set_aligned"] = aligned
-    if not aligned:
+    checks["symbol_order_aligned"] = order_aligned
+
+    if not top5_available:
+        reasons.append(
+            "official Top-5 unavailable (trade_plan_latest.csv missing or "
+            "unreadable) — portfolio evidence cannot be verified"
+        )
+    if missing_artifacts and top5_available:
+        reasons.append(
+            "missing/empty critical portfolio artifact(s): "
+            + ", ".join(missing_artifacts)
+        )
+    if not aligned and top5_available:
         reasons.append(
             "symbol-set mismatch vs official Top-5 in: " + ", ".join(mismatched)
+        )
+    if not order_aligned and top5_available:
+        reasons.append(
+            "symbol-order mismatch vs official Top-5 in: " + ", ".join(misordered)
         )
 
     # 9) Official validation gate (validation_status.json is the authority)
@@ -244,7 +338,10 @@ def validate_batch(output_dir: Path,
         "sector_symbols": sector_syms,
         "event_symbols": event_syms,
         "ev_symbols": ev_syms,
+        "missing_artifacts": missing_artifacts,
+        "artifact_completeness": artifact_completeness,
         "symbol_set_aligned": aligned,
+        "symbol_order_aligned": order_aligned,
         "official_validation_verdict": official_verdict,
         "checks": checks,
         "reasons": reasons,

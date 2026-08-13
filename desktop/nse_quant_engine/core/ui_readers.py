@@ -146,6 +146,69 @@ def read_daily_changes(out_dir: str | Path) -> dict:
     }
 
 
+def read_maturation_progress(out_dir: str | Path, horizon: int = 10) -> dict:
+    """Real maturation progress for `horizon`-day forward returns.
+
+    IMPORTANT — which file holds what:
+      * ``forward_return_history.csv`` contains ONLY signals whose forward window
+        has closed and whose return was computed. Every row there is matured.
+      * signals still inside the forward window are written to
+        ``forward_return_missing_signals.csv`` with a "not matured" Reason.
+
+    Counting pending work as ``Net_Forward_Return.isna()`` on the history file
+    therefore always yields 0, and a maturation rate of 100%, no matter how many
+    signals are actually waiting. Pending must be read from the missing-signals
+    file, which is what this reader does.
+
+    Returns: matured, pending, unmatchable, total, rate_pct, reasons.
+    """
+    out = Path(out_dir)
+    fwd = read_csv(out / "forward_return_history.csv")
+    miss = read_csv(out / "forward_return_missing_signals.csv")
+
+    def _slice(df: pd.DataFrame) -> pd.DataFrame:
+        if df.empty or "Horizon_Days" not in df.columns:
+            return df
+        try:
+            sub = df[pd.to_numeric(df["Horizon_Days"], errors="coerce") == horizon]
+            return sub if not sub.empty else df
+        except Exception:
+            return df
+
+    fwd = _slice(fwd)
+    miss = _slice(miss)
+
+    matured = 0
+    if not fwd.empty:
+        matured = (int(pd.to_numeric(fwd["Net_Forward_Return"], errors="coerce").notna().sum())
+                   if "Net_Forward_Return" in fwd.columns else int(len(fwd)))
+
+    pending = unmatchable = 0
+    reasons: dict[str, int] = {}
+    if not miss.empty and "Reason" in miss.columns:
+        counts = miss["Reason"].astype(str).value_counts()
+        reasons = {str(k): int(v) for k, v in counts.items()}
+        for reason, n in reasons.items():
+            low = reason.lower()
+            if "not matur" in low or "not yet" in low or "horizon" in low:
+                pending += int(n)
+            else:
+                unmatchable += int(n)
+    elif not miss.empty:
+        pending = int(len(miss))
+
+    total = matured + pending + unmatchable
+    return {
+        "horizon": horizon,
+        "matured": matured,
+        "pending": pending,
+        "unmatchable": unmatchable,
+        "total": total,
+        "rate_pct": (matured / total * 100.0) if total else None,
+        "reasons": reasons,
+    }
+
+
 def read_data_health(base_dir: str | Path) -> dict:
     """`data/data_health.json` — schema:
         {generated_at, feeds: {feed_name: {status, rows, last_date, note}}}.

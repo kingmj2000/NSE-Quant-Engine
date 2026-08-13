@@ -295,6 +295,81 @@ def build_per_symbol_summary(fwd: pd.DataFrame) -> pd.DataFrame:
     return summary[SUMMARY_COLUMNS]
 
 
+FORWARD_KEY = ["Signal_Date", "Symbol", "Horizon_Days"]
+
+
+def _norm_key_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalise the dedup key so a CSV round-trip cannot create phantom rows."""
+    out = df.copy()
+    if "Signal_Date" in out.columns:
+        out["Signal_Date"] = pd.to_datetime(out["Signal_Date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    if "Symbol" in out.columns:
+        out["Symbol"] = out["Symbol"].astype(str)
+    if "Horizon_Days" in out.columns:
+        out["Horizon_Days"] = pd.to_numeric(out["Horizon_Days"], errors="coerce")
+    return out
+
+
+def merge_forward_history(new_fwd: pd.DataFrame, path: Path,
+                          columns: list[str]) -> tuple[pd.DataFrame, Dict[str, int]]:
+    """Union previously recorded forward returns with this run's computation.
+
+    WHY THIS IS A UNION AND NOT AN OVERWRITE
+    ----------------------------------------
+    Forward returns are recomputed each run from ``signal_history`` against the
+    CURRENT ``raw_prices_latest.csv``. That file only carries prices for symbols
+    in the current universe, so the moment a symbol is dropped from the index its
+    previously matured forward returns can no longer be recomputed and would
+    disappear from the file — the matured-signal count falls (e.g. 10k -> 7k) and
+    the reason surfaces as "Symbol not found in current raw price file".
+
+    Silently dropping them is survivorship bias in its textbook form: the
+    evidence base would retain only names that survived in the index, which
+    biases measured edge upward. A forward return computed at the time is a
+    historical fact and stays on record.
+
+    Rows recomputed this run win on conflict (a corrected price should update the
+    record); rows this run could not compute are retained from history.
+    """
+    stats = {"computed_this_run": 0, "retained_from_history": 0, "total": 0}
+    new_norm = _norm_key_frame(new_fwd) if new_fwd is not None else pd.DataFrame()
+    stats["computed_this_run"] = int(len(new_norm))
+
+    prior = pd.DataFrame()
+    if path.exists():
+        try:
+            prior = pd.read_csv(path)
+        except Exception as exc:
+            print(f"[validation_builder][warn] could not read existing {path.name} "
+                  f"({exc}); treating as empty. Prior evidence NOT deleted — "
+                  f"inspect the file before the next run.")
+            return (new_norm if not new_norm.empty else empty_df(columns)), stats
+
+    if prior.empty:
+        stats["total"] = int(len(new_norm))
+        return (new_norm if not new_norm.empty else empty_df(columns)), stats
+
+    prior = _norm_key_frame(prior)
+    if new_norm.empty:
+        stats["retained_from_history"] = int(len(prior))
+        stats["total"] = int(len(prior))
+        return prior, stats
+
+    have = set(map(tuple, new_norm[FORWARD_KEY].itertuples(index=False, name=None)))
+    prior_keys = list(map(tuple, prior[FORWARD_KEY].itertuples(index=False, name=None)))
+    keep_mask = [k not in have for k in prior_keys]
+    retained = prior[pd.Series(keep_mask, index=prior.index)]
+
+    stats["retained_from_history"] = int(len(retained))
+    combined = pd.concat([new_norm, retained], ignore_index=True)
+    combined = combined.drop_duplicates(subset=FORWARD_KEY, keep="first")
+    if "Signal_Date" in combined.columns:
+        combined = combined.sort_values(["Signal_Date", "Symbol", "Horizon_Days"],
+                                        na_position="last").reset_index(drop=True)
+    stats["total"] = int(len(combined))
+    return combined, stats
+
+
 def main() -> None:
     print("Validation Builder - Stage 3.3 Hotfix")
     print("=====================================")
@@ -306,6 +381,16 @@ def main() -> None:
     print(f"Raw price rows: {len(px)}")
 
     fwd, missing = lookup_forward_rows(sig, px, rules)
+
+    # Accumulate rather than overwrite. See merge_forward_history for why.
+    fwd, merge_stats = merge_forward_history(fwd, FORWARD_OUT, FORWARD_COLUMNS)
+    print(f"Forward returns — computed this run: {merge_stats['computed_this_run']}, "
+          f"retained from prior history: {merge_stats['retained_from_history']}, "
+          f"total on record: {merge_stats['total']}")
+    if merge_stats["retained_from_history"]:
+        print("  (retained rows are signals this run could not recompute — usually "
+              "symbols no longer in the current universe/price file. Keeping them "
+              "avoids survivorship bias.)")
 
     write_csv_with_headers(fwd, FORWARD_OUT, FORWARD_COLUMNS)
     write_csv_with_headers(missing, MISSING_OUT, MISSING_COLUMNS)

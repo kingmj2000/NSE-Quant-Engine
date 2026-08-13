@@ -1,4 +1,13 @@
-"""Compares official engine vs v4.1 shadow and prints a champion recommendation."""
+"""Compares the official engine against the v4.1 shadow engine — diagnostically.
+
+This module NEVER recommends a champion or a model switch. The shadow engine has
+no independent validation history (nothing writes validation_status_shadow.json),
+so it is CURRENT-RANKING DIAGNOSTIC ONLY and is not eligible for promotion.
+
+Score identity is exact and has no fallback:
+    Official = Confidence_Adjusted_Score
+    Shadow   = V4_Confidence_Adjusted_Score
+"""
 from __future__ import annotations
 from pathlib import Path
 import json
@@ -50,20 +59,33 @@ def build() -> dict:
         return {"recommendation": "INSUFFICIENT_DATA",
                 "reason": "official_missing_Confidence_Adjusted_Score"}
 
-    def _shadow_score_col(frame: pd.DataFrame) -> str | None:
-        # Shadow keeps its own composite; CAS preferred when present.
-        for c in ("Confidence_Adjusted_Score", "Shadow_Score", "Final_Score", "Opportunity_Score"):
-            if c in frame.columns:
-                return c
-        return None
+    # Shadow score identity is EXACT: V4_Confidence_Adjusted_Score, no fallback.
+    #
+    # The shadow frame is built as `out = old.copy()`, so it can inherit official
+    # score columns. Any fallback chain here (CAS -> Shadow_Score -> Final_Score
+    # -> Opportunity_Score) can therefore select the OFFICIAL score sitting in the
+    # shadow file and compare official-against-itself, reporting Spearman 1.00 and
+    # Jaccard 1.00 as if the two engines agreed perfectly. They are not the same
+    # number and must never be resolved by name-guessing.
     score_col_off = "Confidence_Adjusted_Score"
-    score_col_sha = _shadow_score_col(sha)
-    if score_col_sha is None:
+    score_col_sha = "V4_Confidence_Adjusted_Score"
+    if score_col_sha not in sha.columns:
         REPORT.write_text(
-            "# Shadow vs Official\n\nShadow scores carry no usable score column "
-            "— comparison skipped (data quality).\n")
+            "# Shadow vs Official\n\nShadow scores are missing "
+            "`V4_Confidence_Adjusted_Score` — comparison skipped (data quality). "
+            "No fallback score column is permitted: falling back would risk "
+            "comparing the official score against a copy of itself.\n")
         return {"recommendation": "INSUFFICIENT_DATA",
-                "reason": "shadow_missing_score_column"}
+                "reason": "shadow_missing_V4_Confidence_Adjusted_Score"}
+    for _leaked in ("Confidence_Adjusted_Score", "Final_Score", "Opportunity_Score"):
+        if _leaked in sha.columns:
+            REPORT.write_text(
+                "# Shadow vs Official\n\nShadow score file still contains the bare "
+                f"official column `{_leaked}` — comparison skipped (data quality). "
+                "Shadow outputs must rename inherited official scores to "
+                "`Official_*`.\n")
+            return {"recommendation": "INSUFFICIENT_DATA",
+                    "reason": f"shadow_contains_official_column_{_leaked}"}
 
     merged = off[["Symbol", score_col_off]].rename(columns={score_col_off: "score_off"}).merge(
         sha[["Symbol", score_col_sha]].rename(columns={score_col_sha: "score_sha"}),
@@ -76,44 +98,88 @@ def build() -> dict:
     jaccard = len(top_off & top_sha) / max(len(top_off | top_sha), 1)
     rho = _spearman(merged["score_off"], merged["score_sha"])
 
+    # Mean |rank delta| across the common universe. Ranks are built the same way
+    # on both sides (score desc, Symbol asc) so only the score differs.
+    if len(merged) >= 2:
+        r_off = merged["score_off"].rank(ascending=False, method="min")
+        r_sha = merged["score_sha"].rank(ascending=False, method="min")
+        avg_abs_delta_rank = float((r_off - r_sha).abs().mean())
+    else:
+        avg_abs_delta_rank = float("nan")
+
     # validation verdicts
     v_off = vs.read_status(STATUS_OFF)
     v_sha = vs.read_status(STATUS_SHA)
 
-    # filtered EV — top quintile only when validation positive
+    # Filtered EV. The bucket column on forward-return history is Signal_Bucket
+    # (see validation_builder.FORWARD_COLUMNS) and its values come from
+    # assign_bucket. The previous filter named a column and a bucket value that
+    # this engine never writes, so it was silently dropped and an UNFILTERED EV
+    # was published under a filtered label. expected_value now fails closed on
+    # any filter column it cannot find; this filter must stay in sync with
+    # FORWARD_COLUMNS.
+    EV_FILTER = {"Signal_Bucket": "Top Candidate"}
     fwd = _read(FWD)
-    ev_off = ev.expected_value_per_day(fwd, v_off, horizon=10, filters={"Score_Bucket": "Top Quintile"})
-    ev_sha = ev.expected_value_per_day(fwd, v_sha, horizon=10, filters={"Score_Bucket": "Top Quintile"})
+    try:
+        ev_off = ev.expected_value_per_day(fwd, v_off, horizon=10, filters=EV_FILTER)
+    except Exception as exc:
+        ev_off = {"ev_per_day": float("nan"),
+                  "status": f"EV unavailable — {type(exc).__name__}"}
 
-    # recommendation
+    # Shadow EV has no independent evidence base: there is no production writer
+    # for validation_status_shadow.json, so no shadow forward-return cohort
+    # exists. Report that fact rather than reusing the official cohort.
+    ev_sha = {
+        "ev_per_day": float("nan"),
+        "status": "INSUFFICIENT_SHADOW_HISTORY",
+        "missing_filter_columns": [],
+    }
+
+    # Recommendation. Only two outcomes are permitted while the shadow engine has
+    # no independent validation history: keep running both, or insufficient data.
+    # No champion, no promotion, no "better edge" — those require evidence that
+    # does not exist yet.
     rec = "REVIEW: continue running both"
-    notes = []
-    if v_off["verdict"] == v_sha["verdict"] == "Validation Positive":
-        if not pd.isna(ev_sha["ev_per_day"]) and not pd.isna(ev_off["ev_per_day"]):
-            if ev_sha["ev_per_day"] > ev_off["ev_per_day"] * 1.05:
-                rec = "RECOMMEND: shadow leads on filtered EV/day — consider manual switch"
-            elif ev_off["ev_per_day"] > ev_sha["ev_per_day"] * 1.05:
-                rec = "RECOMMEND: official still leads on EV/day — keep current champion"
-    elif v_sha["verdict"] == "Validation Positive" and v_off["verdict"] != "Validation Positive":
-        notes.append("Shadow validated, official did not — investigate before switching.")
+    notes = [
+        "SHADOW STATUS: CURRENT-RANKING DIAGNOSTIC ONLY — no independent shadow "
+        "validation history exists, so the shadow engine is not a validated "
+        "challenger and cannot be promoted.",
+    ]
+    if str(ev_off.get("missing_filter_columns") or []):
+        notes.append(
+            f"Official EV filter unavailable: {ev_off.get('status')}"
+        )
 
     summary = {
         "jaccard_top25": round(jaccard, 3),
+        "overlap_top_n": top_n,
         "spearman_full": None if pd.isna(rho) else round(rho, 3),
+        "avg_abs_delta_rank": None if pd.isna(avg_abs_delta_rank) else round(float(avg_abs_delta_rank), 2),
+        "official_score_column": score_col_off,
+        "shadow_score_column": score_col_sha,
         "verdict_official": v_off.get("verdict"),
         "verdict_shadow": v_sha.get("verdict"),
+        "ev_filter": EV_FILTER,
         "ev_per_day_official": ev_off.get("ev_per_day"),
+        "ev_status_official": ev_off.get("status"),
         "ev_per_day_shadow": ev_sha.get("ev_per_day"),
+        "ev_status_shadow": ev_sha.get("status"),
+        "shadow_governance": "CURRENT-RANKING DIAGNOSTIC ONLY",
         "recommendation": rec,
     }
 
     lines = [
         "# Shadow (v4.1) vs Official Engine",
         "",
+        "> **SHADOW STATUS: CURRENT-RANKING DIAGNOSTIC ONLY.** No independent "
+        "shadow validation history. Not a validated challenger. Not promotable.",
+        "",
+        f"- Compared columns — Official: `{score_col_off}` / Shadow: `{score_col_sha}`",
         f"- Top-{top_n} overlap (Jaccard): **{jaccard:.2f}**",
         f"- Full-rank Spearman ρ: **{summary['spearman_full']}**",
         f"- Validation — Official: **{v_off['verdict']}** / Shadow: **{v_sha['verdict']}**",
-        f"- EV/day (Top Quintile) — Official: **{ev_off.get('ev_per_day')}** / Shadow: **{ev_sha.get('ev_per_day')}**",
+        f"- EV/day (filter {EV_FILTER}) — Official: **{ev_off.get('ev_per_day')}** "
+        f"({ev_off.get('status')}) / Shadow: **{ev_sha.get('status')}**",
         "",
         f"## Recommendation\n\n> {rec}\n",
     ]
@@ -129,17 +195,16 @@ def build() -> dict:
     try:
         from datetime import date as _date
         HIST = OUT / "shadow_vs_official_history.csv"
-        rec_low = str(rec).lower()
         beats = bool(
             (not pd.isna(ev_sha.get("ev_per_day"))) and
             (not pd.isna(ev_off.get("ev_per_day"))) and
             (ev_sha["ev_per_day"] > ev_off["ev_per_day"])
         )
+        # "green" would mean the shadow engine had demonstrated an edge. It has
+        # no independent validation history, so that state is unreachable by
+        # construction rather than by luck.
         shadow_state = (
-            "green" if "shadow leads" in rec_low or "switch to shadow" in rec_low
-            else "red" if "official still leads" in rec_low or "do not switch" in rec_low
-                      or v_off.get("verdict") == "Validation Negative"
-            else "amber"
+            "red" if v_off.get("verdict") == "Validation Negative" else "amber"
         )
         matured_obs = None
         try:

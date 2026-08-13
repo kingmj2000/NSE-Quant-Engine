@@ -871,7 +871,11 @@ def _payload() -> dict:
     shadow_unique_top5 = []
     if not shadow_scores.empty and "Symbol" in shadow_scores.columns:
         sh_clean = shadow_scores[~shadow_scores["Symbol"].apply(_veto_symbol)].copy()
-        score_col = "Final_Score" if "Final_Score" in sh_clean.columns else "Opportunity_Score" if "Opportunity_Score" in sh_clean.columns else None
+        # Shadow score identity is exact: V4_Confidence_Adjusted_Score. The shadow
+        # file is derived from latest_scores.csv and can inherit official score
+        # columns, so falling back to "Final_Score"/"Opportunity_Score" here would
+        # sort the "shadow Top-5" by an OFFICIAL score. No fallback.
+        score_col = "V4_Confidence_Adjusted_Score" if "V4_Confidence_Adjusted_Score" in sh_clean.columns else None
         if score_col:
             sh_clean = sh_clean.sort_values(score_col, ascending=False)
         shadow_top5 = sh_clean.head(5)
@@ -1005,7 +1009,11 @@ def _payload() -> dict:
     official_top5_symbols = {_norm_sym(c.get("sym")) for c in cards}
     if not shadow_scores.empty and "Symbol" in shadow_scores.columns:
         sh_clean = shadow_scores[~shadow_scores["Symbol"].apply(_veto_symbol)].copy()
-        score_col = "Final_Score" if "Final_Score" in sh_clean.columns else "Opportunity_Score" if "Opportunity_Score" in sh_clean.columns else None
+        # Shadow score identity is exact: V4_Confidence_Adjusted_Score. The shadow
+        # file is derived from latest_scores.csv and can inherit official score
+        # columns, so falling back to "Final_Score"/"Opportunity_Score" here would
+        # sort the "shadow Top-5" by an OFFICIAL score. No fallback.
+        score_col = "V4_Confidence_Adjusted_Score" if "V4_Confidence_Adjusted_Score" in sh_clean.columns else None
         if score_col:
             sh_clean = sh_clean.sort_values(score_col, ascending=False)
         for _, r in sh_clean.head(5).iterrows():

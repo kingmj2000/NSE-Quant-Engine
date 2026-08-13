@@ -214,31 +214,33 @@ class DecisionCenterView(QWidget):
             gate = 60.0
 
         matured = maturing = total = 0
-        if not fwd.empty:
-            f = fwd
-            if "Horizon_Days" in f.columns:
-                try:
-                    f10 = f[pd.to_numeric(f["Horizon_Days"], errors="coerce") == 10]
-                    if not f10.empty: f = f10
-                except Exception:
-                    pass
-            total = int(len(f))
-            if "Net_Forward_Return" in f.columns:
-                matured = int(f["Net_Forward_Return"].notna().sum())
-                maturing = int(f["Net_Forward_Return"].isna().sum())
-            else:
-                maturing = total
+        unmatchable = 0
+        # Pending signals are in forward_return_missing_signals.csv, not NaN rows
+        # of forward_return_history.csv — see read_maturation_progress.
+        try:
+            from core.ui_readers import read_maturation_progress
+            _mp = read_maturation_progress(OUT, horizon=10)
+            matured, maturing = _mp["matured"], _mp["pending"]
+            unmatchable, total = _mp["unmatchable"], _mp["total"]
+        except Exception:
+            pass
 
         row = QGridLayout(); row.setHorizontalSpacing(10); row.setVerticalSpacing(8)
         row.addWidget(_kpi_card("Raw dates", f"{raw_dates:.0f}", "violet",
-                                "distinct signal dates on record"), 0, 0)
+                                "distinct schema-v2 signal dates on record"), 0, 0)
         row.addWidget(_kpi_card("Effective dates", f"{eff_dates:.1f}", "violet",
                                 f"quality-weighted (gate ≥ {gate:.0f})"), 0, 1)
         row.addWidget(_kpi_card("Signals matured", str(matured), "teal",
                                 "10d forward returns landed"), 0, 2)
         row.addWidget(_kpi_card("Awaiting maturation", str(maturing), "amber",
-                                "10d forward returns pending"), 0, 3)
+                                "still inside the 10d window"), 0, 3)
         v.addLayout(row)
+        if unmatchable:
+            _note = QLabel(f"{unmatchable:,} signal(s) could not be matched to a price "
+                           f"and are excluded from the {total:,} total — usually symbols "
+                           f"no longer in the current universe.")
+            _note.setWordWrap(True); _note.setObjectName("Sub")
+            v.addWidget(_note)
 
         pct = min(100.0, (eff_dates / gate * 100.0) if gate > 0 else 0.0)
         pb_label = QLabel(f"Progress to validation gate: {eff_dates:.1f} / {gate:.0f} "

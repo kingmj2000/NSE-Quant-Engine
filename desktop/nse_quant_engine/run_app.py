@@ -517,32 +517,30 @@ class Dashboard(QWidget):
         fwd = load_csv(OUT / "forward_return_history.csv")
 
         matured = maturing = total = 0
-        if not fwd.empty:
-            f = fwd
-            if "Horizon_Days" in f.columns:
-                try:
-                    f10 = f[pd.to_numeric(f["Horizon_Days"], errors="coerce") == 10]
-                    if not f10.empty:
-                        f = f10
-                except Exception:
-                    pass
-            total = int(len(f))
-            if "Net_Forward_Return" in f.columns:
-                matured = int(f["Net_Forward_Return"].notna().sum())
-                maturing = int(f["Net_Forward_Return"].isna().sum())
-            else:
-                maturing = total
-        rate = f"{(matured / total * 100):.1f}%" if total else "—"
+        # Pending signals live in forward_return_missing_signals.csv, NOT as NaN
+        # rows in forward_return_history.csv (which only holds matured rows), so
+        # counting NaNs here always produced 0 pending and a 100% rate.
+        try:
+            from core.ui_readers import read_maturation_progress
+            _mp = read_maturation_progress(OUT, horizon=10)
+            matured = _mp["matured"]
+            maturing = _mp["pending"]
+            unmatchable = _mp["unmatchable"]
+            total = _mp["total"]
+            rate = f"{_mp['rate_pct']:.1f}%" if _mp["rate_pct"] is not None else "—"
+        except Exception:
+            unmatchable = 0
+            rate = "—"
         verdict = str(status.get("verdict") or "—")
         cards = [
             ("Latest scores", str(len(scores)) if not scores.empty else "—", "blue", "official scoring rows"),
             ("Trade plan", str(len(trade)) if not trade.empty else "—", "teal", "watchlist / plan rows"),
             ("Shadow rows", str(len(shadow)) if not shadow.empty else "—", "violet", "shadow scoring rows"),
             ("Verdict", verdict, "green" if verdict == "Validation Positive" else "amber", str(status.get("evidence_grade") or "")),
-            ("Matured", str(matured), "teal", "10-day forward rows"),
-            ("Awaiting maturation", str(maturing), "amber", "10-day forward rows"),
-            ("Total signals", str(total) if total else "—", "blue", "10-day slice"),
-            ("Maturation rate", rate, "green" if matured else "violet", "matured / total"),
+            ("Matured", str(matured), "teal", "10-day forward returns landed"),
+            ("Awaiting maturation", str(maturing), "amber", "still inside the 10-day window"),
+            ("Unmatchable", str(unmatchable), "violet", "no price match (e.g. left universe)"),
+            ("Maturation rate", rate, "green" if matured else "violet", "matured / all signals"),
         ]
         for i, (title, value, tone, subtitle) in enumerate(cards):
             self.grid.addWidget(_make_kpi_card(title, value, tone, subtitle), i // 4, i % 4)
@@ -1046,12 +1044,16 @@ class CompareView(QWidget):
                 return f"{f:.{nd}f}{suf}"
             except Exception:
                 return "—"
-        jacc = cmp_json.get("jaccard_at_20") or cmp_json.get("jaccard")
-        spear = cmp_json.get("spearman") or cmp_json.get("spearman_full")
-        avg_dr = cmp_json.get("avg_abs_delta_rank") or cmp_json.get("mean_abs_delta_rank")
-        vagree = cmp_json.get("verdict_agreement") or cmp_json.get("recommendation") or "—"
+        # Key names must match what shadow_vs_official_report.build() writes.
+        # These previously read `jaccard_at_20` / `avg_abs_delta_rank`, neither of
+        # which is ever written, so both KPIs rendered a permanent "—".
+        top_n = cmp_json.get("overlap_top_n") or 25
+        jacc = cmp_json.get("jaccard_top25")
+        spear = cmp_json.get("spearman_full")
+        avg_dr = cmp_json.get("avg_abs_delta_rank")
+        vagree = cmp_json.get("recommendation") or "—"
         kpis = [
-            ("Jaccard@20", _fmt(jacc, 2), "teal", "Top-20 overlap"),
+            (f"Jaccard@{int(top_n)}", _fmt(jacc, 2), "teal", f"Top-{int(top_n)} overlap"),
             ("Spearman", _fmt(spear, 2), "blue", "Full ranking correlation"),
             ("Avg |ΔRank|", _fmt(avg_dr, 1), "amber", "Lower = more agreement"),
             ("Verdict", str(vagree)[:60] or "—", "violet", "Recommendation"),
@@ -1062,11 +1064,14 @@ class CompareView(QWidget):
         if cmp_df is None or cmp_df.empty or len(cmp_df) < 2:
             note = QFrame(); note.setObjectName("Card"); note.setProperty("accent", "amber")
             nv = QVBoxLayout(note); nv.setContentsMargins(16, 14, 16, 14)
-            title = QLabel("Shadow run neutralized — insufficient shadow evidence")
+            title = QLabel("Shadow comparison table unavailable")
             title.setStyleSheet("color:#F2B13C;font-weight:700;font-size:14px;")
-            hint = QLabel("The shadow pipeline did not produce enough matured signals for a "
-                          "meaningful side-by-side comparison. This is expected during "
-                          "accumulation; check back after more forward-return windows close.")
+            hint = QLabel("shadow_vs_official.csv has fewer than two comparable rows, "
+                          "so there is no side-by-side ranking table to show. This is "
+                          "about the ranking comparison file, not forward-return "
+                          "maturation. Check that latest_scores_v4_shadow.csv exists "
+                          "and carries V4_Confidence_Adjusted_Score; the KPI strip "
+                          "above still reflects shadow_vs_official.json.")
             hint.setWordWrap(True); hint.setStyleSheet("color:#B7BCC6;font-size:12px;margin-top:4px;")
             nv.addWidget(title); nv.addWidget(hint)
             self._v.addWidget(note); self._v.addStretch(); return

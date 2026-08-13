@@ -219,17 +219,17 @@ class CandidatesWorkbench(QWidget):
         # OFFICIAL: canonical order retains ALL rows.
         self._df_official = canonical_order(scores, eligible_only=False).reset_index(drop=True)
 
-        # SHADOW: keep strictly separate. Order shadow by its own score
-        # (Confidence_Adjusted_Score preferred, then Final_Score). Never
-        # mixed into official ordering. Symbol is the join key for Compare.
+        # SHADOW: keep strictly separate. Order shadow by ITS OWN score, which is
+        # exactly `V4_Confidence_Adjusted_Score`. No fallback chain: the shadow
+        # file is derived from the official file and can inherit official score
+        # columns, so name-guessing here would display the OFFICIAL score as the
+        # shadow score and make the two look identical. Symbol is the join key.
+        SHADOW_SCORE_COL = "V4_Confidence_Adjusted_Score"
         self._df_shadow = pd.DataFrame()
         self._shadow_rank_map: dict[str, int] = {}
         self._shadow_score_map: dict[str, float] = {}
         if not shadow.empty and "Symbol" in shadow.columns:
-            score_col = None
-            for c in (PRIMARY_SCORE_COL, SECONDARY_SCORE_COL, "Opportunity_Score"):
-                if c in shadow.columns:
-                    score_col = c; break
+            score_col = SHADOW_SCORE_COL if SHADOW_SCORE_COL in shadow.columns else None
             if score_col is not None:
                 s = shadow.copy()
                 s["_score"] = pd.to_numeric(s[score_col], errors="coerce")
@@ -271,6 +271,38 @@ class CandidatesWorkbench(QWidget):
             self._df_all = self._df_shadow.copy().reset_index(drop=True)
         else:  # Official OR Compare — both use official as the base ordering
             self._df_all = self._df_official.copy().reset_index(drop=True)
+
+    # ------------- Filter-combo repopulation --------------------------------
+    @staticmethod
+    def _reload_combo(combo: QComboBox, placeholder: str, values: list[str]) -> None:
+        """Repopulate `combo` with `[placeholder] + values`, keeping the user's
+        current choice when it still exists in the new data.
+
+        Index 0 is ALWAYS the placeholder: `_apply_filters` treats
+        `currentIndex() > 0` as "a real filter is selected", so inserting the
+        placeholder anywhere else would silently turn "All universes" into a
+        filter on the literal string "All universes" and empty the table.
+
+        Signals are blocked during the rebuild. `currentIndexChanged` is wired to
+        `_apply_filters`, and clearing a combo emits it — so repopulating without
+        blocking would fire the filter chain several times mid-rebuild, against a
+        half-populated widget. Both callers invoke `_apply_filters()` themselves
+        immediately afterwards, so nothing is lost by staying quiet here.
+        """
+        if combo is None:
+            return
+        previous = combo.currentText()
+        items = [placeholder] + [str(v) for v in (values or [])]
+        was_blocked = combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.addItems(items)
+            if previous in items:
+                combo.setCurrentIndex(items.index(previous))
+            else:
+                combo.setCurrentIndex(0)
+        finally:
+            combo.blockSignals(was_blocked)
 
     # ------------- Filters --------------------------------------------------
     def _apply_filters(self):

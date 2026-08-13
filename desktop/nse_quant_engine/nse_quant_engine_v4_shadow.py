@@ -20,8 +20,17 @@ Run order
 Why separate?
 -------------
 The current engine is your official, battle-tested workflow. Shadow mode lets
-Core v4.1 compete beside it for a few weeks before you trust it with the throne.
-Because apparently even spreadsheets need probation now.
+Core v4.1 run beside it without touching anything official.
+
+Governance: CURRENT-RANKING DIAGNOSTIC ONLY. There is no production writer for
+validation_status_shadow.json, so the shadow engine has no independent
+out-of-sample evidence and is NOT a validated challenger. It cannot be promoted,
+and no output may describe it as a champion or as having a better edge.
+
+Score identity: the shadow score is `V4_Confidence_Adjusted_Score`. Official
+score columns inherited from latest_scores.csv are renamed to `Official_*` on
+write (see `sanitize_shadow_columns`) so nothing downstream can select an
+official score by name and report it as a shadow score.
 """
 
 from __future__ import annotations
@@ -214,7 +223,7 @@ def make_summary(old: pd.DataFrame, shadow: pd.DataFrame, warnings_out: list[str
         current_top20 = set(shadow.loc[pd.to_numeric(shadow[old_rank_col], errors="coerce") <= 20, "Symbol"].astype(str))
     else:
         # fallback: sort by old score
-        old_score_col = first_col(shadow, ["Old_Final_Score", "Final_Score", "Confidence_Adjusted_Score"])
+        old_score_col = first_col(shadow, ["Official_Confidence_Adjusted_Score"])
         current_top20 = set(shadow.sort_values(old_score_col, ascending=False).head(20)["Symbol"].astype(str)) if old_score_col else set()
 
     v4_top20 = set(shadow.loc[shadow["V4_Rank"] <= 20, "Symbol"].astype(str))
@@ -233,13 +242,52 @@ def make_summary(old: pd.DataFrame, shadow: pd.DataFrame, warnings_out: list[str
         "v4_added_to_top20": added,
         "v4_dropped_from_top20": dropped,
         "warnings": warnings_out,
+        "shadow_governance": "CURRENT-RANKING DIAGNOSTIC ONLY",
+        "shadow_governance_note": (
+            "No independent shadow validation history exists (no production "
+            "writer for validation_status_shadow.json). The shadow engine is "
+            "not a validated challenger and is not eligible for promotion."
+        ),
+        "shadow_score_column": "V4_Confidence_Adjusted_Score",
+        "official_score_column": "Confidence_Adjusted_Score",
         "official_outputs_touched": False,
         "shadow_outputs": [str(OUT_CSV.relative_to(BASE_DIR)), str(OUT_XLSX.relative_to(BASE_DIR))],
     }
 
 
+#: Official score columns inherited by `out = old.copy()`. They are renamed on
+#: the way out so that NO consumer of a shadow artifact can pick up an official
+#: score by name and mistake it for a shadow score. This is the structural fix
+#: for the "shadow agrees perfectly with official" false positive.
+_OFFICIAL_COLUMN_RENAMES = {
+    "Confidence_Adjusted_Score": "Official_Confidence_Adjusted_Score",
+    "Final_Score": "Official_Final_Score_Diagnostic",
+    "Opportunity_Score": "Official_Opportunity_Score_Diagnostic",
+}
+
+
+def sanitize_shadow_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy in which no bare official score column survives.
+
+    Guarantee: the returned frame contains none of
+    ``Confidence_Adjusted_Score`` / ``Final_Score`` / ``Opportunity_Score``.
+    The shadow score is ``V4_Confidence_Adjusted_Score`` and nothing else.
+    """
+    out = df.copy()
+    for src, dst in _OFFICIAL_COLUMN_RENAMES.items():
+        if src not in out.columns:
+            continue
+        if dst in out.columns:
+            # Already captured explicitly upstream — drop the ambiguous duplicate.
+            out = out.drop(columns=[src])
+        else:
+            out = out.rename(columns={src: dst})
+    return out
+
+
 def write_outputs(df: pd.DataFrame, summary: dict) -> None:
     OUTPUT_DIR.mkdir(exist_ok=True)
+    df = sanitize_shadow_columns(df)
     df.to_csv(OUT_CSV, index=False)
 
     top20_union_symbols = set(summary["top20_overlap_symbols"]) | set(summary["v4_added_to_top20"]) | set(summary["v4_dropped_from_top20"])
@@ -372,11 +420,23 @@ def main() -> None:
     shadow_scored = scoring.apply_fundamental_factor(shadow_scored)
 
     out = old.copy()
-    # Preserve old official score/rank clearly.
-    old_score_col = first_col(out, ["Final_Score", "Confidence_Adjusted_Score", "Opportunity_Score"])
+    # Preserve the official score/rank under UNAMBIGUOUS names.
+    #
+    # The official ranking authority is Confidence_Adjusted_Score. Final_Score is
+    # diagnostic only and must never stand in as the official baseline — using it
+    # here would compare the shadow against a number the official engine does not
+    # rank on.
+    old_score_col = first_col(out, ["Confidence_Adjusted_Score"])
     old_rank_col = first_col(out, ["Opportunity_Rank", "Rank", "Current_Rank"])
-    out["Old_Final_Score"] = pd.to_numeric(out[old_score_col], errors="coerce") if old_score_col else np.nan
-    out["Old_Rank"] = pd.to_numeric(out[old_rank_col], errors="coerce") if old_rank_col else out["Old_Final_Score"].rank(ascending=False, method="min")
+    if old_score_col:
+        out["Official_Confidence_Adjusted_Score"] = pd.to_numeric(out[old_score_col], errors="coerce")
+    else:
+        out["Official_Confidence_Adjusted_Score"] = np.nan
+        warnings_out.append(
+            "latest_scores.csv has no Confidence_Adjusted_Score: official baseline "
+            "unavailable, shadow-vs-official deltas are meaningless for this run."
+        )
+    out["Old_Rank"] = pd.to_numeric(out[old_rank_col], errors="coerce") if old_rank_col else out["Official_Confidence_Adjusted_Score"].rank(ascending=False, method="min")
 
     out["V4_Opportunity_Score"] = shadow_scored["Opportunity_Score"]
     out["V4_Final_Score"] = shadow_scored["Final_Score"] if "Final_Score" in shadow_scored.columns else shadow_scored["Opportunity_Score"]
@@ -395,9 +455,43 @@ def main() -> None:
         eligible_mask = out[eligible_col].astype(str).str.lower().isin(["yes", "true", "1", "eligible"])
     else:
         eligible_mask = pd.Series(True, index=out.index)
+    # ── Explicit shadow ranking authority ────────────────────────────────────
+    # The shadow engine gets its OWN confidence-adjusted score under its own
+    # name. Nothing downstream may fall back to the official
+    # Confidence_Adjusted_Score column inherited via `old.copy()` — that
+    # produced a shadow-vs-official comparison of official-against-itself
+    # (Spearman 1.00, Jaccard 1.00) that looked like perfect agreement.
+    conf_col = first_col(out, ["Confidence_Score"])
+    if conf_col:
+        conf = pd.to_numeric(out[conf_col], errors="coerce")
+        out["V4_Confidence_Adjusted_Score"] = (
+            pd.to_numeric(out["V4_Final_Score"], errors="coerce") * (conf / 10.0)
+        ).clip(0, 100)
+        out["V4_CAS_Basis"] = "V4_Final_Score * (Confidence_Score / 10)"
+    else:
+        out["V4_Confidence_Adjusted_Score"] = pd.to_numeric(out["V4_Final_Score"], errors="coerce")
+        out["V4_CAS_Basis"] = "no_confidence_score_available_equals_V4_Final_Score"
+        warnings_out.append(
+            "Confidence_Score absent from latest_scores.csv: "
+            "V4_Confidence_Adjusted_Score falls back to V4_Final_Score."
+        )
+
+    # Official order is CAS descending, Symbol ascending. Shadow mirrors that
+    # rule on its own score so the two rankings are constructed identically and
+    # only the score differs.
     out["V4_Rank"] = np.nan
-    out.loc[eligible_mask, "V4_Rank"] = out.loc[eligible_mask, "V4_Final_Score"].rank(ascending=False, method="min")
-    out["V4_Score_Delta_vs_Current"] = out["V4_Final_Score"] - out["Old_Final_Score"]
+    if eligible_mask.any():
+        elig = out.loc[eligible_mask, ["Symbol", "V4_Confidence_Adjusted_Score"]].copy()
+        elig = elig.sort_values(
+            ["V4_Confidence_Adjusted_Score", "Symbol"],
+            ascending=[False, True], na_position="last", kind="mergesort",
+        )
+        ranks = pd.Series(range(1, len(elig) + 1), index=elig.index, dtype="float64")
+        ranks[elig["V4_Confidence_Adjusted_Score"].isna().values] = np.nan
+        out.loc[ranks.index, "V4_Rank"] = ranks
+    out["V4_Score_Delta_vs_Current"] = (
+        out["V4_Confidence_Adjusted_Score"] - out["Official_Confidence_Adjusted_Score"]
+    )
     out["V4_Rank_Change_vs_Current"] = out["Old_Rank"] - out["V4_Rank"]  # positive = improved
     out["V4_Bucket"] = assign_shadow_buckets(out)
     out["V4_Shadow_Status"] = "Shadow only - official ranking unchanged"

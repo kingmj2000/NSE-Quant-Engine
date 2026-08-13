@@ -6,9 +6,16 @@ validation is positive. Unlike the original v4 helper, this version supports
 candidate-relevant filtering. Without filtering, EV can become one generic number
 for all past signals, which is not useful for deciding today's candidates.
 
-Recommended filters: score bucket/decile, Universe_Group, Opportunity_Type, or
-other columns present in forward_return_history. The function remains fail-safe:
-if validation is not positive or observations are too thin, EV returns NaN.
+Recommended filters: ``Signal_Bucket``, ``Universe_Group``, ``Opportunity_Type``,
+or other columns actually written by ``validation_builder.FORWARD_COLUMNS``. Note
+the bucket column on forward-return history is ``Signal_Bucket`` (values such as
+"Top Candidate" / "Candidate" / "Watch" / "Avoid") — there is no
+``Score_Bucket`` column and no "Top Quintile" bucket in this engine.
+
+The function is fail-safe AND fail-closed: EV returns NaN when validation is not
+positive, when the sample is too thin, when the history schema is incompatible,
+or when a requested filter column does not exist. It never publishes an
+unfiltered number under a filtered label.
 """
 
 from __future__ import annotations
@@ -33,32 +40,39 @@ def _bucket_stats(fwd: pd.DataFrame, horizon: int) -> dict:
     }
 
 
-def _apply_filters(fwd: pd.DataFrame, filters: dict | None = None) -> tuple[pd.DataFrame, str]:
+def _apply_filters(
+    fwd: pd.DataFrame, filters: dict | None = None
+) -> tuple[pd.DataFrame, str, list[str]]:
     """Filter forward-return history by exact-match columns.
 
     Example filters:
-        {"Score_Bucket": "Top Quintile", "Universe_Group": "Nifty50"}
+        {"Signal_Bucket": "Top Candidate", "Universe_Group": "Nifty50"}
 
-    Missing columns are ignored but recorded in the label, so integration does
-    not crash when old history files lack a new metadata field.
+    Returns ``(filtered, label, missing_columns)``.
+
+    A requested filter column that does not exist is NEVER silently dropped: it
+    is returned in ``missing_columns`` so the caller can refuse to publish an
+    unfiltered statistic under a filtered label. Silently ignoring the filter
+    used to turn "EV of the top bucket" into "EV of everything ever signalled",
+    which is the sort of number that gets acted on.
     """
     if fwd is None or fwd.empty or not filters:
-        return fwd, "unfiltered"
+        return fwd, "unfiltered", []
     out = fwd.copy()
-    parts = []
-    ignored = []
+    parts: list[str] = []
+    missing: list[str] = []
     for col, val in filters.items():
         if val is None or (isinstance(val, float) and pd.isna(val)):
             continue
         if col not in out.columns:
-            ignored.append(col)
+            missing.append(col)
             continue
         out = out[out[col].astype(str).str.upper().eq(str(val).upper())]
         parts.append(f"{col}={val}")
     label = "; ".join(parts) if parts else "unfiltered"
-    if ignored:
-        label += f"; ignored_missing_cols={','.join(ignored)}"
-    return out, label
+    if missing:
+        label += f"; MISSING_FILTER_COLS={','.join(missing)}"
+    return out, label, missing
 
 
 def expected_value_per_day(
@@ -80,27 +94,60 @@ def expected_value_per_day(
     min_obs = min_obs or C.EV_MIN_OBS
     verdict = str(validation_status.get("verdict", "")).strip().lower()
 
-    if verdict != "validation positive":
+    def _blank(filter_label: str, status: str, missing: list[str] | None = None,
+               stats: dict | None = None) -> dict:
+        stats = stats or {}
         return {
             "ev_per_trade": np.nan, "ev_per_day": np.nan,
-            "p_win": np.nan, "avg_win": np.nan, "avg_loss": np.nan,
-            "n_obs": 0, "filter": "not_evaluated",
-            "status": f"EV unavailable — validation not positive ({validation_status.get('verdict','unknown')})",
+            "p_win": stats.get("p_win", np.nan),
+            "avg_win": stats.get("avg_win", np.nan),
+            "avg_loss": stats.get("avg_loss", np.nan),
+            "n_obs": stats.get("n", 0),
+            "filter": filter_label,
+            "missing_filter_columns": list(missing or []),
+            "status": status,
         }
 
-    if fwd_history is None or fwd_history.empty:
-        return {"ev_per_trade": np.nan, "ev_per_day": np.nan, "p_win": np.nan,
-                "avg_win": np.nan, "avg_loss": np.nan, "n_obs": 0,
-                "filter": "empty", "status": "EV unavailable — no forward-return history"}
+    if verdict != "validation positive":
+        return _blank(
+            "not_evaluated",
+            f"EV unavailable — validation not positive ({validation_status.get('verdict','unknown')})",
+        )
 
-    fwd, label = _apply_filters(fwd_history, filters)
+    if fwd_history is None or fwd_history.empty:
+        return _blank("empty", "EV unavailable — no forward-return history")
+
+    # Schema guard: _bucket_stats needs these two columns. Without them the
+    # correct answer is "unavailable", not a KeyError from three frames down.
+    required = [c for c in ("Horizon_Days", "Net_Forward_Return")
+                if c not in fwd_history.columns]
+    if required:
+        return _blank(
+            "schema_incompatible",
+            "EV unavailable — forward-return history schema incompatible "
+            f"(missing {', '.join(required)})",
+        )
+
+    fwd, label, missing_cols = _apply_filters(fwd_history, filters)
+
+    # Fail closed: a filter that could not be applied must not be reported as
+    # though it had been. Never compute an unfiltered statistic under a
+    # filtered label.
+    if missing_cols:
+        return _blank(
+            label,
+            "EV unavailable — requested filter columns absent from "
+            f"forward-return history ({', '.join(missing_cols)})",
+            missing=missing_cols,
+        )
+
     stats = _bucket_stats(fwd, horizon)
     if stats["n"] < min_obs:
-        return {"ev_per_trade": np.nan, "ev_per_day": np.nan,
-                "p_win": stats["p_win"], "avg_win": stats["avg_win"],
-                "avg_loss": stats["avg_loss"], "n_obs": stats["n"],
-                "filter": label,
-                "status": f"EV unavailable — only {stats['n']} obs for filter [{label}] (<{min_obs})"}
+        return _blank(
+            label,
+            f"EV unavailable — only {stats['n']} obs for filter [{label}] (<{min_obs})",
+            stats=stats,
+        )
 
     ev_trade = stats["p_win"] * stats["avg_win"] - (1 - stats["p_win"]) * stats["avg_loss"]
     ev_day = ev_trade / max(hold_days, 1)
@@ -112,6 +159,7 @@ def expected_value_per_day(
         "avg_loss": round(stats["avg_loss"], 5),
         "n_obs": stats["n"],
         "filter": label,
+        "missing_filter_columns": [],
         "status": "EV computed from validated filtered forward returns",
     }
 
