@@ -80,6 +80,26 @@ Portfolio selection and the trade plan consult the validation status. Without a
 positive verdict the system remains **watchlist-only**: it will show candidates
 and reasoning, but will not present them as actionable positions.
 
+The gate is **fail-closed** (`core/portfolio_validation.py`). Missing evidence is
+never treated as passing evidence. A batch is downgraded to
+`Downgrade_To_Watch` whenever any of the following holds, however clean the
+metrics that *could* be computed happen to look:
+
+- `validation_status.json` verdict is not `Validation Positive`
+- the official Top-5 (`trade_plan_latest.csv`) is missing or unreadable
+- any critical `top5_*` artifact is absent or carries no symbols
+  (`artifact_completeness = false`, offenders listed in `missing_artifacts`)
+- any artifact's symbol set differs from the official Top-5
+  (`symbol_set_aligned = false`)
+- any artifact's symbol **order** differs from the official Top-5
+  (`symbol_order_aligned = false`) — a positional join would otherwise pair the
+  wrong numbers to the wrong symbol
+
+Only complete *and* consistent evidence can reach `Ship`. Expected value is held
+to the same standard: `core/expected_value.py` refuses to compute when a
+requested filter column is absent from forward-return history, rather than
+publishing an unfiltered statistic under a filtered label.
+
 ## What this does not prove
 
 - It does not prove future performance.

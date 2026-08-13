@@ -80,6 +80,34 @@ Confidence_Adjusted_Score DESC, Symbol ASC
   Candidates Workbench offers strict **Official / Shadow / Compare** modes;
   Compare keeps official ordering and appends shadow columns.
 
+## Shadow engine governance
+
+The shadow engine is **CURRENT-RANKING DIAGNOSTIC ONLY**. Nothing writes
+`validation_status_shadow.json`, so the shadow engine has no independent
+out-of-sample evidence, is not a validated challenger, and is not eligible for
+promotion. No report, ledger or UI string may describe it as a champion, as
+having a better edge, or as a switch candidate.
+
+Score identity is exact and has **no fallback**:
+
+```
+Official = Confidence_Adjusted_Score
+Shadow   = V4_Confidence_Adjusted_Score
+```
+
+The shadow frame is derived from official output (`out = old.copy()`), so it can
+inherit official score columns. `sanitize_shadow_columns()` therefore renames
+`Confidence_Adjusted_Score` / `Final_Score` / `Opportunity_Score` to `Official_*`
+before any shadow artifact is written, and every consumer (comparison report,
+Candidates Workbench, dashboard) requires `V4_Confidence_Adjusted_Score` by name.
+Name-guessing fallbacks are prohibited: they previously selected the official
+score sitting inside the shadow file and reported Spearman 1.00 / Jaccard 1.00 as
+if the two engines agreed perfectly.
+
+The official scoring formula is **unchanged**. The cleaner scoring logic belongs
+to the shadow engine only; the official engine keeps accumulating schema-v2
+evidence.
+
 ## Watchlist-only behaviour
 
 Until `validation_status.json` reports a positive verdict, every candidate is

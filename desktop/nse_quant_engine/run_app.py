@@ -1195,8 +1195,9 @@ class PortfolioView(QWidget):
         self._clear()
 
         # --- Portfolio validation verdict card (top) ---
-        verdict = str((validation or {}).get("Batch_Verdict")
-                      or (validation or {}).get("verdict") or "Unknown")
+        # portfolio_validation.json writes "verdict". The capitalised batch-verdict
+        # spelling used in prose/docs is not a real key; reading it was dead code.
+        verdict = str((validation or {}).get("verdict") or "Unknown")
         vtone = {"Ship": "green", "Ship_With_Caveats": "amber",
                  "Downgrade_To_Watch": "red"}.get(verdict, "dim")
         vcard = QFrame(); vcard.setObjectName("Card"); vcard.setProperty("accent", vtone)

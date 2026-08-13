@@ -685,9 +685,23 @@ def _emit_horizon_sentiment_alpha(plan: pd.DataFrame) -> None:
             from core import sentiment_overlay as sent
             macro = sent.macro_tape_score(prices)
             import json as _j
+            # Carry the PRIOR run's regime forward. core/daily_changes.py reads
+            # `previous_regime` to emit `regime_change`, and nothing was writing
+            # that key — so regime_change was permanently None and the "regime
+            # changed" line could never appear in Today's Changes.
+            _prev_regime = None
+            if MACRO_CTX_JSON.exists():
+                try:
+                    _old = _j.loads(MACRO_CTX_JSON.read_text(encoding="utf-8"))
+                    if isinstance(_old, dict):
+                        _prev_regime = _old.get("regime")
+                except Exception:
+                    _prev_regime = None
+            macro["previous_regime"] = _prev_regime
             MACRO_CTX_JSON.write_text(_j.dumps(macro, default=str, indent=2),
                                        encoding="utf-8")
-            print(f"[fincept] Saved: {MACRO_CTX_JSON.name} (regime={macro.get('regime')})")
+            print(f"[fincept] Saved: {MACRO_CTX_JSON.name} "
+                  f"(regime={macro.get('regime')}, previous={_prev_regime})")
         except Exception as e:
             print(f"[step4] macro context skipped: {e}")
 

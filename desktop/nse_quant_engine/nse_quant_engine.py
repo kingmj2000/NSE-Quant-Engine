@@ -884,14 +884,10 @@ def build_key_risk(row: pd.Series) -> str:
     return "; ".join(risks) if risks else "No major technical risk flagged"
 
 
-def append_history(file_path: Path, new_rows: pd.DataFrame, key_cols: List[str]) -> None:
-    if file_path.exists():
-        old = pd.read_csv(file_path)
-        combined = pd.concat([old, new_rows], ignore_index=True)
-    else:
-        combined = new_rows.copy()
-    combined = combined.drop_duplicates(subset=key_cols, keep="last")
-    combined.to_csv(file_path, index=False)
+# Rolling-history append lives in core.history_io so it is testable without
+# importing this module (which requires yfinance at import time). See that
+# module for why the dedup key must be canonicalised.
+from core.history_io import append_history  # noqa: E402
 
 
 def make_rank_changes(scored: pd.DataFrame) -> pd.DataFrame:
