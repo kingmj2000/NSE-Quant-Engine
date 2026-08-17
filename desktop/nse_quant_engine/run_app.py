@@ -1045,8 +1045,8 @@ class CompareView(QWidget):
             except Exception:
                 return "—"
         # Key names must match what shadow_vs_official_report.build() writes.
-        # These previously read `jaccard_at_20` / `avg_abs_delta_rank`, neither of
-        # which is ever written, so both KPIs rendered a permanent "—".
+        # These previously read an @20-suffixed overlap key and a rank-delta key
+        # that the writer never emitted, so both KPIs rendered a permanent "—".
         top_n = cmp_json.get("overlap_top_n") or 25
         jacc = cmp_json.get("jaccard_top25")
         spear = cmp_json.get("spearman_full")

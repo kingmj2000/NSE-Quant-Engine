@@ -217,13 +217,19 @@ class DecisionCenterView(QWidget):
         unmatchable = 0
         # Pending signals are in forward_return_missing_signals.csv, not NaN rows
         # of forward_return_history.csv — see read_maturation_progress.
+        # NOTE: `OUT` is a local of refresh(); this is a different method, so it
+        # must come from self. Referencing the bare name raised NameError, and a
+        # bare `except: pass` swallowed it — leaving every counter at 0 while the
+        # dashboard, reading the same files directly, showed 11,647 matured.
         try:
             from core.ui_readers import read_maturation_progress
-            _mp = read_maturation_progress(OUT, horizon=10)
+            _mp = read_maturation_progress(self.OUT, horizon=10)
             matured, maturing = _mp["matured"], _mp["pending"]
             unmatchable, total = _mp["unmatchable"], _mp["total"]
-        except Exception:
-            pass
+        except Exception as exc:
+            # Never fail silently again: a zeroed counter must be distinguishable
+            # from a counter that could not be computed.
+            print(f"[ui] maturation progress unavailable: {type(exc).__name__}: {exc}")
 
         row = QGridLayout(); row.setHorizontalSpacing(10); row.setVerticalSpacing(8)
         row.addWidget(_kpi_card("Raw dates", f"{raw_dates:.0f}", "violet",
