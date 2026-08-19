@@ -80,7 +80,13 @@ def _gate_normal_scores_ready() -> tuple[bool, str]:
 
 
 def _run_optional_feeds():
-    """Step 0.5 — refresh the 4 optional overlay CSVs from free public sources.
+    """Step 0.5 — refresh the optional overlay CSVs from free public sources.
+
+    Deliberately does NOT pass force=True. A scheduled full-pipeline run should
+    skip feeds whose cache is still inside its freshness window, so repeated runs
+    do not hammer public endpoints for data already on disk. Only the manual
+    "Refresh optional feeds now" button forces a re-fetch.
+
     Always non-fatal: refresh_all() catches every exception internally."""
     if str(BASE) not in sys.path:
         sys.path.insert(0, str(BASE))

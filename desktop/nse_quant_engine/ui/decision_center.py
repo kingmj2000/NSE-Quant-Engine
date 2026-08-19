@@ -527,8 +527,12 @@ class DecisionCenterView(QWidget):
                 try:
                     if str(base) not in _sys.path:
                         _sys.path.insert(0, str(base))
+                    # force=True: this ran because a human pressed "Refresh
+                    # optional feeds now". A manual request must override cache
+                    # freshness — the freshness window exists to stop redundant
+                    # AUTOMATIC fetches, not to ignore a deliberate one.
                     from core.optional_data_fetchers import refresh_all
-                    refresh_all(base)
+                    refresh_all(base, force=True)
                 except Exception as e:
                     print(f"[fetch] manual refresh failed: {e}", flush=True)
                 self_inner.done_signal.emit()

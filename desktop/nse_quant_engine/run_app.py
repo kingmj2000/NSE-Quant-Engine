@@ -616,8 +616,12 @@ class Dashboard(QWidget):
                 try:
                     if str(BASE) not in sys.path:
                         sys.path.insert(0, str(BASE))
+                    # force=True: this ran because a human pressed "Refresh
+                    # optional feeds now". A manual request must override cache
+                    # freshness — the freshness window exists to stop redundant
+                    # AUTOMATIC fetches, not to ignore a deliberate one.
                     from core.optional_data_fetchers import refresh_all
-                    refresh_all(BASE)
+                    refresh_all(BASE, force=True)
                 except Exception as e:
                     print(f"[fetch] manual refresh failed: {e}", flush=True)
                 self_inner.done_signal.emit()

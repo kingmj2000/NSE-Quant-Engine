@@ -382,9 +382,9 @@ def _fii_dii_from_nse_archive(sess, days: int = 90) -> pd.DataFrame:
     raise RuntimeError(f"NSE historical FII/DII failed after retry: {last_exc}")
 
 
-def fetch_fii_dii(data_dir: Path, keep_days: int = 90) -> bool:
+def fetch_fii_dii(data_dir: Path, keep_days: int = 90, force: bool = False) -> bool:
     target = data_dir / "fii_dii_daily.csv"
-    if _is_fresh(target, FRESH_FLOW_HOURS):
+    if not force and _is_fresh(target, FRESH_FLOW_HOURS):
         _log(f"fii_dii_daily.csv fresh (<{FRESH_FLOW_HOURS}h) — skipping fetch")
         return True
     sess = _requests_session()
@@ -544,9 +544,10 @@ def _bulk_from_bse(sess) -> pd.DataFrame:
     return out
 
 
-def fetch_bulk_deals(data_dir: Path, days: int = 30, keep_days: int = 60) -> bool:
+def fetch_bulk_deals(data_dir: Path, days: int = 30, keep_days: int = 60,
+                     force: bool = False) -> bool:
     target = data_dir / "bulk_deals.csv"
-    if _is_fresh(target, FRESH_FLOW_HOURS):
+    if not force and _is_fresh(target, FRESH_FLOW_HOURS):
         _log(f"bulk_deals.csv fresh (<{FRESH_FLOW_HOURS}h) — skipping fetch")
         return True
     sess = _requests_session()
@@ -595,9 +596,10 @@ def _shortlist_symbols(base: Path, cap: int = 120) -> list[str]:
     return []
 
 
-def fetch_fundamentals(data_dir: Path, base: Path, cap: int = 120) -> bool:
+def fetch_fundamentals(data_dir: Path, base: Path, cap: int = 120,
+                       force: bool = False) -> bool:
     target = data_dir / "fundamentals_latest.csv"
-    if _is_fresh(target, FRESH_FUND_HOURS):
+    if not force and _is_fresh(target, FRESH_FUND_HOURS):
         _log(f"fundamentals_latest.csv fresh (<{FRESH_FUND_HOURS}h) — skipping fetch")
         _write_health_row(data_dir, "fundamentals",
                           _health_status_from_age(_cache_last_date(target, "Date")
@@ -675,9 +677,9 @@ def fetch_fundamentals(data_dir: Path, base: Path, cap: int = 120) -> bool:
 # 4) Earnings calendar via yfinance Ticker.calendar
 # =========================================================================
 def fetch_earnings_calendar(data_dir: Path, base: Path, cap: int = 120,
-                            horizon_days: int = 90) -> bool:
+                            horizon_days: int = 90, force: bool = False) -> bool:
     target = data_dir / "earnings_calendar.csv"
-    if _is_fresh(target, FRESH_EVENT_HOURS):
+    if not force and _is_fresh(target, FRESH_EVENT_HOURS):
         _log(f"earnings_calendar.csv fresh (<{FRESH_EVENT_HOURS}h) — skipping fetch")
         return True
     symbols = _shortlist_symbols(base, cap=cap)
@@ -824,10 +826,11 @@ def _fetch_delivery_pct_day(sess, d: datetime) -> pd.DataFrame:
     raise RuntimeError(f"bhavcopy {d:%d-%m-%Y} failed on both hosts: {last_exc}")
 
 
-def fetch_delivery_pct(data_dir: Path, days: int = 5, keep_days: int = 365) -> bool:
+def fetch_delivery_pct(data_dir: Path, days: int = 5, keep_days: int = 365,
+                       force: bool = False) -> bool:
     """Append-only cache. A failed fetch NEVER wipes the existing CSV."""
     target = data_dir / "delivery_pct_daily.csv"
-    if _is_fresh(target, FRESH_FLOW_HOURS):
+    if not force and _is_fresh(target, FRESH_FLOW_HOURS):
         _log(f"delivery_pct_daily.csv fresh (<{FRESH_FLOW_HOURS}h) — skipping fetch")
         _write_health_row(data_dir, "delivery_pct",
                           _health_status_from_age(_cache_last_date(target)),
@@ -971,11 +974,11 @@ def _iv_rank_percentile(series: pd.Series, current: float, lookback: int = 252) 
 
 
 def fetch_iv_rank(data_dir: Path, base: Path, cap: int = 60,
-                  keep_days: int = 400) -> bool:
+                  keep_days: int = 400, force: bool = False) -> bool:
     """Fetch today's ATM IV per shortlisted F&O name; append to cache.
     A failed run NEVER wipes cached data."""
     target = data_dir / "iv_rank_daily.csv"
-    if _is_fresh(target, FRESH_FLOW_HOURS):
+    if not force and _is_fresh(target, FRESH_FLOW_HOURS):
         _log(f"iv_rank_daily.csv fresh (<{FRESH_FLOW_HOURS}h) — skipping fetch")
         _write_health_row(data_dir, "iv_rank",
                           _health_status_from_age(_cache_last_date(target)),
@@ -1063,40 +1066,67 @@ def fetch_iv_rank(data_dir: Path, base: Path, cap: int = 60,
 # =========================================================================
 # Top-level entry
 # =========================================================================
-def refresh_all(base: Path | None = None, only: Iterable[str] | None = None) -> dict:
+def refresh_all(base: Path | None = None, only: Iterable[str] | None = None,
+                force: bool = False) -> dict:
     """Refresh whichever feeds are stale/missing.
 
     only: optional subset of {'fii_dii', 'bulk_deals', 'fundamentals',
                               'earnings', 'delivery_pct', 'iv_rank'}
+    force: ignore cache freshness and re-fetch every requested feed.
+
+    The default (force=False) is for the scheduled pipeline: a feed whose cache
+    is still inside its freshness window is skipped, so a full run does not hammer
+    NSE for data it already has.
+
+    force=True is for an explicit human request ("Refresh optional feeds now").
+    Pressing that button means the person wants current data regardless of when
+    the last run happened, so honouring the cache would be ignoring the
+    instruction. Freshness windows exist to avoid redundant automatic fetches,
+    not to override a deliberate one.
+
     Returns a small status dict, never raises.
     """
     base = Path(base) if base else Path(__file__).resolve().parent.parent
     data_dir = base / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
-    _log(f"refreshing optional overlay feeds into {data_dir}")
+    if force:
+        _log(f"FORCED refresh of optional overlay feeds into {data_dir} "
+             f"— ignoring cache freshness (manual request)")
+    else:
+        _log(f"refreshing optional overlay feeds into {data_dir} "
+             f"(fresh caches will be skipped)")
     wanted = set(only) if only else {"fii_dii", "bulk_deals", "fundamentals",
                                      "earnings", "delivery_pct", "iv_rank"}
     status: dict[str, bool] = {}
-    if "fii_dii" in wanted:
-        status["fii_dii"] = fetch_fii_dii(data_dir)
-    if "bulk_deals" in wanted:
-        status["bulk_deals"] = fetch_bulk_deals(data_dir)
-    if "fundamentals" in wanted:
-        status["fundamentals"] = fetch_fundamentals(data_dir, base)
-    if "earnings" in wanted:
-        status["earnings"] = fetch_earnings_calendar(data_dir, base)
-    if "delivery_pct" in wanted:
+
+    # Every feed is wrapped. This function is documented as never raising, and
+    # the orchestrator step relies on that to stay non-fatal — but only
+    # delivery_pct and iv_rank used to be guarded, so a network error inside any
+    # of the other four propagated out and could abort the run. On failure the
+    # status falls back to "do we still have a usable cache on disk?", which is
+    # the honest answer: a failed refresh is not the same as missing data.
+    _feeds: list[tuple[str, str, callable]] = [
+        ("fii_dii", "fii_dii_daily.csv",
+         lambda: fetch_fii_dii(data_dir, force=force)),
+        ("bulk_deals", "bulk_deals.csv",
+         lambda: fetch_bulk_deals(data_dir, force=force)),
+        ("fundamentals", "fundamentals_latest.csv",
+         lambda: fetch_fundamentals(data_dir, base, force=force)),
+        ("earnings", "earnings_calendar.csv",
+         lambda: fetch_earnings_calendar(data_dir, base, force=force)),
+        ("delivery_pct", "delivery_pct_daily.csv",
+         lambda: fetch_delivery_pct(data_dir, force=force)),
+        ("iv_rank", "iv_rank_daily.csv",
+         lambda: fetch_iv_rank(data_dir, base, force=force)),
+    ]
+    for _name, _cache, _call in _feeds:
+        if _name not in wanted:
+            continue
         try:
-            status["delivery_pct"] = fetch_delivery_pct(data_dir)
+            status[_name] = _call()
         except Exception as e:
-            _warn("delivery_pct", e)
-            status["delivery_pct"] = (data_dir / "delivery_pct_daily.csv").exists()
-    if "iv_rank" in wanted:
-        try:
-            status["iv_rank"] = fetch_iv_rank(data_dir, base)
-        except Exception as e:
-            _warn("iv_rank", e)
-            status["iv_rank"] = (data_dir / "iv_rank_daily.csv").exists()
+            _warn(_name, e)
+            status[_name] = (data_dir / _cache).exists()
     # Health rows for feeds that fetch above but don't self-report; and for
     # non-optional feeds that live outside this module (price cache, AMFI, news).
     try:

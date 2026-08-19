@@ -181,14 +181,42 @@ stray = [f for f in ("phase_1a_audit_gaps.py", "phase_1b_fill_etf_gaps.py",
 check("removed one-off scripts stay removed", not stray,
       f"still present: {', '.join(stray)}" if stray else "")
 
-runtime_committed = []
-for d in ("output", "data"):
-    p = ENG / d
-    if p.exists() and any(x for x in p.rglob("*") if x.is_file()):
-        runtime_committed.append(d)
-check("no runtime data in the checkout", not runtime_committed,
-      f"{', '.join(runtime_committed)}/ contains files — check `git ls-files`"
-      if runtime_committed else "created at runtime, must not be tracked")
+# Runtime data: the question is whether git TRACKS it, not whether it exists on
+# disk. A live run folder is SUPPOSED to contain output/ and data/ — flagging
+# that was crying wolf. Only a git checkout can answer this, so outside one the
+# check is reported as not-applicable rather than failed.
+def _git_root(start: Path) -> Path | None:
+    for candidate in [start, *start.parents]:
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+git_root = _git_root(ENG)
+if git_root is None:
+    warnings.append(("runtime-data check skipped: not a git checkout",
+                     "expected in a live run folder; run this in your clone to "
+                     "verify output/ and data/ are untracked"))
+    check("runtime data untracked (n/a outside a checkout)", True, "")
+else:
+    tracked: list[str] = []
+    try:
+        import subprocess
+        rel = ENG.relative_to(git_root).as_posix()
+        for d in ("output", "data"):
+            res = subprocess.run(
+                ["git", "-C", str(git_root), "ls-files", f"{rel}/{d}"],
+                capture_output=True, text=True, timeout=30)
+            if res.returncode == 0 and res.stdout.strip():
+                n = len(res.stdout.strip().splitlines())
+                tracked.append(f"{d}/ ({n} tracked file(s))")
+    except Exception as exc:
+        warnings.append((f"runtime-data check inconclusive: {exc}",
+                         "run `git ls-files` on output/ and data/ manually"))
+    check("no runtime data tracked by git", not tracked,
+          f"{', '.join(tracked)} — back up locally, then "
+          f"`git rm -r --cached` them" if tracked else
+          "these are generated per run and must never be committed")
 
 # ─── 11. Orphan modules ─────────────────────────────────────────────────────
 corpus = {}
@@ -235,8 +263,8 @@ for msg, why in warnings:
 print("-" * 74)
 print(f"{len(passed)} passed, {len(failed)} failed, {len(warnings)} warning(s)")
 if failed:
-    print("\nA FAIL means that fix is not in this checkout — most likely the commit")
-    print("did not include that file. Re-copy it and re-run.")
+    print("\nEach FAIL names the file and the bug it guards. For a missing fix,")
+    print("the commit most likely did not include that file — re-copy and re-run.")
 else:
     print("\nAll audited fixes present. Run the test suite next:  python -m pytest -q")
 print("=" * 74)
