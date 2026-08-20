@@ -516,6 +516,20 @@ class DecisionCenterView(QWidget):
         return wrap
 
     def _refresh_optional_feeds(self):
+        # Re-entrancy guard. Reassigning self._refresh_thread while the previous
+        # one is still running drops the only reference to a LIVE QThread; Python
+        # then garbage-collects it mid-run, which Qt reports as
+        # "QThread: Destroyed while thread is still running" and which corrupts
+        # the heap (0xc0000374) — surfacing later as an access violation in
+        # whatever unrelated code happens to allocate next.
+        #
+        # This became easy to hit once manual refresh started forcing a real
+        # fetch: the thread now lives for minutes instead of returning instantly.
+        prev = getattr(self, "_refresh_thread", None)
+        if prev is not None and prev.isRunning():
+            self._log("[fetch] a manual refresh is already running — ignoring this click")
+            return
+
         self._log("[fetch] manual refresh requested — running in background")
         import sys as _sys
         base = self.BASE
@@ -540,5 +554,21 @@ class DecisionCenterView(QWidget):
         t = _RefreshThread(self)
         t.done_signal.connect(lambda: (parent._log("[fetch] manual refresh done"),
                                        parent.refresh()))
+        # Keep the reference until Qt says the thread has actually finished, then
+        # let Qt delete it. Clearing it any earlier reintroduces the crash above.
+        t.finished.connect(t.deleteLater)
         self._refresh_thread = t
         t.start()
+
+    def wait_for_background_work(self, msec: int = 15000) -> bool:
+        """Block until the manual-refresh thread finishes. Returns True if idle.
+
+        The main window calls this before accepting a close: quitting the app
+        while this thread runs destroys a live QThread, which is the fatal path
+        described in _refresh_optional_feeds.
+        """
+        t = getattr(self, "_refresh_thread", None)
+        if t is None or not t.isRunning():
+            return True
+        t.requestInterruption()
+        return bool(t.wait(msec))

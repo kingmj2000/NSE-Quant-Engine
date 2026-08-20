@@ -605,7 +605,20 @@ class Dashboard(QWidget):
         )
 
     def _refresh_optional_feeds(self):
-        """Fire the 4 optional-CSV fetchers in a background thread and reload the dashboard."""
+        """Fire the optional-CSV fetchers in a background thread and reload.
+
+        Re-entrancy guard: reassigning self._refresh_thread while the previous one
+        is still running drops the only reference to a LIVE QThread. Python then
+        collects it mid-run, Qt reports "QThread: Destroyed while thread is still
+        running", and the heap is corrupted — which surfaces later as an access
+        violation somewhere unrelated. Forcing a real fetch made the thread live
+        for minutes instead of milliseconds, so this went from theoretical to
+        routine.
+        """
+        prev = getattr(self, "_refresh_thread", None)
+        if prev is not None and prev.isRunning():
+            self._emit_console("[fetch] a manual refresh is already running — ignoring this click")
+            return
         self._emit_console("[fetch] manual refresh requested — running in background")
         from PySide6.QtCore import QThread, Signal
         parent = self
@@ -629,9 +642,19 @@ class Dashboard(QWidget):
         t = _RefreshThread(self)
         t.done_signal.connect(lambda: (parent._emit_console("[fetch] manual refresh done"),
                                        parent.load_last_run()))
-        # Keep a reference so Qt doesn't garbage-collect the thread mid-run.
+        # Hold the reference until Qt confirms the thread finished, then let Qt
+        # delete it. Clearing earlier reintroduces the crash described above.
+        t.finished.connect(t.deleteLater)
         self._refresh_thread = t
         t.start()
+
+    def wait_for_background_work(self, msec: int = 15000) -> bool:
+        """Block until the manual-refresh thread finishes. True if idle."""
+        t = getattr(self, "_refresh_thread", None)
+        if t is None or not t.isRunning():
+            return True
+        t.requestInterruption()
+        return bool(t.wait(msec))
 
 
 # ----------------------------- Run Drawer -----------------------------------
@@ -1701,10 +1724,49 @@ class MainWindow(QMainWindow):
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if resp != QMessageBox.Yes:
                 event.ignore(); return
+
+        # Wait for EVERY background thread, not just the pipeline. Quitting while
+        # a QThread is alive destroys it mid-run: Qt logs "QThread: Destroyed
+        # while thread is still running" and the process can die with an access
+        # violation on the way out. The manual-refresh threads were never waited
+        # for, which is what the crash log shows.
+        for owner in self._background_thread_owners():
+            try:
+                if not owner.wait_for_background_work(15000):
+                    print("[app] background refresh did not stop in time; "
+                          "closing anyway", flush=True)
+            except Exception as exc:
+                print(f"[app] error stopping background work: {exc}", flush=True)
+
+        if self.thread and self.thread.isRunning():
+            try:
+                self.thread.wait(5000)
+            except Exception:
+                pass
+
         event.accept()
         app = QApplication.instance()
         if app is not None:
             app.quit()
+
+    def _background_thread_owners(self) -> list:
+        """Widgets owning background QThreads that must be joined before exit."""
+        owners = []
+        if hasattr(self, "wait_for_background_work"):
+            owners.append(self)
+        for attr in ("decision_center", "_decision_center", "overview", "dc"):
+            w = getattr(self, attr, None)
+            if w is not None and hasattr(w, "wait_for_background_work"):
+                owners.append(w)
+        # Catch any Decision Center reachable as a child widget, whatever it is
+        # named — safer than relying on one attribute name surviving refactors.
+        try:
+            for child in self.findChildren(QWidget):
+                if hasattr(child, "wait_for_background_work") and child not in owners:
+                    owners.append(child)
+        except Exception:
+            pass
+        return owners
 
     # ----- persistent last-run loading -----
     def load_last_run(self, refresh_tabs: bool = True):

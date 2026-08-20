@@ -122,6 +122,9 @@ FRESH_EVENT_HOURS = 24 * 3
 
 
 # ------------------------------- utilities ----------------------------------
+import re as _re
+
+
 def _log(msg: str) -> None:
     print(f"[fetch] {msg}", flush=True)
 
@@ -138,6 +141,69 @@ def _is_fresh(path: Path, max_age_hours: float) -> bool:
         return age_h < max_age_hours
     except Exception:
         return False
+
+
+def _describe_source_error(exc: BaseException) -> tuple[str, str]:
+    """Compact, human-readable reason for one source attempt failing.
+
+    Returns (kind, message). `kind` is one of:
+      "dns"        the hostname did not resolve — a local network/DNS problem,
+                   NOT the data source being down. Worth calling out separately
+                   because the fix is on this machine, not the internet.
+      "blocked"    the source answered with a rate-limit / block status
+      "shape"      the source answered but the payload was not what we parse
+                   (usually a site redesign — the scraper needs updating)
+      "network"    timeout / connection reset / unreachable
+      "other"      anything else
+    """
+    text = str(exc)
+    low = text.lower()
+    if ("getaddrinfo failed" in low or "nameresolutionerror" in low
+            or "could not resolve host" in low or "name or service not known" in low):
+        host = ""
+        m = _re.search(r"resolve '([^']+)'", text)
+        if m:
+            host = m.group(1)
+        return "dns", f"hostname {host or 'lookup'} did not resolve (local DNS/network)"
+    for code in ("503", "429", "403", "401"):
+        if f"HTTP {code}" in text:
+            return "blocked", f"HTTP {code} (source is rate-limiting or blocking us)"
+    if "no tables found" in low or "no html parser succeeded" in low:
+        return "shape", "page structure not recognised (site layout likely changed)"
+    if "empty result" in low:
+        return "shape", "returned no rows"
+    if "timeout" in low or "timed out" in low:
+        return "network", "timed out"
+    if "connection" in low:
+        return "network", "connection failed"
+    msg = text.splitlines()[0][:120]
+    return "other", f"{type(exc).__name__}: {msg}"
+
+
+def _log_source_attempt(feed: str, name: str, exc: BaseException) -> None:
+    """One fallback source failing is EXPECTED, not an error.
+
+    These chains try several providers and use whichever answers first. Logging
+    every attempt at the same volume as a real failure made a fully successful
+    refresh read like a broken one. Attempts are tagged [try]; only an
+    all-sources-failed outcome is a [warn].
+    """
+    kind, why = _describe_source_error(exc)
+    print(f"[fetch][try] {feed}: '{name}' unavailable — {why}", flush=True)
+    if kind == "dns":
+        _DNS_FAILURES.add(name)
+
+
+def _log_source_summary(feed: str, used: list[str], skipped: list[str]) -> None:
+    if used:
+        extra = f" ({len(skipped)} other source(s) unavailable)" if skipped else ""
+        _log(f"{feed}: ok via {', '.join(used)}{extra}")
+
+
+#: Sources that failed specifically because a hostname would not resolve. These
+#: point at this machine's DNS rather than at the provider, so they are reported
+#: once at the end with an actionable hint instead of being buried per-attempt.
+_DNS_FAILURES: set[str] = set()
 
 
 def _requests_session():
@@ -382,6 +448,46 @@ def _fii_dii_from_nse_archive(sess, days: int = 90) -> pd.DataFrame:
     raise RuntimeError(f"NSE historical FII/DII failed after retry: {last_exc}")
 
 
+def _report_flow_coverage(feed: str, target: Path, backfill_ok: bool) -> None:
+    """Report gaps in a daily-flow cache instead of just saying "refreshed".
+
+    `nse-api` returns only the latest row or two; `nse-archive` is the source that
+    backfills ~90 days. When the archive fails (HTTP 503 is common) the cache only
+    gains a row on days the API happens to answer, so it quietly accrues holes —
+    and "refreshed (N rows in cache)" reads like success either way.
+
+    A gappy flow series is not neutral: FII/DII is displayed as market context, and
+    a reader has no way to tell a genuine flat day from a day that was never
+    fetched. So say it out loud.
+    """
+    try:
+        df = pd.read_csv(target)
+        if df.empty or "Date" not in df.columns:
+            return
+        dates = pd.to_datetime(df["Date"], errors="coerce").dropna().dt.normalize()
+        if dates.empty:
+            return
+        first, last = dates.min(), dates.max()
+        # Business days are an approximation (NSE holidays are not modelled), so
+        # only flag a gap that is too large to be explained by holidays.
+        expected = pd.bdate_range(first, last)
+        have = set(dates.dt.date)
+        missing = [d for d in expected if d.date() not in have]
+        stale_days = (pd.Timestamp.now().normalize() - last).days
+
+        if missing and len(missing) > max(2, 0.15 * len(expected)):
+            _log(f"[gap] {feed}: {len(missing)} of {len(expected)} business days "
+                 f"missing between {first:%Y-%m-%d} and {last:%Y-%m-%d}")
+            if not backfill_ok:
+                _log(f"      the backfill source was unavailable this run, so only "
+                     f"the latest row could be added. Gaps will persist until it "
+                     f"succeeds — treat {feed} as incomplete context, not a series.")
+        if stale_days >= 3:
+            _log(f"[gap] {feed}: newest row is {last:%Y-%m-%d} ({stale_days} days old)")
+    except Exception as exc:
+        _log(f"{feed}: coverage check skipped ({type(exc).__name__})")
+
+
 def fetch_fii_dii(data_dir: Path, keep_days: int = 90, force: bool = False) -> bool:
     target = data_dir / "fii_dii_daily.csv"
     if not force and _is_fresh(target, FRESH_FLOW_HOURS):
@@ -398,6 +504,7 @@ def fetch_fii_dii(data_dir: Path, keep_days: int = 90, force: bool = False) -> b
     ]
     collected: list[pd.DataFrame] = []
     used: list[str] = []
+    skipped: list[str] = []
     for name, fn in sources:
         try:
             out = fn(sess)
@@ -410,8 +517,10 @@ def fetch_fii_dii(data_dir: Path, keep_days: int = 90, force: bool = False) -> b
             if name == "nse-archive":
                 break
         except Exception as e:
-            _log(f"fii_dii source '{name}' failed: {type(e).__name__}: {e}")
+            _log_source_attempt("fii_dii", name, e)
+            skipped.append(name)
             continue
+    _log_source_summary("fii_dii", used, skipped)
     if not collected:
         _warn("fii_dii (all sources)",
               RuntimeError("nse-api + nse-archive + moneycontrol + groww all failed"))
@@ -421,6 +530,7 @@ def fetch_fii_dii(data_dir: Path, keep_days: int = 90, force: bool = False) -> b
     data_dir.mkdir(parents=True, exist_ok=True)
     merged.to_csv(target, index=False)
     _log(f"fii_dii_daily.csv refreshed via {'+'.join(used)} ({len(merged)} rows in cache)")
+    _report_flow_coverage("fii_dii", target, backfill_ok="nse-archive" in used)
     return True
 
 
@@ -563,6 +673,8 @@ def fetch_bulk_deals(data_dir: Path, days: int = 30, keep_days: int = 60,
             data_dir.mkdir(parents=True, exist_ok=True)
             merged.to_csv(target, index=False)
             _log(f"bulk_deals.csv refreshed via {name} ({len(out)} new rows, {len(merged)} in cache)")
+            _report_flow_coverage("bulk_deals", target,
+                                  backfill_ok=name in ("nse-archives", "bse"))
             return True
         except Exception as e:
             _log(f"bulk_deals source '{name}' failed: {type(e).__name__}: {e}")
@@ -1183,6 +1295,17 @@ def refresh_all(base: Path | None = None, only: Iterable[str] | None = None,
         _warn("data_health seeding", e)
 
     ok = sum(1 for v in status.values() if v)
+    # Surface a DNS problem ONCE with an actionable hint. Buried inside a
+    # per-source urllib3 traceback it reads like the provider is down, when the
+    # fix is actually on this machine.
+    if _DNS_FAILURES:
+        _log(f"NOTE: {len(_DNS_FAILURES)} source(s) unreachable because a hostname "
+             f"would not resolve: {', '.join(sorted(_DNS_FAILURES))}")
+        _log("      That is DNS on this machine/network, not the source being down. "
+             "Other feeds succeeded, so this is selective resolution failure.")
+        _log("      Try: ipconfig /flushdns, a different network (phone hotspot), or "
+             "check whether a proxy/VPN is required.")
+        _DNS_FAILURES.clear()
     _log(f"done — {ok}/{len(status)} feeds available (missing feeds keep the pipeline running quiet)")
     return status
 
