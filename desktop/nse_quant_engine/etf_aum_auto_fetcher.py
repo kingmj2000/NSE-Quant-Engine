@@ -66,6 +66,8 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+
+from core.safe_io import read_required_csv
 import requests
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -828,9 +830,7 @@ def build_nav_mappings(nav: pd.DataFrame) -> tuple[dict[str, str], dict[str, str
 
 
 def load_etf_universe() -> pd.DataFrame:
-    if not CONFIG_CSV.exists():
-        raise FileNotFoundError("config.csv not found. Run universe_builder.py first.")
-    cfg = pd.read_csv(CONFIG_CSV, dtype=str)
+    cfg = read_required_csv(CONFIG_CSV, produced_by="python universe_builder.py", dtype=str)
     universe_col = "Universe_Group" if "Universe_Group" in cfg.columns else "Universe" if "Universe" in cfg.columns else None
     if universe_col is None:
         raise ValueError("config.csv needs Universe_Group or Universe column.")

@@ -29,6 +29,8 @@ from __future__ import annotations
 import inspect
 from pathlib import Path
 
+import pytest
+
 import pandas as pd
 
 from core import optional_data_fetchers as odf
@@ -47,17 +49,52 @@ def test_refresh_is_guarded_against_overlapping_clicks():
         src = _src(rel)
         i = src.index("def _refresh_optional_feeds")
         body = src[i:i + 3000]
-        assert "isRunning()" in body, (
-            f"{rel}: no re-entrancy guard — a second click drops a live QThread")
-        assert "return" in body.split("isRunning()")[1][:400], (
+        assert "_refresh_busy" in body, (
+            f"{rel}: no re-entrancy guard — a second click can start a second fetch")
+        assert "return" in body.split("_refresh_busy")[1][:400], (
             f"{rel}: guard does not actually bail out")
 
 
-def test_thread_is_deleted_only_after_it_finishes():
+def test_manual_refresh_does_not_use_a_qthread():
+    """A QThread carries a C++ lifetime; a Python thread does not.
+
+    The crash log shows the QThread route failing three ways: destroyed on app
+    exit, destroyed by a second click, and (after `deleteLater`) a retained
+    Python wrapper pointing at freed memory. The work is network + file IO and
+    touches no Qt object, so it does not need a QThread.
+    """
+    import ast
+
     for rel in ("ui/decision_center.py", "run_app.py"):
+        tree = ast.parse(_src(rel))
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == "_refresh_optional_feeds")
+
+        # Assert on the parsed CODE, not the file text: a docstring explaining
+        # why deleteLater is dangerous would otherwise fail this test. (Text
+        # invariants that the surrounding prose must also name are brittle —
+        # this is the fourth time in this codebase.)
+        called = {n.func.attr for n in ast.walk(fn)
+                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+        names = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)}
+
+        assert "Thread" in called, f"{rel}: refresh must start a plain thread"
+        assert "deleteLater" not in called, (
+            f"{rel}: deleteLater plus a retained wrapper is the dangling-pointer path")
+        assert "_RefreshThread" not in names, f"{rel}: QThread subclass still constructed"
+
+
+def test_completion_is_marshalled_to_the_gui_thread():
+    """Never call refresh()/load_last_run() from the worker thread."""
+    for rel, bridge in (("ui/decision_center.py", "_RefreshBridge"),
+                        ("run_app.py", "_MainRefreshBridge")):
         src = _src(rel)
-        assert "finished.connect" in src and "deleteLater" in src, (
-            f"{rel}: thread must be released by Qt on finished, not by rebinding")
+        assert f"class {bridge}(QObject)" in src, f"{rel}: no persistent signal bridge"
+        assert "done = Signal()" in src
+        i = src.index("def _refresh_optional_feeds")
+        body = src[i:i + 3500]
+        assert "done.emit()" in body, f"{rel}: worker must signal, not call directly"
+        assert "def _on_refresh_finished" in src, f"{rel}: no GUI-thread handler"
 
 
 def test_both_windows_expose_a_wait_hook():
@@ -77,10 +114,13 @@ def test_close_event_waits_for_every_background_thread():
 
 def test_wait_hook_reports_idle_when_no_thread_exists():
     """The hook must be safe to call before any refresh has ever run."""
-    src = _src("ui/decision_center.py")
-    i = src.index("def wait_for_background_work")
-    body = src[i:i + 700]
-    assert "is None" in body and "return True" in body
+    for rel in ("ui/decision_center.py", "run_app.py"):
+        src = _src(rel)
+        i = src.index("def wait_for_background_work")
+        body = src[i:i + 800]
+        assert "is None" in body and "return True" in body, rel
+        assert "is_alive()" in body and "join(" in body, (
+            f"{rel}: must join the Python thread, not wait on a QThread")
 
 
 # ── daily-flow coverage reporting ───────────────────────────────────────────
@@ -93,6 +133,22 @@ def _write_flow(tmp_path: Path, dates: list[str]) -> Path:
         "DII_Net_INR_Cr": [2.0] * len(dates),
     }).to_csv(p, index=False)
     return p
+
+
+def test_read_json_survives_a_transient_io_failure(tmp_path):
+    """OneDrive can briefly refuse a file another thread just wrote."""
+    pytest.importorskip("PySide6.QtCore")
+    import ui.decision_center as dc
+
+    good = tmp_path / "ok.json"
+    good.write_text('{"verdict": "Insufficient History"}', encoding="utf-8")
+    assert dc._read_json(good)["verdict"] == "Insufficient History"
+
+    assert dc._read_json(tmp_path / "missing.json") == {}
+
+    broken = tmp_path / "bad.json"
+    broken.write_bytes(b"\x00\xff not json")
+    assert dc._read_json(broken) == {}
 
 
 def test_gappy_flow_series_is_reported(tmp_path, capsys=None):

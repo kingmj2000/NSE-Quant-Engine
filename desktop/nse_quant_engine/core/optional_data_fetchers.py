@@ -417,11 +417,13 @@ def _fii_dii_from_nse_api(sess) -> pd.DataFrame:
     raise RuntimeError(f"NSE live FII/DII failed after retry: {last_exc}")
 
 
-def _fii_dii_from_nse_archive(sess, days: int = 90) -> pd.DataFrame:
-    """NSE historical FII/DII endpoint — up to ~90 days in one shot."""
-    _nse_warmup(sess)
-    end = datetime.now()
-    start = end - timedelta(days=days)
+def _fii_dii_archive_window(sess, start: datetime, end: datetime) -> pd.DataFrame:
+    """One window of NSE's historical FII/DII endpoint, with backoff + re-warm.
+
+    A 503 from NSE usually means the session was rejected rather than the service
+    being down, so the cookies are re-primed before each retry instead of simply
+    waiting longer.
+    """
     url = ("https://www.nseindia.com/api/historical/fiidiiTradeReact"
            f"?from={start.strftime('%d-%m-%Y')}&to={end.strftime('%d-%m-%Y')}")
     headers = {
@@ -429,8 +431,9 @@ def _fii_dii_from_nse_archive(sess, days: int = 90) -> pd.DataFrame:
         "Referer": "https://www.nseindia.com/reports/fii-dii",
         "X-Requested-With": "XMLHttpRequest",
     }
+    backoffs = (2.0, 5.0, 12.0)
     last_exc: BaseException | None = None
-    for _ in range(2):
+    for attempt in range(3):
         try:
             r = sess.get(url, timeout=25, headers=headers)
             if r.status_code >= 500:
@@ -444,8 +447,56 @@ def _fii_dii_from_nse_archive(sess, days: int = 90) -> pd.DataFrame:
             return out
         except Exception as e:
             last_exc = e
-            time.sleep(2.0)
-    raise RuntimeError(f"NSE historical FII/DII failed after retry: {last_exc}")
+            if attempt < len(backoffs) - 1:
+                time.sleep(backoffs[attempt])
+                _nse_warmup(sess)      # a 503 usually means the session was rejected
+    raise RuntimeError(f"{last_exc}")
+
+
+def _fii_dii_from_nse_archive(sess, days: int = 90) -> pd.DataFrame:
+    """NSE historical FII/DII backfill, requested in windows rather than one shot.
+
+    WHY WINDOWS
+    -----------
+    This asked for the whole ~90-day range in a single request, which NSE answers
+    with HTTP 503 far more often than it answers a narrow one. Because any 503
+    failed the entire source, the backfill never ran — and since `nse-api` only
+    returns the latest row or two, the cache accrued permanent holes (12 of 30
+    business days missing in the observed run).
+
+    Windows also make failure partial instead of total: if three of five windows
+    succeed, three windows' worth of gaps get filled rather than none. Whatever is
+    still missing is retried on the next run, so the cache converges over time.
+    """
+    _nse_warmup(sess)
+    end = datetime.now()
+    start = end - timedelta(days=days)
+
+    window = timedelta(days=30)
+    collected: list[pd.DataFrame] = []
+    failures: list[str] = []
+    cursor = start
+    while cursor < end:
+        stop = min(cursor + window, end)
+        try:
+            collected.append(_fii_dii_archive_window(sess, cursor, stop))
+        except Exception as e:
+            failures.append(f"{cursor:%d-%b}–{stop:%d-%b}: {e}")
+        cursor = stop + timedelta(days=1)
+        time.sleep(1.0)   # pacing: consecutive rapid calls invite the next 503
+
+    if not collected:
+        raise RuntimeError(
+            f"NSE historical FII/DII failed for all {len(failures)} window(s): "
+            f"{failures[0] if failures else 'unknown'}")
+
+    if failures:
+        _log(f"fii_dii: backfilled {len(collected)} of "
+             f"{len(collected) + len(failures)} windows "
+             f"({len(failures)} still failing — will retry next run)")
+
+    out = pd.concat(collected, ignore_index=True)
+    return out.drop_duplicates(subset=["Date"], keep="last")
 
 
 def _report_flow_coverage(feed: str, target: Path, backfill_ok: bool) -> None:

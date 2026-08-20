@@ -26,6 +26,8 @@ from pathlib import Path
 from difflib import SequenceMatcher
 import re
 import pandas as pd
+
+from core.safe_io import read_cached_csv, read_required_csv
 import requests
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -67,9 +69,7 @@ def score_match(a: str, b: str) -> float:
 
 
 def load_config_etfs() -> pd.DataFrame:
-    if not CONFIG_CSV.exists():
-        raise FileNotFoundError("config.csv not found. Run python universe_builder.py first.")
-    cfg = pd.read_csv(CONFIG_CSV)
+    cfg = read_required_csv(CONFIG_CSV, produced_by="python universe_builder.py")
     for col in ["Universe", "Symbol", "Raw_Symbol", "Name", "Category", "ISIN", "Opportunity_Type", "Opportunity_Eligible"]:
         if col not in cfg.columns:
             cfg[col] = ""
@@ -90,9 +90,21 @@ def fetch_amfi_nav() -> pd.DataFrame:
         # most recent cached NAVAll file created by etf_metadata_enricher instead
         # of crashing the GUI at the end of the run.
         cached = DATA_DIR / "amfi_navall_latest.csv"
-        if cached.exists():
+        # exists() is not the same as usable. A zero-byte cache written during a
+        # previous failed run used to raise EmptyDataError here — in the recovery
+        # path itself — and halt the pipeline.
+        # Identifier columns MUST be read as text. The live parser builds them
+        # from split text, so without dtype= the cached path returns
+        # AMFI_Scheme_Code as int64 and ISINs as floats when blank — meaning ETF
+        # mapping would behave differently depending on whether AMFI happened to
+        # be reachable. Same input, same types, either way.
+        cached_df = read_cached_csv(
+            cached, label="amfi_navall_latest.csv",
+            dtype={"Scheme_Code": str, "ISIN_1": str, "ISIN_2": str,
+                   "Scheme_Name": str, "NAV_Date": str},
+            keep_default_na=False)
+        if not cached_df.empty:
             print(f"WARNING: AMFI NAV download failed ({exc}). Reusing cached {cached.name}.")
-            cached_df = pd.read_csv(cached)
             rename = {
                 "Scheme_Code": "AMFI_Scheme_Code",
                 "ISIN_1": "AMFI_ISIN_Growth",
@@ -106,7 +118,15 @@ def fetch_amfi_nav() -> pd.DataFrame:
                 if col not in cached_df.columns:
                     cached_df[col] = ""
             return cached_df[["AMFI_Scheme_Code", "AMFI_ISIN_Growth", "AMFI_ISIN_Div", "AMFI_Scheme_Name", "NAV", "NAV_Date"]].copy()
-        raise
+
+        # No download and no usable cache. AMFI supplies ETF metadata enrichment
+        # only, so an empty table degrades ETF mapping — it must not abort the
+        # run and take stock scoring, validation and the trade plan with it.
+        print(f"WARNING: AMFI NAV unavailable and no usable cache ({exc}). "
+              f"Continuing with an empty NAV table; ETF mapping will be blank.")
+        return pd.DataFrame(columns=["AMFI_Scheme_Code", "AMFI_ISIN_Growth",
+                                     "AMFI_ISIN_Div", "AMFI_Scheme_Name",
+                                     "NAV", "NAV_Date"])
 
     rows = []
     for line in text.splitlines():
@@ -135,6 +155,8 @@ def fetch_amfi_nav() -> pd.DataFrame:
 
 
 def mapping_status(match_type: str, match_score: float) -> str:
+    if match_type == "Unavailable":
+        return "Missing"
     if match_type == "ISIN":
         return "Verified"
     if match_score >= 0.82:
@@ -144,8 +166,33 @@ def mapping_status(match_type: str, match_score: float) -> str:
     return "Missing"
 
 
+def _bestval(best, key: str, default=""):
+    """Field from the chosen AMFI row, or a default when there was no match."""
+    if best is None:
+        return default
+    try:
+        val = best[key]
+    except Exception:
+        return default
+    return default if pd.isna(val) else val
+
+
 def make_mapping_suggestions(etfs: pd.DataFrame, nav_df: pd.DataFrame) -> pd.DataFrame:
+    """Suggest an AMFI scheme for each ETF. Degrades instead of crashing.
+
+    When AMFI is unreachable `nav_df` arrives empty, and this used to reach
+    `candidates.iloc[0]` on an empty frame and raise IndexError — halting the
+    WHOLE pipeline because an optional metadata enrichment source was down. An
+    unavailable NAV table means "no suggestion", not "abort the run".
+    """
     suggestions = []
+    if nav_df is None or nav_df.empty:
+        print('AMFI NAV table unavailable — mapping suggestions will be blank for '
+              'this run (ETF scoring continues on cached/manual metadata).')
+        nav_df = pd.DataFrame(columns=[
+            "AMFI_Scheme_Code", "AMFI_Scheme_Name",
+            "AMFI_ISIN_Growth", "AMFI_ISIN_Div", "NAV", "NAV_Date"])
+
     for _, etf in etfs.iterrows():
         etf_name = str(etf.get("Name", ""))
         etf_symbol = str(etf.get("Symbol", ""))
@@ -163,12 +210,18 @@ def make_mapping_suggestions(etfs: pd.DataFrame, nav_df: pd.DataFrame) -> pd.Dat
             best = isin_matches.iloc[0]
             match_score = 1.0
             match_type = "ISIN"
-        else:
+        elif not candidates.empty:
             candidates["Match_Score"] = candidates["AMFI_Scheme_Name"].map(lambda x: score_match(etf_name, x))
             candidates = candidates.sort_values("Match_Score", ascending=False)
             best = candidates.iloc[0]
             match_score = float(best["Match_Score"])
             match_type = "Fuzzy"
+        else:
+            # No AMFI rows to match against. Record the ETF with a blank
+            # suggestion so downstream row counts stay stable, and move on.
+            best = None
+            match_score = 0.0
+            match_type = "Unavailable"
 
         status = mapping_status(match_type, match_score)
         suggestions.append({
@@ -177,10 +230,10 @@ def make_mapping_suggestions(etfs: pd.DataFrame, nav_df: pd.DataFrame) -> pd.Dat
             "ETF_Name": etf_name,
             "ETF_Category": etf.get("Category", ""),
             "ETF_ISIN": etf_isin,
-            "Suggested_AMFI_Scheme_Code": best["AMFI_Scheme_Code"],
-            "Suggested_AMFI_Scheme_Name": best["AMFI_Scheme_Name"],
-            "Suggested_NAV": best["NAV"],
-            "Suggested_NAV_Date": best["NAV_Date"],
+            "Suggested_AMFI_Scheme_Code": _bestval(best, "AMFI_Scheme_Code"),
+            "Suggested_AMFI_Scheme_Name": _bestval(best, "AMFI_Scheme_Name"),
+            "Suggested_NAV": _bestval(best, "NAV"),
+            "Suggested_NAV_Date": _bestval(best, "NAV_Date"),
             "Match_Score": match_score,
             "Match_Type": match_type,
             "Mapping_Status": status,
@@ -210,7 +263,9 @@ def create_manual_template(etfs: pd.DataFrame, suggestions: pd.DataFrame) -> Non
 def load_manual_quality() -> pd.DataFrame:
     if not MANUAL_QUALITY_CSV.exists():
         return pd.DataFrame()
-    manual = pd.read_csv(MANUAL_QUALITY_CSV)
+    manual = read_cached_csv(MANUAL_QUALITY_CSV, label="manual_etf_quality.csv")
+    if manual.empty:
+        return manual
     if "Symbol" not in manual.columns:
         raise ValueError("manual_etf_quality.csv must contain Symbol column.")
     return manual
