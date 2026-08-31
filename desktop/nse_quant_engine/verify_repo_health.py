@@ -298,8 +298,14 @@ for pat in ("*.py", "*.bat", "*.md", "*.yml", "*.yaml", "*.toml", "*.cfg", "*.in
 orphans = []
 for p in py_files():
     # Test modules are collected by pytest, not imported — never orphans.
+    # probe_* joins diagnose_*/tools_* as operator-invoked diagnostics: run by
+    # hand, imported by nothing, and NOT dead code. Without this, committing a
+    # probe script trips the orphan warning and the usual reaction is to delete
+    # it — which is how probe_fiidii_sources_v2.py ended up outside the repo
+    # while the handoff claimed it was in it.
     if p.stem in ("__init__", "run_app", "orchestrator", "verify_repo_health") \
-            or "tests" in p.parts or p.stem.startswith(("test_", "diagnose_", "tools_")):
+            or "tests" in p.parts \
+            or p.stem.startswith(("test_", "diagnose_", "tools_", "probe_")):
         continue
     if not any(q != p and re.search(rf"\b{re.escape(p.stem)}\b", s) for q, s in corpus.items()):
         orphans.append(str(p.relative_to(ENG)))

@@ -1552,7 +1552,21 @@ def fetch_iv_rank(data_dir: Path, base: Path, cap: int = 60,
     rows: list[dict] = []
     hit = miss = 0
     rewarmed = False
+    # Circuit breaker. Every symbol costs 3 attempts with 1+3+7s backoff, so a
+    # fully blocked session burned 60 symbols x ~11.6s = ~11 minutes and 180
+    # rejected requests against www.nseindia.com per run — the same host whose
+    # api/historical/fiidiiTradeReact answers with 503 block pages. Once the
+    # session is blocked, symbol 9 tells us nothing symbol 8 did not. Give up
+    # after PROBE_BUDGET consecutive misses with zero hits, AFTER the existing
+    # re-warm has had its chance (it fires at miss >= 3), then fall through to
+    # the unchanged no-rows path so cached data is still reused.
+    PROBE_BUDGET = 8
     for sym in symbols:
+        if hit == 0 and miss >= PROBE_BUDGET:
+            _log(f"iv_rank: giving up after {miss} consecutive misses and 0 hits "
+                 f"— NSE has blocked this session; skipping the remaining "
+                 f"{len(symbols) - miss} symbol(s)")
+            break
         try:
             iv = _iv_rank_from_option_chain(sess, sym)
             if iv is None:
