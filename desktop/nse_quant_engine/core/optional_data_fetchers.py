@@ -357,7 +357,7 @@ def _read_csv_guarded(path: Path, label: str) -> pd.DataFrame | None:
         return None
 
 
-def missing_date_ranges(target: Path, days: int) -> list[tuple[str, str]]:
+def missing_date_ranges(target: Path, days: int, max_ranges: int = 6) -> list[tuple[str, str]]:
     """Contiguous business-day ranges absent from a dated cache CSV.
 
     Returned as [(from, to), ...] with inclusive 'YYYY-MM-DD' bounds, oldest
@@ -386,7 +386,13 @@ def missing_date_ranges(target: Path, days: int) -> list[tuple[str, str]]:
         prev = d
     if run_start is not None and prev is not None:
         ranges.append((run_start.strftime("%Y-%m-%d"), prev.strftime("%Y-%m-%d")))
-    return ranges
+
+    # Newest gaps first, and BOUNDED. Recent days matter more, and an unbounded
+    # list would fire one request per gap at an endpoint that already
+    # rate-limits us — dozens of calls in a single run is how a soft block
+    # becomes a hard one. Whatever is not covered this run is retried next run.
+    ranges.sort(key=lambda r: r[1], reverse=True)
+    return ranges[:max_ranges]
 
 
 # --------- optional nselib adapter ------------------------------------------
@@ -709,11 +715,18 @@ def _fii_dii_from_nse_api(sess) -> pd.DataFrame:
     raise RuntimeError(f"NSE live FII/DII failed after retry: {last_exc}")
 
 
-def _fii_dii_from_nse_archive(sess, days: int = 90) -> pd.DataFrame:
-    """Historical NSE FII/DII endpoint; one probe per day because it is blocked."""
-    _nse_warmup(sess)
-    end = datetime.now()
-    start = end - timedelta(days=days)
+def _fii_dii_archive_window(sess, start: datetime, end: datetime) -> pd.DataFrame:
+    """One window of NSE's historical FII/DII endpoint, with backoff + re-warm.
+
+    A 503 from NSE usually means the session was rejected rather than the service
+    being down, so cookies are re-primed before each retry instead of simply
+    waiting longer.
+
+    Returns the SAME normalised schema as every other FII/DII source
+    (`Date`, `FII_Net_INR_Cr`, `DII_Net_INR_Cr`) via
+    `_normalize_nse_fiidii_rows`. Returning the raw payload here would break the
+    union downstream.
+    """
     url = ("https://www.nseindia.com/api/historical/fiidiiTradeReact"
            f"?from={start.strftime('%d-%m-%Y')}&to={end.strftime('%d-%m-%Y')}")
     headers = {
@@ -721,16 +734,86 @@ def _fii_dii_from_nse_archive(sess, days: int = 90) -> pd.DataFrame:
         "Referer": "https://www.nseindia.com/reports/fii-dii",
         "X-Requested-With": "XMLHttpRequest",
     }
-    r = sess.get(url, timeout=25, headers=headers)
-    if r.status_code >= 500:
-        raise RuntimeError(f"HTTP {r.status_code} — historical NSE endpoint is blocked")
-    r.raise_for_status()
-    payload = r.json()
-    rows = payload if isinstance(payload, list) else (payload.get("data") or [])
-    out = _normalize_nse_fiidii_rows(rows)
-    if out.empty:
-        raise RuntimeError("NSE historical API returned empty payload")
-    return out
+    backoffs = (2.0, 5.0, 12.0)
+    last_exc: BaseException | None = None
+    for attempt in range(3):
+        try:
+            r = sess.get(url, timeout=25, headers=headers)
+            if r.status_code >= 500:
+                raise RuntimeError(f"HTTP {r.status_code}")
+            r.raise_for_status()
+            payload = r.json()
+            rows = payload if isinstance(payload, list) else (payload.get("data") or [])
+            out = _normalize_nse_fiidii_rows(rows)
+            if out.empty:
+                raise RuntimeError("NSE historical API returned empty payload")
+            return out
+        except Exception as e:
+            last_exc = e
+            if attempt < len(backoffs) - 1:
+                time.sleep(backoffs[attempt])
+                _nse_warmup(sess)   # a 503 usually means the session was rejected
+    raise RuntimeError(f"{last_exc}")
+
+
+def _fii_dii_from_nse_archive(sess, days: int = 90,
+                              target_path: Path | None = None) -> pd.DataFrame:
+    """Historical NSE FII/DII backfill, requested in windows rather than one shot.
+
+    MEASURED CAVEAT (2026-08-31 probe): NSE returns an 18 KB HTML block page with
+    HTTP 503 for this endpoint at BOTH 3-day and 20-day ranges, byte-identical.
+    Narrow windows are therefore not currently a workaround — the endpoint is
+    blocked outright for this client. The windowing is kept because it is the
+    right shape when access returns: it asks only for missing days, retries with
+    cookie re-warm, and makes failure partial rather than total so windows that
+    succeed fill their gaps while the rest retry next run.
+    """
+    _nse_warmup(sess)
+
+    gaps = missing_date_ranges(target_path, days) if target_path else []
+    if gaps:
+        _log(f"fii_dii: backfilling {len(gaps)} gap range(s) rather than the "
+             f"full {days}-day span")
+        # Pad each gap by two days: NSE returns published rows only, and a single
+        # missing day asked for as a one-day range often comes back empty.
+        # missing_date_ranges returns date STRINGS; convert before arithmetic.
+        # Padding by two days matters because NSE returns published rows only,
+        # and a single missing day asked for as a one-day range comes back empty.
+        targets = [(pd.Timestamp(a).to_pydatetime() - timedelta(days=2),
+                    pd.Timestamp(b).to_pydatetime() + timedelta(days=2))
+                   for a, b in gaps]
+    else:
+        end = datetime.now()
+        start = end - timedelta(days=days)
+        window = timedelta(days=30)
+        targets = []
+        cursor = start
+        while cursor < end:
+            stop = min(cursor + window, end)
+            targets.append((cursor, stop))
+            cursor = stop + timedelta(days=1)
+
+    collected: list[pd.DataFrame] = []
+    failures: list[str] = []
+    for lo, hi in targets:
+        try:
+            collected.append(_fii_dii_archive_window(sess, lo, hi))
+        except Exception as e:
+            failures.append(f"{lo:%d-%b}-{hi:%d-%b}: {e}")
+        time.sleep(1.0)   # pacing: consecutive rapid calls invite the next 503
+
+    if not collected:
+        raise RuntimeError(
+            f"NSE historical FII/DII failed for all {len(failures)} window(s): "
+            f"{failures[0] if failures else 'unknown'}")
+
+    if failures:
+        _log(f"fii_dii: backfilled {len(collected)} of "
+             f"{len(collected) + len(failures)} windows "
+             f"({len(failures)} still failing — will retry next run)")
+
+    out = pd.concat(collected, ignore_index=True)
+    return out.drop_duplicates(subset=["Date"], keep="last")
 
 
 def _report_flow_coverage(feed: str, target: Path, backfill_ok: bool) -> None:
@@ -785,7 +868,8 @@ def fetch_fii_dii(data_dir: Path, keep_days: int = 90, force: bool = False) -> b
     # Historical NSE is retained as a once-per-day re-probe, not as a retry loop.
     sources = _filter_known_unavailable("fii_dii", [
         ("nse-api", _fii_dii_from_nse_api),
-        ("nse-archive", lambda s: _fii_dii_from_nse_archive(s, days=keep_days)),
+        ("nse-archive", lambda s: _fii_dii_from_nse_archive(s, days=keep_days,
+                                                            target_path=target)),
         ("nselib", _fii_dii_from_nselib),
         ("moneycontrol", _fii_dii_from_moneycontrol),
         ("groww", _fii_dii_from_groww),

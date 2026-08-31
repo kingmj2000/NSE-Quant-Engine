@@ -171,11 +171,14 @@ def test_shadow_report_writes_the_keys_the_ui_reads():
     ever absent from the writer. Both sides must now agree by name."""
     import inspect
 
-    import run_app
     import shadow_vs_official_report as rep
 
+    # Read run_app.py as TEXT rather than importing it. Importing pulls in
+    # PySide6, which needs libEGL/OpenGL and fails on a headless CI runner — for
+    # a test that only ever inspects source. A test should not require a GPU to
+    # check that two modules agree on a key name.
     writer = inspect.getsource(rep.build)
-    reader = inspect.getsource(run_app)
+    reader = (Path(__file__).resolve().parents[1] / "run_app.py").read_text(encoding="utf-8")
     for key in ("jaccard_top25", "overlap_top_n", "spearman_full", "avg_abs_delta_rank"):
         assert f'"{key}"' in writer, f"writer no longer emits {key}"
         assert f'"{key}"' in reader, f"UI no longer reads {key}"

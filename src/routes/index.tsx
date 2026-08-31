@@ -59,7 +59,6 @@ const outputs = [
   ["dashboard_latest.html", "Dashboard, embedded in the desktop app"],
 ];
 
-
 function Index() {
   return (
     <main className="min-h-screen bg-background text-foreground">
@@ -80,7 +79,6 @@ function Index() {
             className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90"
             href={REPOSITORY_URL}
           >
-
             <Github className="size-4" aria-hidden="true" />
             View the repository
           </a>
