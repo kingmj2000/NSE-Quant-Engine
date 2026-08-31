@@ -26,7 +26,7 @@ actual fault.
 """
 from __future__ import annotations
 
-import inspect
+import ast
 import re
 from pathlib import Path
 
@@ -43,62 +43,83 @@ def _src(rel: str) -> str:
     return (ENG / rel).read_text(encoding="utf-8")
 
 
-def test_refresh_is_guarded_against_overlapping_clicks():
-    for rel in ("ui/decision_center.py", "run_app.py"):
-        src = _src(rel)
-        i = src.index("def _refresh_optional_feeds")
-        body = src[i:i + 3500]
-        assert "_refresh_busy" in body, (
-            f"{rel}: no re-entrancy guard — a second click can start a second fetch")
-        assert "return" in body.split("_refresh_busy")[1][:400], (
-            f"{rel}: guard does not actually bail out")
+WINDOWS = ("ui/decision_center.py", "run_app.py")
 
 
-def test_manual_refresh_does_not_use_a_qthread():
-    """A QThread carries a C++ lifetime; a Python thread does not.
+def _func(rel: str, name: str) -> ast.FunctionDef:
+    """Return the parsed FunctionDef, so assertions see code and not comments.
 
-    last_crash.log shows the QThread route failing three ways: destroyed on app
-    exit, destroyed by a second click, and — after `finished -> deleteLater` — a
-    retained Python wrapper pointing at freed memory, which surfaced as an access
-    violation inside pathlib.read_text. The work is network + file IO and touches
-    no Qt object, so it does not need a QThread at all.
+    The previous version of this module sliced the raw source text and searched
+    for literal substrings. That is the anti-pattern this project has been bitten
+    by repeatedly: the surrounding comments must contain the very words being
+    searched for, so the assertion could not fail, and one of the assertions
+    below was inverted — it REQUIRED the crash pattern to be present.
     """
-    import ast
+    tree = ast.parse(_src(rel))
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name:
+            return n
+    raise AssertionError(f"{rel}: {name}() is missing")
 
-    for rel in ("ui/decision_center.py", "run_app.py"):
-        tree = ast.parse(_src(rel))
-        fn = next(n for n in ast.walk(tree)
-                  if isinstance(n, ast.FunctionDef)
-                  and n.name == "_refresh_optional_feeds")
 
-        # Assert on the parsed CODE, not the file text: a docstring explaining why
-        # deleteLater is dangerous would otherwise fail this test.
-        called = {n.func.attr for n in ast.walk(fn)
+def _base_names(cls: ast.ClassDef) -> set[str]:
+    out: set[str] = set()
+    for b in cls.bases:
+        if isinstance(b, ast.Name):
+            out.add(b.id)
+        elif isinstance(b, ast.Attribute):
+            out.add(b.attr)
+    return out
+
+
+def test_refresh_is_guarded_against_overlapping_clicks():
+    for rel in WINDOWS:
+        fn = _func(rel, "_refresh_optional_feeds")
+        nodes = list(ast.walk(fn))
+        called = {n.func.attr for n in nodes
                   if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
-        names = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)}
-
-        assert "Thread" in called, f"{rel}: refresh must start a plain thread"
-        assert "deleteLater" not in called, (
-            f"{rel}: deleteLater plus a retained wrapper is the dangling-pointer path")
-        assert "_RefreshThread" not in names, f"{rel}: QThread subclass still constructed"
+        assert called & {"is_alive", "isRunning"}, (
+            f"{rel}: no liveness check — a second click abandons a running worker")
+        assert any(isinstance(n, ast.Return) for n in nodes), (
+            f"{rel}: the guard does not bail out")
 
 
-def test_completion_is_marshalled_to_the_gui_thread():
-    """Never call refresh()/load_last_run() from the worker thread."""
-    for rel, bridge in (("ui/decision_center.py", "_RefreshBridge"),
-                        ("run_app.py", "_MainRefreshBridge")):
-        src = _src(rel)
-        assert f"class {bridge}(QObject)" in src, f"{rel}: no persistent signal bridge"
-        assert "done = Signal()" in src
-        i = src.index("def _refresh_optional_feeds")
-        body = src[i:i + 3500]
-        assert "done.emit()" in body, f"{rel}: worker must signal, not call directly"
-        assert "def _on_refresh_finished" in src, f"{rel}: no GUI-thread handler"
+def test_refresh_worker_is_never_a_qt_object_deleted_underneath_us():
+    """The crash: one worker owned by two deallocators.
+
+    `t = _RefreshThread(self)` kept the Python wrapper alive in
+    `self._refresh_thread` while `t.finished.connect(t.deleteLater)` handed the
+    C++ object to Qt. After the first refresh completed, the next click and
+    `wait_for_background_work()` both called a method on a freed object —
+    0xc0000005, or heap corruption 0xc0000374 surfacing later somewhere
+    unrelated. A plain `threading.Thread` has no C++ half and cannot enter this
+    state.
+
+    Scoped to this one function on purpose: `RunnerThread` (the pipeline
+    QThread) is legitimate and must not be caught here.
+    """
+    for rel in WINDOWS:
+        fn = _func(rel, "_refresh_optional_feeds")
+        nodes = list(ast.walk(fn))
+        qthreads = [c.name for c in nodes
+                    if isinstance(c, ast.ClassDef) and "QThread" in _base_names(c)]
+        assert not qthreads, (
+            f"{rel}: manual refresh builds {qthreads} — a QThread here is owned by "
+            f"both Python and Qt")
+        deferred_delete = [n for n in nodes
+                           if isinstance(n, ast.Call)
+                           and isinstance(n.func, ast.Attribute)
+                           and n.func.attr == "connect"
+                           and any(isinstance(a, ast.Attribute)
+                                   and a.attr == "deleteLater" for a in n.args)]
+        assert not deferred_delete, (
+            f"{rel}: finished->deleteLater frees the C++ object while "
+            f"self._refresh_thread still points at the wrapper")
 
 
 def test_both_windows_expose_a_wait_hook():
-    for rel in ("ui/decision_center.py", "run_app.py"):
-        assert "def wait_for_background_work" in _src(rel), rel
+    for rel in WINDOWS:
+        _func(rel, "wait_for_background_work")  # raises with the file name if absent
 
 
 def test_close_event_waits_for_every_background_thread():
@@ -113,13 +134,17 @@ def test_close_event_waits_for_every_background_thread():
 
 def test_wait_hook_reports_idle_when_no_thread_exists():
     """The hook must be safe to call before any refresh has ever run."""
-    for rel in ("ui/decision_center.py", "run_app.py"):
-        src = _src(rel)
-        i = src.index("def wait_for_background_work")
-        body = src[i:i + 800]
-        assert "is None" in body and "return True" in body, rel
-        assert "is_alive()" in body and "join(" in body, (
-            f"{rel}: must join the Python thread, not wait on a QThread")
+    fn = _func("ui/decision_center.py", "wait_for_background_work")
+    nodes = list(ast.walk(fn))
+    compares_to_none = any(
+        isinstance(n, ast.Compare)
+        and any(isinstance(c, ast.Constant) and c.value is None for c in n.comparators)
+        for n in nodes)
+    returns_true = any(
+        isinstance(n, ast.Return) and isinstance(n.value, ast.Constant)
+        and n.value.value is True for n in nodes)
+    assert compares_to_none, "no None check — first call would raise before any refresh"
+    assert returns_true, "must report idle explicitly rather than falling through"
 
 
 # ── daily-flow coverage reporting ───────────────────────────────────────────

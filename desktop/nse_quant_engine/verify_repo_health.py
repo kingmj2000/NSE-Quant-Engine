@@ -137,6 +137,76 @@ check("CandidatesWorkbench defines _reload_combo",
       "def _reload_combo" in cw,
       "four call sites existed with no definition -> refresh() aborted every run")
 
+# ─── 8b. Manual-refresh thread lifetime (0xc0000005 / 0xc0000374) ───────────
+# The threading rewrite has been clobbered by a Lovable round trip TWICE and
+# this file — the tool whose job is to catch exactly that — had no check for it.
+#
+# Deliberately AST-scoped to the body of _refresh_optional_feeds, not a text
+# grep, for two reasons:
+#   1. The banned words appear in the surrounding explanatory comments in both
+#      files (and in this comment). A substring check would be unfalsifiable.
+#   2. RunnerThread in run_app.py is a legitimate QThread for the pipeline. A
+#      file-wide ban would fail on correct code.
+def _find_func(tree: ast.AST, name: str):
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name:
+            return n
+    return None
+
+
+def _base_names(cls: ast.ClassDef) -> set[str]:
+    out: set[str] = set()
+    for b in cls.bases:
+        if isinstance(b, ast.Name):
+            out.add(b.id)
+        elif isinstance(b, ast.Attribute):
+            out.add(b.attr)
+    return out
+
+
+for _rel in ("ui/decision_center.py", "run_app.py"):
+    _label = _rel.rsplit("/", 1)[-1]
+    try:
+        _tree = ast.parse(read(_rel))
+    except SyntaxError as _exc:
+        check(f"{_label}: parses", False, f"unparseable ({_exc})")
+        continue
+
+    _fn = _find_func(_tree, "_refresh_optional_feeds")
+    check(f"{_label}: exposes wait_for_background_work",
+          _find_func(_tree, "wait_for_background_work") is not None,
+          "closeEvent joins every background worker through this hook; without it "
+          "app exit destroys a live worker")
+    if _fn is None:
+        check(f"{_label}: _refresh_optional_feeds present", False,
+              "the manual-refresh handler is gone — a round trip dropped it")
+        continue
+
+    _nodes = list(ast.walk(_fn))
+    _qthread = [c.name for c in _nodes
+                if isinstance(c, ast.ClassDef) and "QThread" in _base_names(c)]
+    _dellater = [n for n in _nodes
+                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                 and n.func.attr == "connect"
+                 and any(isinstance(a, ast.Attribute) and a.attr == "deleteLater"
+                         for a in n.args)]
+    _called = {n.func.attr for n in _nodes
+               if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+
+    check(f"{_label}: manual refresh does not build a QThread",
+          not _qthread,
+          "the QThread is retained in self._refresh_thread AND handed to Qt for "
+          "deletion; whichever frees first, the other side is left holding a "
+          "dangling C++ pointer -> access violation 0xc0000005")
+    check(f"{_label}: no finished->deleteLater on the refresh worker",
+          not _dellater,
+          "deleteLater frees the C++ object while the Python wrapper survives; the "
+          "next click and wait_for_background_work() both call a method on it")
+    check(f"{_label}: overlapping refresh clicks still guarded",
+          bool(_called & {"is_alive", "isRunning"}),
+          "without a liveness check a second click abandons a running worker, "
+          "which is the original 0xc0000374 heap-corruption path")
+
 # ─── 9. Pattern scan: private methods that do not exist ─────────────────────
 missing_methods: list[str] = []
 for p in py_files():
