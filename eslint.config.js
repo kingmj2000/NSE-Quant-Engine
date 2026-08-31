@@ -6,7 +6,14 @@ import reactRefresh from "eslint-plugin-react-refresh";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
-  { ignores: ["dist", ".output", ".vinxi"] },
+  {
+    // The prettier plugin below is registered with no `files` restriction, so
+    // eslint lints EVERY file it walks — including the Python desktop app and
+    // its vendored bundles. That is how `bun run lint` came to demand a
+    // reformat of vendor/chart.umd.min.js, and how `--fix` un-minified it.
+    // The web shell lives in src/; desktop/ is not its business.
+    ignores: ["dist", ".output", ".vinxi", "desktop", "docs", "examples"],
+  },
   {
     extends: [js.configs.recommended, ...tseslint.configs.recommended],
     files: ["**/*.{ts,tsx}"],

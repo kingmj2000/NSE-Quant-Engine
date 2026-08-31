@@ -96,8 +96,16 @@ def test_shadow_columns_do_not_alter_official_ordering(scores_df):
 def test_loading_ui_does_not_write_outputs(tmp_path):
     """Instantiating and refreshing the views must not create or mutate any
     file under output/ or data/."""
-    pytest.importorskip("PySide6.QtWidgets")
-    from PySide6.QtWidgets import QApplication
+    # Not pytest.importorskip: on headless CI the PySide6 wheel imports fine but
+    # loading QtWidgets fails on a missing SYSTEM library —
+    #     ImportError: libEGL.so.1: cannot open shared object file
+    # which is a plain ImportError, not ModuleNotFoundError. Current pytest only
+    # converts ModuleNotFoundError into a skip, so importorskip let that through
+    # and the whole suite went red over an absent .so. Skip on either.
+    try:
+        from PySide6.QtWidgets import QApplication
+    except ImportError as exc:
+        pytest.skip(f"PySide6.QtWidgets unavailable here: {exc}")
 
     # Bare, isolated project scaffold
     (tmp_path / "output").mkdir()

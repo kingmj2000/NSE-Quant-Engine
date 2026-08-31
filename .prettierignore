@@ -6,3 +6,8 @@ pnpm-lock.yaml
 package-lock.json
 bun.lock
 routeTree.gen.ts
+
+# Python desktop app + vendored bundles — not the web shell's to format
+desktop
+docs
+examples
