@@ -109,9 +109,28 @@ def test_summary_is_silent_when_nothing_succeeded():
 
 
 def test_all_sources_failing_is_still_a_warning():
-    """Downgrading attempts must not downgrade a genuine total failure."""
-    import inspect
+    """Downgrading attempts must not downgrade a genuine total failure.
 
-    src = inspect.getsource(odf.fetch_fii_dii)
-    assert "_warn(" in src, "a feed with no working source must still warn"
-    assert "all failed" in src
+    Checked structurally (ast) rather than by log wording: the branch taken when
+    nothing was collected must call _warn.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(odf.fetch_fii_dii)))
+
+    def calls_warn(nodes) -> bool:
+        return any(
+            isinstance(n, ast.Call) and getattr(n.func, "id", None) == "_warn"
+            for node in nodes
+            for n in ast.walk(node)
+        )
+
+    failure_branches = [
+        stmt for stmt in ast.walk(tree)
+        if isinstance(stmt, ast.If) and "collected" in ast.dump(stmt.test)
+    ]
+    assert failure_branches, "no all-sources-failed branch found in fetch_fii_dii"
+    assert any(calls_warn(b.body) or calls_warn(b.orelse) for b in failure_branches), (
+        "a feed with no working source must still warn")

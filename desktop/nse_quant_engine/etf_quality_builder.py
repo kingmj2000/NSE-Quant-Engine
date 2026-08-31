@@ -69,6 +69,8 @@ def score_match(a: str, b: str) -> float:
 
 
 def load_config_etfs() -> pd.DataFrame:
+    if not CONFIG_CSV.exists():
+        raise FileNotFoundError("config.csv not found. Run python universe_builder.py first.")
     cfg = read_required_csv(CONFIG_CSV, produced_by="python universe_builder.py")
     for col in ["Universe", "Symbol", "Raw_Symbol", "Name", "Category", "ISIN", "Opportunity_Type", "Opportunity_Eligible"]:
         if col not in cfg.columns:
@@ -91,13 +93,14 @@ def fetch_amfi_nav() -> pd.DataFrame:
         # of crashing the GUI at the end of the run.
         cached = DATA_DIR / "amfi_navall_latest.csv"
         # exists() is not the same as usable. A zero-byte cache written during a
-        # previous failed run used to raise EmptyDataError here — in the recovery
-        # path itself — and halt the pipeline.
-        # Identifier columns MUST be read as text. The live parser builds them
-        # from split text, so without dtype= the cached path returns
-        # AMFI_Scheme_Code as int64 and ISINs as floats when blank — meaning ETF
-        # mapping would behave differently depending on whether AMFI happened to
-        # be reachable. Same input, same types, either way.
+        # previous failed run used to raise EmptyDataError HERE — in the recovery
+        # path itself — and halt the whole pipeline.
+        #
+        # Identifier columns must also be read as TEXT: the live parser builds
+        # them from split text, so without dtype= the cached path returns
+        # AMFI_Scheme_Code as int64 and blank ISINs as NaN floats. ETF mapping
+        # would then behave differently depending on whether AMFI happened to be
+        # reachable — same inputs, different results, no error.
         cached_df = read_cached_csv(
             cached, label="amfi_navall_latest.csv",
             dtype={"Scheme_Code": str, "ISIN_1": str, "ISIN_2": str,
@@ -180,10 +183,10 @@ def _bestval(best, key: str, default=""):
 def make_mapping_suggestions(etfs: pd.DataFrame, nav_df: pd.DataFrame) -> pd.DataFrame:
     """Suggest an AMFI scheme for each ETF. Degrades instead of crashing.
 
-    When AMFI is unreachable `nav_df` arrives empty, and this used to reach
-    `candidates.iloc[0]` on an empty frame and raise IndexError — halting the
-    WHOLE pipeline because an optional metadata enrichment source was down. An
-    unavailable NAV table means "no suggestion", not "abort the run".
+    When AMFI is unreachable `nav_df` arrives empty — sometimes with no columns
+    at all. Column access then raises KeyError before any row guard is reached,
+    so the frame is normalised to the expected shape first. An unavailable NAV
+    table means "no suggestion", not "abort the run".
     """
     suggestions = []
     if nav_df is None or nav_df.empty:
@@ -192,7 +195,6 @@ def make_mapping_suggestions(etfs: pd.DataFrame, nav_df: pd.DataFrame) -> pd.Dat
         nav_df = pd.DataFrame(columns=[
             "AMFI_Scheme_Code", "AMFI_Scheme_Name",
             "AMFI_ISIN_Growth", "AMFI_ISIN_Div", "NAV", "NAV_Date"])
-
     for _, etf in etfs.iterrows():
         etf_name = str(etf.get("Name", ""))
         etf_symbol = str(etf.get("Symbol", ""))
@@ -219,6 +221,9 @@ def make_mapping_suggestions(etfs: pd.DataFrame, nav_df: pd.DataFrame) -> pd.Dat
         else:
             # No AMFI rows to match against. Record the ETF with a blank
             # suggestion so downstream row counts stay stable, and move on.
+            # This used to reach candidates.iloc[0] on an empty frame and raise
+            # IndexError, halting the WHOLE pipeline because an optional
+            # metadata enrichment source was unreachable.
             best = None
             match_score = 0.0
             match_type = "Unavailable"

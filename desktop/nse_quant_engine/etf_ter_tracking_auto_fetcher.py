@@ -952,6 +952,8 @@ def combine_source_rows(dfs: list[pd.DataFrame]) -> pd.DataFrame:
 
 
 def load_etf_universe() -> pd.DataFrame:
+    if not CONFIG_CSV.exists():
+        raise FileNotFoundError("config.csv not found. Run universe_builder.py first.")
     cfg = read_required_csv(CONFIG_CSV, produced_by="python universe_builder.py")
     group_col = "Universe" if "Universe" in cfg.columns else "Universe_Group"
     etfs = cfg[cfg[group_col].astype(str).str.upper().eq("ETF")].copy().reset_index(drop=True)
@@ -962,9 +964,9 @@ def load_etf_universe() -> pd.DataFrame:
 
 def load_mapping_context() -> pd.DataFrame:
     pieces = []
-    # Empty/corrupt caches are skipped rather than raising EmptyDataError.
-    for _path, _label in ((ENRICHED_CSV, 'etf_metadata_enriched.csv'),
-                          (MANUAL_QUALITY, 'manual_etf_quality.csv')):
+    # exists() is not usable — an empty/corrupt cache must be skipped, not raise.
+    for _path, _label in ((ENRICHED_CSV, "etf_metadata_enriched.csv"),
+                          (MANUAL_QUALITY, "manual_etf_quality.csv")):
         _df = read_cached_csv(_path, label=_label)
         if not _df.empty:
             pieces.append(_df)

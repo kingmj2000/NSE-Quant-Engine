@@ -1,67 +1,70 @@
-# Quick Start — Windows
+# Quickstart — Windows
 
-A local Python desktop app. No Lovable / browser account involved.
+Run the NSE Quant Engine on a fresh Windows machine in three steps.
 
-## One-time setup (~3 min)
+Everything below is research tooling. Official mode is **watchlist only** unless
+the validation gate in `output/validation_status.json` is positive.
 
-1. Install **Python 3.11 or 3.12** from https://python.org. On the first installer
-   screen tick **"Add python.exe to PATH"**, then click Install.
-2. Unzip this project anywhere stable, e.g. `C:\Users\<you>\nse_quant_engine\`.
-   You should see `run_app.py`, `run_app.bat`, `orchestrator.py`, and the
-   `core\` folder at the top level.
-3. Double-click **`setup_windows.bat`**. It verifies the Python version, creates
-   `.venv`, upgrades pip inside it and installs `requirements.txt`.
-   The manual equivalent, from a Command Prompt in this folder:
-   ```
-   python -m venv .venv
-   .venv\Scripts\python.exe -m pip install --upgrade pip
-   .venv\Scripts\python.exe -m pip install -r requirements.txt
-   ```
+## 1. Install Python
 
-## Every run
+Install Python **3.11** or **3.12** from python.org (tick "Add python.exe to PATH").
+Newer versions are not supported by the pinned scientific stack.
 
-- **Double-click `run_app.bat`** — the desktop window runs the exact same
-  `orchestrator.py` pipeline as the command line, just with a live log,
-  an embedded dashboard and report tabs.
-- Click **Run**. First run ≈ 3–6 min (network). Tick **Skip fetch** afterwards
-  to re-score from cached data in under a minute.
-- **📦 Evidence zip** reveals the newest `output\insight_bundle_<timestamp>.zip`.
-  That bundle is built *after* the news step, so it always carries the current
-  run's news and filings.
+## 2. One-time setup
 
-## If double-click does nothing
+Double-click `setup_windows.bat` (or run it from a terminal in this folder).
 
-Open Command Prompt in the folder (click the address bar, type `cmd`, Enter):
-```
-.venv\Scripts\python.exe run_app.py
-```
-The error will print there — usually a missing library, fixed by re-running
-`setup_windows.bat`.
-
-## CLI (no GUI)
+It creates a local virtual environment and installs dependencies:
 
 ```
-.venv\Scripts\python.exe orchestrator.py --all
-.venv\Scripts\python.exe orchestrator.py --all --skip-fetch
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install --upgrade pip
+.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
-`run_full_workflow.bat` is a thin wrapper around exactly these commands and
-also accepts `--skip-fetch`.
 
-## Outputs (in `output\`)
+Nothing is installed system-wide; delete `.venv` to undo the setup.
+
+## 3. Run
+
+| What you want | Do this |
+| --- | --- |
+| The desktop app | Double-click `run_app.bat` (runs `run_app.py`) |
+| The full pipeline, headless | Double-click `run_full_workflow.bat` (runs `orchestrator.py --all`) |
+| Pipeline without re-downloading prices | `run_full_workflow.bat --skip-fetch` |
+
+The desktop app can also start the pipeline and refresh optional feeds from its
+own buttons, so most users only need `run_app.bat`.
+
+## Where the results land
+
+All artifacts are written to `output/`:
 
 | File | What it is |
-|---|---|
-| `latest_scores.xlsx` | Official engine scores & ranks (Confidence_Adjusted_Score is authoritative) |
-| `latest_scores_v4_shadow.xlsx` | Shadow engine scores (never authoritative) |
-| `trade_plan_report.md` / `trade_plan_latest.xlsx` | Trade plan |
-| `cross_sectional_validation_report.md` + `validation_status.json` | Edge validation (JSON is the canonical verdict) |
-| `news_digest.json` / `news_market_context.md` | News & filings — human-review context only |
-| `daily_changes.json` | Structured day-over-day rank/risk diff |
-| `dq_report.md` | Data-quality health score & field fill rates |
-| `shadow_vs_official.md` | Champion-vs-shadow running record (manual switch only) |
-| `dashboard_latest.html` | Dashboard, also rendered inside the app window |
-| `insight_bundle_<timestamp>.zip` | Evidence bundle for an external LLM |
+| --- | --- |
+| `latest_scores.xlsx` | Official workbook — scores, Top 5, diagnostics |
+| `latest_scores.csv` | Flat scores for the same run |
+| `trade_plan_latest.csv` | Official Top-5 trade plan |
+| `validation_status.json` | The sole verdict authority for the run |
+| `daily_changes.json` | What changed versus the previous run |
+| `news_digest.json` | Human-review news and filings context |
+| `latest_scores_v4_shadow.xlsx` | Shadow (experimental) engine workbook |
+| `insight_bundle_*.zip` | Evidence bundle for AI/analyst review |
 
-Sheets named **Raw Score Diagnostic** and **Raw Score Low-Risk Diag** in the
-workbook are diagnostic only — they are ordered by `Final_Score` and are not
-the official ranking.
+Ranking authority: `Confidence_Adjusted_Score` descending, `Symbol` ascending as
+the tie-breaker. Any raw score shown in the workbook or UI is diagnostic only.
+
+## Optional data feeds
+
+Drop-in CSVs in `data/` (FII/DII flows, bulk deals, fundamentals) are refreshed
+automatically when reachable. When a source is blocked from your machine, the run
+continues and the affected panels say so instead of guessing.
+
+## Troubleshooting
+
+- **`python` not recognised** — reinstall Python with "Add python.exe to PATH".
+- **Setup fails behind a corporate proxy** — set `HTTP_PROXY`/`HTTPS_PROXY` before
+  running `setup_windows.bat`.
+- **App opens but panels are empty** — run the pipeline once; the UI only reads
+  files that `output/` already contains.
+- **Feed warnings in the log** — expected when a provider blocks the machine; the
+  run is still valid, with that context marked incomplete.

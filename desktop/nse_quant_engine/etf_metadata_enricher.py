@@ -271,6 +271,8 @@ def valid_tracking_difference(value):
 
 
 def load_config():
+    if not CONFIG_CSV.exists():
+        raise FileNotFoundError('config.csv not found. Run universe_builder.py first.')
     df = read_required_csv(CONFIG_CSV, produced_by='python universe_builder.py')
     if 'Universe' in df.columns:
         df = df[df['Universe'].astype(str).str.lower().eq('etf')].copy()
@@ -312,9 +314,8 @@ def fetch_amfi_navall(log_rows):
             if df.empty:
                 # Parsing nothing is NOT success. Treating it as success wrote an
                 # empty file over a good 14,280-row cache, which then made
-                # etf_quality_builder raise IndexError on every subsequent run —
-                # a transient DNS failure turned into a permanently broken
-                # pipeline. Try the next URL instead.
+                # etf_quality_builder raise on every subsequent run — a transient
+                # DNS failure turned into a permanently broken pipeline.
                 last_error = RuntimeError(f'{url} returned 0 parseable NAV rows')
                 log_event(log_rows, 'AMFI_NAVAll', 'EMPTY', url, 0)
                 continue
@@ -326,8 +327,7 @@ def fetch_amfi_navall(log_rows):
             log_event(log_rows, 'AMFI_NAVAll', 'ERROR', f'{url}: {exc}', 0)
 
     # Every URL failed. Fall back to the cache rather than returning nothing:
-    # yesterday's NAV table is far better than no NAV table, and it keeps the
-    # pipeline running through an outage.
+    # yesterday's NAV table beats no NAV table and keeps the pipeline running.
     cached = _load_nav_cache()
     if not cached.empty:
         print(f'AMFI unreachable — reusing cached {AMFI_NAV_OUT.name} '
@@ -339,19 +339,14 @@ def fetch_amfi_navall(log_rows):
 
 def _load_nav_cache() -> pd.DataFrame:
     """Previously fetched AMFI NAV table, or an empty frame."""
-    try:
-        if AMFI_NAV_OUT.exists():
-            return pd.read_csv(AMFI_NAV_OUT)
-    except Exception:
-        pass
-    return pd.DataFrame()
+    return read_cached_csv(AMFI_NAV_OUT, label=AMFI_NAV_OUT.name, quiet=True)
 
 
 def _write_nav_cache_if_better(df: pd.DataFrame, log_rows: list) -> None:
     """Persist the NAV table, but never downgrade a good cache.
 
-    A fetch that returns a handful of rows where the cache holds thousands is a
-    degraded response, not a fresh truth. Overwriting on every fetch is what
+    A fetch returning a handful of rows where the cache holds thousands is a
+    degraded response, not fresh truth. Overwriting on every fetch is what
     destroyed the working cache.
     """
     existing = _load_nav_cache()
@@ -364,8 +359,9 @@ def _write_nav_cache_if_better(df: pd.DataFrame, log_rows: list) -> None:
 
 
 def load_existing_manual():
-    # exists() is not usable: an empty file here used to raise EmptyDataError.
-    return read_cached_csv(MANUAL_QUALITY, label='manual_etf_quality.csv')
+    if MANUAL_QUALITY.exists():
+        return read_cached_csv(MANUAL_QUALITY, label='manual_etf_quality.csv')
+    return pd.DataFrame()
 
 
 def backup_manual_if_exists():

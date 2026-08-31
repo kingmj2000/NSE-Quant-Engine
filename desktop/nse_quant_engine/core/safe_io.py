@@ -22,8 +22,8 @@ Two readers, and the distinction matters:
                           the step that produces it, instead of a pandas
                           traceback.
 
-A corrupt cache is never silently deleted. It is simply treated as absent, so the
-next successful fetch overwrites it and the problem self-heals.
+A corrupt cache is never silently deleted. It is treated as absent, so the next
+successful fetch overwrites it and the problem self-heals.
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ def read_cached_csv(path: str | Path,
                     **read_kwargs) -> pd.DataFrame:
     """Read a cached artifact, returning an empty frame if it is unusable.
 
-    Never raises. When `expected_columns` is given, the returned frame always has
+    Never raises. When `expected_columns` is given the returned frame always has
     those columns, so callers can index them without another guard.
     """
     p = Path(path)

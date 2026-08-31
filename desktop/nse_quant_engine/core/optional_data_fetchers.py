@@ -21,9 +21,12 @@ Design rules (non-negotiable, matches plan .lovable/plan.md):
 """
 from __future__ import annotations
 
+import inspect
 import io
 import json
+import os
 import re
+import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -137,6 +140,10 @@ def _is_fresh(path: Path, max_age_hours: float) -> bool:
     if not path.exists():
         return False
     try:
+        # A zero-byte cache is not a usable fresh cache. In particular, never
+        # let an interrupted fundamentals write suppress the next fetch.
+        if path.stat().st_size == 0:
+            return False
         age_h = (time.time() - path.stat().st_mtime) / 3600.0
         return age_h < max_age_hours
     except Exception:
@@ -146,18 +153,15 @@ def _is_fresh(path: Path, max_age_hours: float) -> bool:
 def _describe_source_error(exc: BaseException) -> tuple[str, str]:
     """Compact, human-readable reason for one source attempt failing.
 
-    Returns (kind, message). `kind` is one of:
-      "dns"        the hostname did not resolve — a local network/DNS problem,
-                   NOT the data source being down. Worth calling out separately
-                   because the fix is on this machine, not the internet.
-      "blocked"    the source answered with a rate-limit / block status
-      "shape"      the source answered but the payload was not what we parse
-                   (usually a site redesign — the scraper needs updating)
-      "network"    timeout / connection reset / unreachable
-      "other"      anything else
+    Returns (kind, message). `kind` includes dns, blocked, shape, network,
+    library, and other.
     """
     text = str(exc)
     low = text.lower()
+    if isinstance(exc, ImportError):
+        return "library", "nselib not installed for this interpreter — run: python -m pip install nselib"
+    if isinstance(exc, AttributeError) and "nselib" in low:
+        return "library", "nselib API changed — see the resolver log for available names"
     if ("getaddrinfo failed" in low or "nameresolutionerror" in low
             or "could not resolve host" in low or "name or service not known" in low):
         host = ""
@@ -241,21 +245,309 @@ def _merge_dated(existing: Path, new_df: pd.DataFrame, date_col: str,
 
 
 # =========================================================================
-# 1) FII / DII daily flow — Moneycontrol table (pandas.read_html)
+# Source policy — what is actually reachable from this machine
+# =========================================================================
+# Measured by a direct probe on 2026-08-31 (not assumed):
+#
+#   NSE /api/historical/fiidiiTradeReact  HTTP 503, 18,404-byte HTML block page
+#                                         titled "Nse India". Same for 3-day and
+#                                         20-day ranges. Kept in the chain but
+#                                         attempted at most once per day.
+#   NSE /api/fiidiiTradeReact             200 JSON, works. Exactly 2 rows (FII +
+#                                         DII) for the last published day. The
+#                                         ?date= parameter is ignored, so it
+#                                         cannot backfill.
+#   Moneycontrol                          200, but zero <table> tags in 105 KB —
+#                                         JS-rendered. No parser can extract it.
+#   Trendlyne                             405 "Human Verification" — bot-blocked.
+#   Groww                                 502 / empty body.
+#
+# Conclusion: no range/backfill source is reachable. Retired adapters stay in
+# this file (unused) so the evidence is not lost and re-enabling is one env var.
+KNOWN_UNAVAILABLE_SOURCES: dict[str, str] = {
+    "moneycontrol": "2026-08-31 probe: 200 OK but zero <table> tags in 105 KB — JS-rendered",
+    "groww": "2026-08-31 probe: HTTP 502 / empty body",
+    "trendlyne": "2026-08-31 probe: HTTP 405 'Human Verification' — bot-blocked",
+}
+
+
+def _try_all_sources() -> bool:
+    """NSE_TRY_ALL_SOURCES=1 re-enables the retired adapters for a re-probe."""
+    return str(os.environ.get("NSE_TRY_ALL_SOURCES", "")).strip() == "1"
+
+
+def _filter_known_unavailable(feed: str, sources: list) -> list:
+    """Drop retired sources from a fallback chain and say so once."""
+    if _try_all_sources():
+        return list(sources)
+    dropped = [n for n, _ in sources if n in KNOWN_UNAVAILABLE_SOURCES]
+    if dropped:
+        _log(f"{feed}: {', '.join(dropped)} skipped — known unavailable "
+             f"(see KNOWN_UNAVAILABLE_SOURCES)")
+    return [(n, f) for n, f in sources if n not in KNOWN_UNAVAILABLE_SOURCES]
+
+
+# --------- per-source attempt memory (data/source_health.json) --------------
+SOURCE_HEALTH_FILE_NAME = "source_health.json"
+
+
+def _source_health_load(data_dir: Path) -> dict:
+    p = Path(data_dir) / SOURCE_HEALTH_FILE_NAME
+    try:
+        if not p.exists() or p.stat().st_size == 0:
+            return {}
+        doc = json.loads(p.read_text(encoding="utf-8"))
+        return doc if isinstance(doc, dict) else {}
+    except Exception:
+        return {}
+
+
+def _source_health_record(data_dir: Path, feed: str, source: str,
+                          outcome: str) -> None:
+    """Remember the last attempt date + outcome for one (feed, source)."""
+    try:
+        doc = _source_health_load(data_dir)
+        doc.setdefault(feed, {})[source] = {
+            "last_attempt_date": datetime.now().strftime("%Y-%m-%d"),
+            "outcome": str(outcome),
+        }
+        if outcome == "ok":
+            hist = doc.setdefault("_fetch_success_dates", {}).setdefault(feed, [])
+            today = datetime.now().strftime("%Y-%m-%d")
+            if today not in hist:
+                hist.append(today)
+                hist.sort()
+                del hist[:-400]
+        Path(data_dir).mkdir(parents=True, exist_ok=True)
+        (Path(data_dir) / SOURCE_HEALTH_FILE_NAME).write_text(
+            json.dumps(doc, indent=2), encoding="utf-8")
+    except Exception as e:
+        print(f"[fetch][warn] source-health write: {e}", flush=True)
+
+
+def _source_blocked_today(data_dir: Path, feed: str, source: str) -> bool:
+    rec = _source_health_load(data_dir).get(feed, {}).get(source) or {}
+    return (rec.get("last_attempt_date") == datetime.now().strftime("%Y-%m-%d")
+            and rec.get("outcome") not in (None, "ok"))
+
+
+def _fetch_success_dates(data_dir: Path, feed: str) -> list[str]:
+    doc = _source_health_load(data_dir)
+    return list((doc.get("_fetch_success_dates") or {}).get(feed) or [])
+
+
+# --------- guarded CSV read -------------------------------------------------
+def _read_csv_guarded(path: Path, label: str) -> pd.DataFrame | None:
+    """Read a cache CSV, or return None when there is effectively no cache.
+
+    A missing file, a zero-byte file, or an unparseable one (pandas raises
+    EmptyDataError for a truly empty CSV) must all mean "no cache" and let the
+    run continue with fresh data only. This exact failure mode has halted the
+    pipeline once already, so pd.read_csv is never allowed to raise out of here.
+    """
+    try:
+        p = Path(path)
+        if not p.exists() or p.stat().st_size == 0:
+            return None
+        df = pd.read_csv(p)
+        return None if df.empty else df
+    except Exception as e:
+        _log(f"{label}: existing cache unreadable ({type(e).__name__}) — "
+             f"treating as no cache, continuing with fresh data only")
+        return None
+
+
+def missing_date_ranges(target: Path, days: int) -> list[tuple[str, str]]:
+    """Contiguous business-day ranges absent from a dated cache CSV.
+
+    Returned as [(from, to), ...] with inclusive 'YYYY-MM-DD' bounds, oldest
+    first, covering the trailing `days` calendar days. An unreadable or missing
+    cache yields the whole window as one range.
+    """
+    end = pd.Timestamp.now().normalize()
+    start = end - pd.Timedelta(days=int(days))
+    expected = pd.bdate_range(start, end)
+    have: set = set()
+    df = _read_csv_guarded(Path(target), "date-range scan")
+    if df is not None and "Date" in df.columns:
+        have = set(pd.to_datetime(df["Date"], errors="coerce")
+                   .dropna().dt.normalize().dt.date)
+    ranges: list[tuple[str, str]] = []
+    run_start = None
+    prev = None
+    for d in expected:
+        if d.date() in have:
+            if run_start is not None:
+                ranges.append((run_start.strftime("%Y-%m-%d"), prev.strftime("%Y-%m-%d")))
+                run_start = None
+            continue
+        if run_start is None:
+            run_start = d
+        prev = d
+    if run_start is not None and prev is not None:
+        ranges.append((run_start.strftime("%Y-%m-%d"), prev.strftime("%Y-%m-%d")))
+    return ranges
+
+
+# --------- optional nselib adapter ------------------------------------------
+_NSELIB_ENV_LOGGED = False
+
+
+def _nselib_env_note() -> None:
+    """Log which interpreter bound nselib — exactly once.
+
+    The target machine has both Python 3.10 and 3.13 installed; a package
+    visible to only one of them has already produced two false diagnoses.
+    """
+    global _NSELIB_ENV_LOGGED
+    if _NSELIB_ENV_LOGGED:
+        return
+    _NSELIB_ENV_LOGGED = True
+    try:
+        import nselib  # noqa: F401
+        ver = getattr(nselib, "__version__", "unknown")
+    except Exception:
+        ver = "not importable"
+    _log(f"nselib version {ver} · python {sys.version.split()[0]} · {sys.executable}")
+
+
+def _resolve_nselib_fn(candidates: Iterable[str]):
+    """Bind the first matching nselib callable, case/underscore-insensitively."""
+    import nselib  # ImportError propagates — classified as a 'library' error
+    _nselib_env_note()
+    modules = []
+    for mod_name in ("capital_market", "derivatives"):
+        try:
+            modules.append(getattr(__import__(f"nselib.{mod_name}",
+                                              fromlist=[mod_name]), "__dict__"))
+        except Exception:
+            continue
+    modules.append(vars(nselib))
+    wanted = [_norm_header(c) for c in candidates]
+    available: list[str] = []
+    for ns in modules:
+        names = [n for n in ns if not n.startswith("_")]
+        available.extend(names)
+        lookup = {_norm_header(n): n for n in names}
+        for w in wanted:
+            if w in lookup and callable(ns[lookup[w]]):
+                _log(f"nselib: bound '{lookup[w]}'")
+                return ns[lookup[w]]
+    raise AttributeError(
+        f"nselib has none of {list(candidates)} — available: "
+        f"{sorted(set(available))[:60]}")
+
+
+def _fii_dii_from_nselib(sess=None) -> pd.DataFrame:
+    fn = _resolve_nselib_fn(["fii_dii_trading_activity", "fii_dii_activity",
+                             "fii_dii_trade_react"])
+    try:
+        params = list(inspect.signature(fn).parameters)
+    except (TypeError, ValueError):
+        params = []
+    rows = None
+    if any(p.lower() in ("from_date", "start_date", "period") for p in params):
+        for frm, to in (missing_date_ranges(Path("data/fii_dii_daily.csv"), 30) or [])[-1:]:
+            try:
+                rows = fn(from_date=pd.Timestamp(frm).strftime("%d-%m-%Y"),
+                          to_date=pd.Timestamp(to).strftime("%d-%m-%Y"))
+                break
+            except Exception:
+                rows = None
+    if rows is None:
+        _log("nselib fii_dii: latest-day only, cannot backfill")
+        rows = fn()
+    if isinstance(rows, pd.DataFrame):
+        rows = rows.to_dict("records")
+    out = _normalize_nse_fiidii_rows(list(rows or []))
+    if out is None or out.empty:
+        raise RuntimeError("nselib returned empty FII/DII result")
+    return out
+
+
+def _bulk_from_nselib(sess=None, days: int = 30) -> pd.DataFrame:
+    fn = _resolve_nselib_fn(["bulk_deal_data", "bulk_deals_data", "bulk_deals"])
+    end = datetime.now()
+    start = end - timedelta(days=int(days))
+    try:
+        raw = fn(from_date=start.strftime("%d-%m-%Y"),
+                 to_date=end.strftime("%d-%m-%Y"))
+    except TypeError:
+        raw = fn()
+    df = raw if isinstance(raw, pd.DataFrame) else pd.DataFrame(raw or [])
+    if df.empty:
+        raise RuntimeError("nselib returned empty bulk-deals result")
+    cmap = {_norm_header(c): c for c in df.columns}
+
+    def pick(*names):
+        for n in names:
+            for k, v in cmap.items():
+                if _norm_header(n) in k:
+                    return v
+        return None
+
+    out = pd.DataFrame({
+        "Date":     pd.to_datetime(df[pick("date")], errors="coerce", dayfirst=True),
+        "Symbol":   df[pick("symbol")].astype(str).str.strip(),
+        "Client":   df[pick("client")].astype(str).str.strip(),
+        "Buy_Sell": df[pick("buysell", "buy")].astype(str).str.strip(),
+        "Qty":      pd.to_numeric(df[pick("quantity", "qty")].astype(str).str.replace(",", ""), errors="coerce"),
+        "Price":    pd.to_numeric(df[pick("price", "watp")].astype(str).str.replace(",", ""), errors="coerce"),
+    }).dropna(subset=["Date", "Symbol"])
+    if out.empty:
+        raise RuntimeError("nselib bulk deals parsed but empty")
+    return out
+
+
+
+# =========================================================================
+# 1) FII / DII normalizers retained for compatibility with local imports
 # =========================================================================
 # ---------------------------------------------------------------------------
 # HTML parser helper — pandas.read_html needs a flavor. Try lxml first (fast),
 # then html5lib (tolerant of Moneycontrol's malformed markup), then bs4.
 # ---------------------------------------------------------------------------
 def _try_read_html(text: str) -> list[pd.DataFrame]:
-    last_exc: BaseException | None = None
+    """Parse HTML tables, trying each installed flavor in turn.
+
+    The failure message distinguishes two very different situations that used to
+    look identical:
+
+      * NO PARSER INSTALLED — an environment problem, fixed by
+        `pip install lxml html5lib beautifulsoup4`.
+      * PARSED BUT NO TABLES — the page really has no tables, which usually means
+        a block/consent page or JS-rendered content and needs a different
+        approach entirely.
+
+    Reporting only the last exception made a missing dependency read as "the site
+    changed", sending the reader after the wrong problem.
+    """
+    missing: list[str] = []
+    parsed_no_tables: list[str] = []
+    other: list[str] = []
     for flavor in ("lxml", "html5lib", "bs4"):
         try:
             return pd.read_html(io.StringIO(text), flavor=flavor)
-        except Exception as e:  # ImportError, ValueError, XMLSyntaxError, ...
-            last_exc = e
-            continue
-    raise RuntimeError(f"no HTML parser succeeded: {last_exc}")
+        except ImportError:
+            missing.append(flavor)
+        except ValueError as e:
+            if "No tables found" in str(e):
+                parsed_no_tables.append(flavor)
+            else:
+                other.append(f"{flavor}: {e}")
+        except Exception as e:
+            other.append(f"{flavor}: {type(e).__name__}: {e}")
+
+    if parsed_no_tables:
+        raise RuntimeError(
+            f"page parsed but contains no tables (tried {', '.join(parsed_no_tables)}) "
+            f"— likely a block/consent page or JS-rendered content, not a parser issue")
+    if missing and not other:
+        raise RuntimeError(
+            f"no HTML parser installed (missing: {', '.join(missing)}) — "
+            f"run: pip install lxml html5lib beautifulsoup4")
+    raise RuntimeError(
+        f"no HTML parser succeeded; missing={missing or 'none'}; errors={other}")
 
 
 def _normalize_flow_table(picked: pd.DataFrame) -> pd.DataFrame:
@@ -331,7 +623,7 @@ def _fii_dii_from_groww(sess) -> pd.DataFrame:
 
 
 # =========================================================================
-# 1) FII / DII daily flow — NSE official primary, then Moneycontrol/Groww
+# 1) FII / DII daily flow — NSE official latest-only endpoint
 # =========================================================================
 def _nse_warmup(sess) -> None:
     """Prime cookies that NSE's JSON APIs require. Best-effort; ignores errors."""
@@ -417,13 +709,11 @@ def _fii_dii_from_nse_api(sess) -> pd.DataFrame:
     raise RuntimeError(f"NSE live FII/DII failed after retry: {last_exc}")
 
 
-def _fii_dii_archive_window(sess, start: datetime, end: datetime) -> pd.DataFrame:
-    """One window of NSE's historical FII/DII endpoint, with backoff + re-warm.
-
-    A 503 from NSE usually means the session was rejected rather than the service
-    being down, so the cookies are re-primed before each retry instead of simply
-    waiting longer.
-    """
+def _fii_dii_from_nse_archive(sess, days: int = 90) -> pd.DataFrame:
+    """Historical NSE FII/DII endpoint; one probe per day because it is blocked."""
+    _nse_warmup(sess)
+    end = datetime.now()
+    start = end - timedelta(days=days)
     url = ("https://www.nseindia.com/api/historical/fiidiiTradeReact"
            f"?from={start.strftime('%d-%m-%Y')}&to={end.strftime('%d-%m-%Y')}")
     headers = {
@@ -431,108 +721,54 @@ def _fii_dii_archive_window(sess, start: datetime, end: datetime) -> pd.DataFram
         "Referer": "https://www.nseindia.com/reports/fii-dii",
         "X-Requested-With": "XMLHttpRequest",
     }
-    backoffs = (2.0, 5.0, 12.0)
-    last_exc: BaseException | None = None
-    for attempt in range(3):
-        try:
-            r = sess.get(url, timeout=25, headers=headers)
-            if r.status_code >= 500:
-                raise RuntimeError(f"HTTP {r.status_code}")
-            r.raise_for_status()
-            payload = r.json()
-            rows = payload if isinstance(payload, list) else (payload.get("data") or [])
-            out = _normalize_nse_fiidii_rows(rows)
-            if out.empty:
-                raise RuntimeError("NSE historical API returned empty payload")
-            return out
-        except Exception as e:
-            last_exc = e
-            if attempt < len(backoffs) - 1:
-                time.sleep(backoffs[attempt])
-                _nse_warmup(sess)      # a 503 usually means the session was rejected
-    raise RuntimeError(f"{last_exc}")
-
-
-def _fii_dii_from_nse_archive(sess, days: int = 90) -> pd.DataFrame:
-    """NSE historical FII/DII backfill, requested in windows rather than one shot.
-
-    WHY WINDOWS
-    -----------
-    This asked for the whole ~90-day range in a single request, which NSE answers
-    with HTTP 503 far more often than it answers a narrow one. Because any 503
-    failed the entire source, the backfill never ran — and since `nse-api` only
-    returns the latest row or two, the cache accrued permanent holes (12 of 30
-    business days missing in the observed run).
-
-    Windows also make failure partial instead of total: if three of five windows
-    succeed, three windows' worth of gaps get filled rather than none. Whatever is
-    still missing is retried on the next run, so the cache converges over time.
-    """
-    _nse_warmup(sess)
-    end = datetime.now()
-    start = end - timedelta(days=days)
-
-    window = timedelta(days=30)
-    collected: list[pd.DataFrame] = []
-    failures: list[str] = []
-    cursor = start
-    while cursor < end:
-        stop = min(cursor + window, end)
-        try:
-            collected.append(_fii_dii_archive_window(sess, cursor, stop))
-        except Exception as e:
-            failures.append(f"{cursor:%d-%b}–{stop:%d-%b}: {e}")
-        cursor = stop + timedelta(days=1)
-        time.sleep(1.0)   # pacing: consecutive rapid calls invite the next 503
-
-    if not collected:
-        raise RuntimeError(
-            f"NSE historical FII/DII failed for all {len(failures)} window(s): "
-            f"{failures[0] if failures else 'unknown'}")
-
-    if failures:
-        _log(f"fii_dii: backfilled {len(collected)} of "
-             f"{len(collected) + len(failures)} windows "
-             f"({len(failures)} still failing — will retry next run)")
-
-    out = pd.concat(collected, ignore_index=True)
-    return out.drop_duplicates(subset=["Date"], keep="last")
+    r = sess.get(url, timeout=25, headers=headers)
+    if r.status_code >= 500:
+        raise RuntimeError(f"HTTP {r.status_code} — historical NSE endpoint is blocked")
+    r.raise_for_status()
+    payload = r.json()
+    rows = payload if isinstance(payload, list) else (payload.get("data") or [])
+    out = _normalize_nse_fiidii_rows(rows)
+    if out.empty:
+        raise RuntimeError("NSE historical API returned empty payload")
+    return out
 
 
 def _report_flow_coverage(feed: str, target: Path, backfill_ok: bool) -> None:
-    """Report gaps in a daily-flow cache instead of just saying "refreshed".
+    """Report honest coverage for institutional flows and bulk deals.
 
-    `nse-api` returns only the latest row or two; `nse-archive` is the source that
-    backfills ~90 days. When the archive fails (HTTP 503 is common) the cache only
-    gains a row on days the API happens to answer, so it quietly accrues holes —
-    and "refreshed (N rows in cache)" reads like success either way.
-
-    A gappy flow series is not neutral: FII/DII is displayed as market context, and
-    a reader has no way to tell a genuine flat day from a day that was never
-    fetched. So say it out loud.
+    Bulk-deal archives describe one day only. A missing row is therefore not a
+    no-deal day unless that day was successfully fetched and returned zero rows.
     """
     try:
-        df = pd.read_csv(target)
-        if df.empty or "Date" not in df.columns:
+        df = _read_csv_guarded(target, f"{feed} coverage")
+        if df is None or "Date" not in df.columns:
             return
         dates = pd.to_datetime(df["Date"], errors="coerce").dropna().dt.normalize()
         if dates.empty:
             return
         first, last = dates.min(), dates.max()
-        # Business days are an approximation (NSE holidays are not modelled), so
-        # only flag a gap that is too large to be explained by holidays.
         expected = pd.bdate_range(first, last)
         have = set(dates.dt.date)
         missing = [d for d in expected if d.date() not in have]
         stale_days = (pd.Timestamp.now().normalize() - last).days
-
+        if feed == "bulk_deals":
+            success_dates = set(_fetch_success_dates(target.parent, feed))
+            if missing:
+                known_empty = [d for d in missing if d.strftime("%Y-%m-%d") in success_dates]
+                unknown = len(missing) - len(known_empty)
+                if known_empty:
+                    _log(f"[gap] {feed}: {len(known_empty)} fetched day(s) had no deals")
+                if unknown:
+                    _log(f"[gap] {feed}: {unknown} day(s) unfetched — not labelled no-deal")
+            if stale_days >= 3:
+                _log(f"[gap] {feed}: newest row is {last:%Y-%m-%d} ({stale_days} days old)")
+            return
         if missing and len(missing) > max(2, 0.15 * len(expected)):
             _log(f"[gap] {feed}: {len(missing)} of {len(expected)} business days "
                  f"missing between {first:%Y-%m-%d} and {last:%Y-%m-%d}")
             if not backfill_ok:
-                _log(f"      the backfill source was unavailable this run, so only "
-                     f"the latest row could be added. Gaps will persist until it "
-                     f"succeeds — treat {feed} as incomplete context, not a series.")
+                _log(f"      no range/backfill source was available; only latest-day "
+                     f"data can be added. Treat {feed} as incomplete context, not a series.")
         if stale_days >= 3:
             _log(f"[gap] {feed}: newest row is {last:%Y-%m-%d} ({stale_days} days old)")
     except Exception as exc:
@@ -545,43 +781,55 @@ def fetch_fii_dii(data_dir: Path, keep_days: int = 90, force: bool = False) -> b
         _log(f"fii_dii_daily.csv fresh (<{FRESH_FLOW_HOURS}h) — skipping fetch")
         return True
     sess = _requests_session()
-    # Order matters: NSE first (official + free). Union what we can — nse-api
-    # only returns 1–2 rows, nse-archive backfills ~90 days.
-    sources = [
-        ("nse-api",      _fii_dii_from_nse_api),
-        ("nse-archive",  lambda s: _fii_dii_from_nse_archive(s, days=keep_days)),
+    # The official latest-only endpoint is the only source measured working.
+    # Historical NSE is retained as a once-per-day re-probe, not as a retry loop.
+    sources = _filter_known_unavailable("fii_dii", [
+        ("nse-api", _fii_dii_from_nse_api),
+        ("nse-archive", lambda s: _fii_dii_from_nse_archive(s, days=keep_days)),
+        ("nselib", _fii_dii_from_nselib),
         ("moneycontrol", _fii_dii_from_moneycontrol),
-        ("groww",        _fii_dii_from_groww),
-    ]
+        ("groww", _fii_dii_from_groww),
+    ])
     collected: list[pd.DataFrame] = []
     used: list[str] = []
     skipped: list[str] = []
     for name, fn in sources:
+        if name == "nse-archive" and _source_blocked_today(data_dir, "fii_dii", name):
+            _log("[try] fii_dii: 'nse-archive' skipped — blocked earlier today (503 block page)")
+            skipped.append(name)
+            continue
         try:
             out = fn(sess)
             if out is None or out.empty:
                 raise RuntimeError("empty result")
             collected.append(out)
             used.append(name)
+            _source_health_record(data_dir, "fii_dii", name, "ok")
             _log(f"fii_dii source '{name}' ok ({len(out)} rows)")
-            # If archive succeeded we already have ~90 days; stop hammering fallbacks.
             if name == "nse-archive":
                 break
         except Exception as e:
+            _source_health_record(data_dir, "fii_dii", name, "failed")
             _log_source_attempt("fii_dii", name, e)
             skipped.append(name)
-            continue
     _log_source_summary("fii_dii", used, skipped)
     if not collected:
-        _warn("fii_dii (all sources)",
-              RuntimeError("nse-api + nse-archive + moneycontrol + groww all failed"))
+        _warn("fii_dii (all sources)", RuntimeError("no reachable FII/DII source succeeded"))
         return target.exists()
-    union = pd.concat(collected, ignore_index=True)
-    merged = _merge_dated(target, union, "Date", keep_days)
+    merged = _merge_dated(target, pd.concat(collected, ignore_index=True), "Date", keep_days)
     data_dir.mkdir(parents=True, exist_ok=True)
     merged.to_csv(target, index=False)
     _log(f"fii_dii_daily.csv refreshed via {'+'.join(used)} ({len(merged)} rows in cache)")
     _report_flow_coverage("fii_dii", target, backfill_ok="nse-archive" in used)
+    latest = pd.to_datetime(merged["Date"], errors="coerce").dropna().max()
+    last_business = pd.Timestamp.now().normalize()
+    while last_business.weekday() >= 5:
+        last_business -= pd.Timedelta(days=1)
+    if pd.notna(latest) and latest.normalize() < last_business:
+        _log("[fetch][warn] fii_dii: latest published flow is older than the last completed business day.")
+        _log("[fetch][warn] NSE publishes FII/DII after market processing; today's flow may not be available yet.")
+        _log("[fetch][warn] Run the workflow after 19:00 IST to capture the latest published day.")
+        _log("[fetch][warn] A missed day cannot be recovered from the latest-only endpoint; treat the series as incomplete.")
     return True
 
 
@@ -712,25 +960,28 @@ def fetch_bulk_deals(data_dir: Path, days: int = 30, keep_days: int = 60,
         _log(f"bulk_deals.csv fresh (<{FRESH_FLOW_HOURS}h) — skipping fetch")
         return True
     sess = _requests_session()
-    sources = [
+    sources = _filter_known_unavailable("bulk_deals", [
         ("nse-archives", lambda: _bulk_from_nse_archive(sess)),
-        ("nse-api",      lambda: _bulk_from_nse_api(sess, days)),
-        ("bse",          lambda: _bulk_from_bse(sess)),
-    ]
+        ("nse-api", lambda: _bulk_from_nse_api(sess, days)),
+        ("nselib", lambda: _bulk_from_nselib(sess, days)),
+        ("bse", lambda: _bulk_from_bse(sess)),
+    ])
     for name, fn in sources:
         try:
             out = fn()
+            if out is None or out.empty:
+                raise RuntimeError("empty result")
             merged = _merge_dated(target, out, "Date", keep_days)
             data_dir.mkdir(parents=True, exist_ok=True)
             merged.to_csv(target, index=False)
+            _source_health_record(data_dir, "bulk_deals", name, "ok")
             _log(f"bulk_deals.csv refreshed via {name} ({len(out)} new rows, {len(merged)} in cache)")
-            _report_flow_coverage("bulk_deals", target,
-                                  backfill_ok=name in ("nse-archives", "bse"))
+            _report_flow_coverage("bulk_deals", target, backfill_ok=False)
             return True
         except Exception as e:
-            _log(f"bulk_deals source '{name}' failed: {type(e).__name__}: {e}")
-            continue
-    _warn("bulk_deals (all sources)", RuntimeError("nse-archives + nse-api + bse all failed"))
+            _source_health_record(data_dir, "bulk_deals", name, "failed")
+            _log_source_attempt("bulk_deals", name, e)
+    _warn("bulk_deals (all sources)", RuntimeError("all configured bulk-deals sources failed"))
     return target.exists()
 
 
@@ -759,81 +1010,125 @@ def _shortlist_symbols(base: Path, cap: int = 120) -> list[str]:
     return []
 
 
+def _universe_symbols(base: Path) -> list[str]:
+    """Return the full configured universe; never the capped fetch shortlist."""
+    p = Path(base) / "config.csv"
+    try:
+        df = pd.read_csv(p)
+        if "Symbol" not in df.columns:
+            return []
+        values = df["Symbol"].astype(str).str.strip()
+        return list(dict.fromkeys(v for v in values if v and v.lower() != "nan"))
+    except Exception:
+        return []
+
+
+def _fundamental_output_from_raw(raw: pd.DataFrame, build_quality_score) -> pd.DataFrame:
+    scored = build_quality_score(raw)
+    merged_cols = scored.merge(
+        raw[[c for c in ("Symbol", "PE", "ROE", "DebtToEquity",
+                         "EarningsGrowth", "ProfitMargin") if c in raw.columns]],
+        on="Symbol", how="left", suffixes=("", "_raw"))
+    def numeric(name: str) -> pd.Series:
+        value = merged_cols.get(name)
+        if value is None:
+            return pd.Series(pd.NA, index=merged_cols.index, dtype="object")
+        return pd.to_numeric(value, errors="coerce")
+    return pd.DataFrame({
+        "Symbol":            merged_cols["Symbol"].astype(str).str.strip(),
+        "Fundamental_Score": numeric("Fundamental_Score"),
+        "Fundamental_Coverage": numeric("Fundamental_Coverage"),
+        "ROE_TTM":           numeric("ROE"),
+        "DebtToEquity":      numeric("DebtToEquity"),
+        "EPS_Growth_YoY":    numeric("EarningsGrowth"),
+        "PE_TTM":            numeric("PE"),
+        "PEG":               pd.NA,
+        "ProfitMargin":      numeric("ProfitMargin"),
+        "PromoterPledgePct": pd.NA,
+        "PE_Self_Median_3Y": pd.NA,
+    }).drop_duplicates(subset=["Symbol"], keep="last")
+
+
 def fetch_fundamentals(data_dir: Path, base: Path, cap: int = 120,
                        force: bool = False) -> bool:
     target = data_dir / "fundamentals_latest.csv"
     if not force and _is_fresh(target, FRESH_FUND_HOURS):
         _log(f"fundamentals_latest.csv fresh (<{FRESH_FUND_HOURS}h) — skipping fetch")
-        _write_health_row(data_dir, "fundamentals",
-                          _health_status_from_age(_cache_last_date(target, "Date")
-                                                   or datetime.now().strftime("%Y-%m-%d"),
-                                                   warn_days=8, fail_days=30),
-                          _cache_row_count(target), None,
-                          "cache fresh, skipped fetch")
+        _write_health_row(data_dir, "fundamentals", _health_status_from_age(
+            _cache_last_date(target, "As_Of") or datetime.now().strftime("%Y-%m-%d"),
+            warn_days=8, fail_days=30), _cache_row_count(target), None,
+            "cache fresh, skipped fetch")
         return True
-    symbols = _shortlist_symbols(base, cap=cap)
-    if not symbols:
+    shortlist = _shortlist_symbols(base, cap=cap)
+    universe = _universe_symbols(base)
+    if not shortlist:
         _log("fundamentals: no shortlist yet — will populate on next run after scoring")
         _write_health_row(data_dir, "fundamentals", "amber", 0, None,
                           "no shortlist yet — run scoring first")
         return target.exists()
+    cached = _read_csv_guarded(target, "fundamentals cache")
+    if cached is not None and "Symbol" in cached.columns:
+        cached["Symbol"] = cached["Symbol"].astype(str).str.strip()
+    else:
+        cached = pd.DataFrame()
     try:
         from core.fundamental_factor import fetch_fundamentals as _yf_fetch, build_quality_score
-        _log(f"fundamentals: yfinance fetch for {len(symbols)} symbols (~1s each, be patient)")
-        raw = _yf_fetch(symbols, sleep=0.15)
-        # If yfinance returned nothing usable, still emit a Symbol/Fundamental_Score
-        # scaffold so the shadow engine and downstream code find the expected shape.
+        _log(f"fundamentals: yfinance fetch for {len(shortlist)} symbols (~1s each, be patient)")
+        raw = _yf_fetch(shortlist, sleep=0.15)
         if raw is None or raw.empty:
-            scaffold = pd.DataFrame({
-                "Symbol": [str(s) for s in symbols],
-                "Fundamental_Score": [pd.NA] * len(symbols),
-                "Fundamental_Coverage": [0.0] * len(symbols),
+            fresh = pd.DataFrame({
+                "Symbol": [str(s) for s in shortlist],
+                "Fundamental_Score": [pd.NA] * len(shortlist),
+                "Fundamental_Coverage": [0.0] * len(shortlist),
             })
-            data_dir.mkdir(parents=True, exist_ok=True)
-            scaffold.to_csv(target, index=False)
-            _log(f"fundamentals_latest.csv scaffold written ({len(scaffold)} symbols, all NaN)")
-            _write_health_row(data_dir, "fundamentals", "amber",
-                              len(scaffold), None,
-                              "yfinance returned empty for NSE tickers")
-            return True
-        scored = build_quality_score(raw)
-        # Keep raw component columns alongside the score for transparency.
-        merged_cols = scored.merge(
-            raw[[c for c in ("Symbol", "PE", "ROE", "DebtToEquity",
-                             "EarningsGrowth", "ProfitMargin") if c in raw.columns]],
-            on="Symbol", how="left", suffixes=("", "_raw"))
-        # Alias to overlay schema (fundamentals_overlay.py expects these names).
-        out = pd.DataFrame({
-            "Symbol":            merged_cols["Symbol"].astype(str),
-            "Fundamental_Score": pd.to_numeric(merged_cols.get("Fundamental_Score"), errors="coerce"),
-            "Fundamental_Coverage": pd.to_numeric(merged_cols.get("Fundamental_Coverage"), errors="coerce"),
-            "ROE_TTM":           pd.to_numeric(merged_cols.get("ROE"), errors="coerce"),
-            "DebtToEquity":      pd.to_numeric(merged_cols.get("DebtToEquity"), errors="coerce"),
-            "EPS_Growth_YoY":    pd.to_numeric(merged_cols.get("EarningsGrowth"), errors="coerce"),
-            "PE_TTM":            pd.to_numeric(merged_cols.get("PE"), errors="coerce"),
-            "PEG":               pd.NA,
-            "ProfitMargin":      pd.to_numeric(merged_cols.get("ProfitMargin"), errors="coerce"),
-            "PromoterPledgePct": pd.NA,
-            "PE_Self_Median_3Y": pd.NA,
-        }).drop_duplicates(subset=["Symbol"], keep="last")
+            fetched_count = 0
+        else:
+            fresh = _fundamental_output_from_raw(raw, build_quality_score)
+            fetched_count = int(fresh["Fundamental_Score"].notna().sum())
+        today = datetime.now().strftime("%Y-%m-%d")
+        if not cached.empty:
+            # Fresh non-null cells win; null/failed lookups keep the prior value.
+            all_cols = list(dict.fromkeys([*cached.columns, *fresh.columns]))
+            combined = cached.reindex(columns=all_cols).set_index("Symbol")
+            incoming = fresh.reindex(columns=all_cols).set_index("Symbol")
+            # combine_first adds newly fetched symbols; update then replaces only
+            # non-null incoming cells, so transient misses cannot erase history.
+            out_index = combined.index.union(incoming.index)
+            combined = combined.reindex(index=out_index).combine_first(incoming.reindex(index=out_index))
+            combined.update(incoming.reindex(index=out_index))
+            out = combined.reset_index()
+        else:
+            out = fresh.copy()
+        # The cache is bounded by the full config universe, not today's 120-symbol shortlist.
+        allowed = set(universe) if universe else set(shortlist)
+        out = out[out["Symbol"].isin(allowed)].copy()
+        if "As_Of" not in out.columns:
+            out["As_Of"] = pd.NA
+        if "Fundamentals_Stale_Days" not in out.columns:
+            out["Fundamentals_Stale_Days"] = pd.NA
+        fresh_symbols = set(fresh.loc[fresh["Fundamental_Score"].notna(), "Symbol"])
+        out.loc[out["Symbol"].isin(fresh_symbols), "As_Of"] = today
+        parsed = pd.to_datetime(out["As_Of"], errors="coerce")
+        out["Fundamentals_Stale_Days"] = (pd.Timestamp(today) - parsed).dt.days
+        out.loc[out["As_Of"].isna(), "Fundamentals_Stale_Days"] = pd.NA
+        out = out.drop_duplicates("Symbol", keep="last").sort_values("Symbol").reset_index(drop=True)
         data_dir.mkdir(parents=True, exist_ok=True)
         out.to_csv(target, index=False)
-        scored_ct = int(out["Fundamental_Score"].notna().sum())
-        _log(f"fundamentals_latest.csv refreshed ({len(out)} rows, {scored_ct} scored)")
-        status = "green" if scored_ct >= max(5, len(out) // 4) else "amber"
-        _write_health_row(data_dir, "fundamentals", status,
-                          len(out), datetime.now().strftime("%Y-%m-%d"),
-                          f"{scored_ct}/{len(out)} symbols scored"
-                          + ("" if scored_ct else " — yfinance empty for NSE tickers"))
+        reused = int((out["Fundamental_Score"].notna()).sum()) - fetched_count
+        reused = max(0, reused)
+        never = int(out["Fundamental_Score"].isna().sum())
+        _log(f"fundamentals: {fetched_count} fetched, {reused} reused from cache, {never} never populated")
+        status = "green" if int(out["Fundamental_Score"].notna().sum()) >= max(5, len(out) // 4) else "amber"
+        _write_health_row(data_dir, "fundamentals", status, len(out), today,
+                          f"{int(out['Fundamental_Score'].notna().sum())}/{len(out)} symbols scored")
         return True
     except Exception as e:
         _warn("fundamentals (yfinance)", e)
         _write_health_row(data_dir, "fundamentals",
-                          "red" if not target.exists() else "amber",
+                          "red" if cached.empty else "amber",
                           _cache_row_count(target), None,
                           f"fetch failed: {type(e).__name__}")
-        return target.exists()
-
+        return target.exists() or not cached.empty
 
 
 # =========================================================================

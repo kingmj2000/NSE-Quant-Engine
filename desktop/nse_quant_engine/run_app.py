@@ -605,71 +605,56 @@ class Dashboard(QWidget):
         )
 
     def _refresh_optional_feeds(self):
-        """Run the optional-feed fetchers off the GUI thread.
+        """Fire the optional-CSV fetchers in a background thread and reload.
 
-        Uses a plain threading.Thread rather than a QThread. A QThread carries a
-        C++ object whose lifetime must be managed exactly; getting it wrong
-        produced "QThread: Destroyed while thread is still running", heap
-        corruption (0xc0000374) and later access violations in unrelated code.
-        This work is network + file IO and touches no Qt object, so it does not
-        need a QThread at all. Completion returns to the GUI thread through a
-        persistent signal bridge.
+        Re-entrancy guard: reassigning self._refresh_thread while the previous one
+        is still running drops the only reference to a LIVE QThread. Python then
+        collects it mid-run, Qt reports "QThread: Destroyed while thread is still
+        running", and the heap is corrupted — which surfaces later as an access
+        violation somewhere unrelated. Forcing a real fetch made the thread live
+        for minutes instead of milliseconds, so this went from theoretical to
+        routine.
         """
-        if getattr(self, "_refresh_busy", False):
+        prev = getattr(self, "_refresh_thread", None)
+        if prev is not None and prev.isRunning():
             self._emit_console("[fetch] a manual refresh is already running — ignoring this click")
             return
-
-        import threading
-
-        if getattr(self, "_refresh_bridge", None) is None:
-            self._refresh_bridge = _MainRefreshBridge()
-            self._refresh_bridge.done.connect(self._on_refresh_finished)
-
-        self._refresh_busy = True
         self._emit_console("[fetch] manual refresh requested — running in background")
+        from PySide6.QtCore import QThread, Signal
+        parent = self
 
-        def _work() -> None:
-            try:
-                if str(BASE) not in sys.path:
-                    sys.path.insert(0, str(BASE))
-                # force=True: a human pressed the button, so cache freshness must
-                # not override the request.
-                from core.optional_data_fetchers import refresh_all
-                refresh_all(BASE, force=True)
-            except Exception as exc:
-                print(f"[fetch] manual refresh failed: {type(exc).__name__}: {exc}",
-                      flush=True)
-            finally:
+        class _RefreshThread(QThread):
+            done_signal = Signal()
+            def run(self_inner):
                 try:
-                    self._refresh_bridge.done.emit()
-                except RuntimeError:
-                    pass
+                    if str(BASE) not in sys.path:
+                        sys.path.insert(0, str(BASE))
+                    # force=True: this ran because a human pressed "Refresh
+                    # optional feeds now". A manual request must override cache
+                    # freshness — the freshness window exists to stop redundant
+                    # AUTOMATIC fetches, not to ignore a deliberate one.
+                    from core.optional_data_fetchers import refresh_all
+                    refresh_all(BASE, force=True)
+                except Exception as e:
+                    print(f"[fetch] manual refresh failed: {e}", flush=True)
+                self_inner.done_signal.emit()
 
-        t = threading.Thread(target=_work, name="optional-feed-refresh", daemon=True)
+        t = _RefreshThread(self)
+        t.done_signal.connect(lambda: (parent._emit_console("[fetch] manual refresh done"),
+                                       parent.load_last_run()))
+        # Hold the reference until Qt confirms the thread finished, then let Qt
+        # delete it. Clearing earlier reintroduces the crash described above.
+        t.finished.connect(t.deleteLater)
         self._refresh_thread = t
         t.start()
-
-    def _on_refresh_finished(self) -> None:
-        self._refresh_busy = False
-        self._emit_console("[fetch] manual refresh done")
-        try:
-            self.load_last_run()
-        except Exception as exc:
-            print(f"[ui] post-refresh reload failed: {type(exc).__name__}: {exc}",
-                  flush=True)
 
     def wait_for_background_work(self, msec: int = 15000) -> bool:
         """Block until the manual-refresh thread finishes. True if idle."""
         t = getattr(self, "_refresh_thread", None)
-        if t is None or not t.is_alive():
+        if t is None or not t.isRunning():
             return True
-        t.join(msec / 1000.0)
-        return not t.is_alive()
-
-
-class _MainRefreshBridge(QObject):
-    """Carries "worker finished" from a plain Python thread to the GUI thread."""
-    done = Signal()
+        t.requestInterruption()
+        return bool(t.wait(msec))
 
 
 # ----------------------------- Run Drawer -----------------------------------
@@ -1341,6 +1326,14 @@ class MacroRotationView(QWidget):
                 "into data/ then re-run to activate.", "amber"))
         else:
             self._v.addWidget(_table_card(inst_df, "blue"))
+            flow_dates = pd.to_datetime(inst_df.get("Date"), errors="coerce").dropna().dt.normalize().unique()
+            if len(flow_dates) > 1:
+                expected = pd.bdate_range(min(flow_dates), max(flow_dates))
+                missing_count = sum(day.date() not in {d.date() for d in flow_dates} for day in expected)
+                if missing_count:
+                    self._v.addWidget(_empty_card(
+                        f"Incomplete series — {len(flow_dates)} of {len(expected)} business days on record. "
+                        "Gaps are missing data, not zero flow.", "amber"))
 
         # --- Regime tilt (Step 15) ---
         self._v.addWidget(_section_header("Regime tilt · regime_tilt_report.json  ·  inspired by Vibe Trading"))

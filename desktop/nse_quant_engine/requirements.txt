@@ -10,3 +10,7 @@ html5lib>=1.1
 PySide6>=6.6.0
 PySide6-Addons>=6.6.0
 
+# Optional adapter: latest/range availability depends on the installed nselib version.
+# The engine runs without nselib and continues through its other sources.
+nselib>=2.4.2
+

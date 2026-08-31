@@ -830,7 +830,11 @@ def build_nav_mappings(nav: pd.DataFrame) -> tuple[dict[str, str], dict[str, str
 
 
 def load_etf_universe() -> pd.DataFrame:
-    cfg = read_required_csv(CONFIG_CSV, produced_by="python universe_builder.py", dtype=str)
+    # config.csv is a genuine pipeline input, so this still raises — but with a
+    # message naming the file and the command that regenerates it, rather than a
+    # bare EmptyDataError from pandas when the file was written by a failed run.
+    cfg = read_required_csv(CONFIG_CSV, produced_by="python universe_builder.py",
+                            dtype=str)
     universe_col = "Universe_Group" if "Universe_Group" in cfg.columns else "Universe" if "Universe" in cfg.columns else None
     if universe_col is None:
         raise ValueError("config.csv needs Universe_Group or Universe column.")
