@@ -615,46 +615,60 @@ class Dashboard(QWidget):
         for minutes instead of milliseconds, so this went from theoretical to
         routine.
         """
-        prev = getattr(self, "_refresh_thread", None)
-        if prev is not None and prev.isRunning():
+        if getattr(self, "_refresh_busy", False):
             self._emit_console("[fetch] a manual refresh is already running — ignoring this click")
             return
+
+        import threading
+
+        if getattr(self, "_refresh_bridge", None) is None:
+            self._refresh_bridge = _MainRefreshBridge()
+            self._refresh_bridge.done.connect(self._on_refresh_finished)
+        self._refresh_busy = True
         self._emit_console("[fetch] manual refresh requested — running in background")
-        from PySide6.QtCore import QThread, Signal
-        parent = self
 
-        class _RefreshThread(QThread):
-            done_signal = Signal()
-            def run(self_inner):
+        def _work() -> None:
+            try:
+                if str(BASE) not in sys.path:
+                    sys.path.insert(0, str(BASE))
+                # force=True: a human pressed the button, so cache freshness must
+                # not override the request.
+                from core.optional_data_fetchers import refresh_all
+                refresh_all(BASE, force=True)
+            except Exception as exc:
+                print(f"[fetch] manual refresh failed: {type(exc).__name__}: {exc}",
+                      flush=True)
+            finally:
                 try:
-                    if str(BASE) not in sys.path:
-                        sys.path.insert(0, str(BASE))
-                    # force=True: this ran because a human pressed "Refresh
-                    # optional feeds now". A manual request must override cache
-                    # freshness — the freshness window exists to stop redundant
-                    # AUTOMATIC fetches, not to ignore a deliberate one.
-                    from core.optional_data_fetchers import refresh_all
-                    refresh_all(BASE, force=True)
-                except Exception as e:
-                    print(f"[fetch] manual refresh failed: {e}", flush=True)
-                self_inner.done_signal.emit()
+                    self._refresh_bridge.done.emit()
+                except RuntimeError:
+                    pass
 
-        t = _RefreshThread(self)
-        t.done_signal.connect(lambda: (parent._emit_console("[fetch] manual refresh done"),
-                                       parent.load_last_run()))
-        # Hold the reference until Qt confirms the thread finished, then let Qt
-        # delete it. Clearing earlier reintroduces the crash described above.
-        t.finished.connect(t.deleteLater)
+        t = threading.Thread(target=_work, name="optional-feed-refresh", daemon=True)
         self._refresh_thread = t
         t.start()
+
+    def _on_refresh_finished(self) -> None:
+        self._refresh_busy = False
+        self._emit_console("[fetch] manual refresh done")
+        try:
+            self.load_last_run()
+        except Exception as exc:
+            print(f"[ui] post-refresh reload failed: {type(exc).__name__}: {exc}",
+                  flush=True)
 
     def wait_for_background_work(self, msec: int = 15000) -> bool:
         """Block until the manual-refresh thread finishes. True if idle."""
         t = getattr(self, "_refresh_thread", None)
-        if t is None or not t.isRunning():
+        if t is None or not t.is_alive():
             return True
-        t.requestInterruption()
-        return bool(t.wait(msec))
+        t.join(msec / 1000.0)
+        return not t.is_alive()
+
+
+class _MainRefreshBridge(QObject):
+    """Carries "worker finished" from a plain Python thread to the GUI thread."""
+    done = Signal()
 
 
 # ----------------------------- Run Drawer -----------------------------------
@@ -1326,7 +1340,19 @@ class MacroRotationView(QWidget):
                 "into data/ then re-run to activate.", "amber"))
         else:
             self._v.addWidget(_table_card(inst_df, "blue"))
-            flow_dates = pd.to_datetime(inst_df.get("Date"), errors="coerce").dropna().dt.normalize().unique()
+            # Coverage caption is driven by the FII/DII series, which is what has
+            # gaps. inst_df is top5_institutional_flow.csv — one row per Top-5
+            # symbol, with no Date column at all, so `.get("Date")` returned None
+            # and pd.to_datetime(None).dropna() raised
+            # "'NoneType' object has no attribute 'dropna'", taking out the tab.
+            flow_dates = []
+            try:
+                _flow = pd.read_csv(BASE / "data" / "fii_dii_daily.csv")
+                if "Date" in _flow.columns:
+                    flow_dates = (pd.to_datetime(_flow["Date"], errors="coerce")
+                                  .dropna().dt.normalize().unique())
+            except Exception:
+                flow_dates = []
             if len(flow_dates) > 1:
                 expected = pd.bdate_range(min(flow_dates), max(flow_dates))
                 missing_count = sum(day.date() not in {d.date() for d in flow_dates} for day in expected)

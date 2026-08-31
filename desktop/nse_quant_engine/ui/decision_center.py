@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Callable
 
 import pandas as pd
-from PySide6.QtCore import Qt, Signal, QThread
+from PySide6.QtCore import Qt, Signal, QObject, QThread
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QFrame,
@@ -91,6 +91,16 @@ def _read_json(p: Path) -> dict:
         return {}
 
 
+class _RefreshBridge(QObject):
+    """Carries "worker finished" from a plain Python thread to the GUI thread.
+
+    Defined once at module scope and owned by the widget. Qt delivers a signal
+    emitted from a non-Qt thread via a queued connection, so the slot runs on the
+    GUI thread where touching widgets is safe.
+    """
+    done = Signal()
+
+
 class DecisionCenterView(QWidget):
     """Decision Center — the native Overview.
 
@@ -107,7 +117,10 @@ class DecisionCenterView(QWidget):
         self.OUT = out
         self.view = None  # for compat with self-check
         self._console_callback: Callable[[str], None] | None = None
-        self._refresh_thread: QThread | None = None
+        self._refresh_thread = None          # plain threading.Thread, not QThread
+        self._refresh_busy = False
+        self._refresh_bridge = _RefreshBridge()
+        self._refresh_bridge.done.connect(self._on_refresh_finished)
 
         root = QVBoxLayout(self); root.setContentsMargins(0, 0, 0, 0); root.setSpacing(10)
         self._scroll = QScrollArea(); self._scroll.setWidgetResizable(True)
@@ -516,59 +529,77 @@ class DecisionCenterView(QWidget):
         return wrap
 
     def _refresh_optional_feeds(self):
-        # Re-entrancy guard. Reassigning self._refresh_thread while the previous
-        # one is still running drops the only reference to a LIVE QThread; Python
-        # then garbage-collects it mid-run, which Qt reports as
-        # "QThread: Destroyed while thread is still running" and which corrupts
-        # the heap (0xc0000374) — surfacing later as an access violation in
-        # whatever unrelated code happens to allocate next.
-        #
-        # This became easy to hit once manual refresh started forcing a real
-        # fetch: the thread now lives for minutes instead of returning instantly.
-        prev = getattr(self, "_refresh_thread", None)
-        if prev is not None and prev.isRunning():
+        """Run the optional-feed fetchers off the GUI thread.
+
+        WHY NOT QThread
+        ---------------
+        This used a QThread subclass. Two lifetime hazards came with it, and both
+        appear in last_crash.log as "QThread: Destroyed while thread is still
+        running", heap corruption (0xc0000374), then an access violation in
+        unrelated code such as pathlib.read_text:
+
+          * `finished -> deleteLater` destroys the C++ object while `self` still
+            holds the Python wrapper, so any later isRunning() on that wrapper
+            touches freed memory.
+          * app exit, or a second click, could drop a live thread.
+
+        A plain `threading.Thread` has no C++ object to destroy, so the whole
+        class of fault disappears. This work is network + file IO and touches no
+        Qt object, so it never needed a QThread. Completion is marshalled back to
+        the GUI thread through a persistent signal bridge.
+        """
+        if getattr(self, "_refresh_busy", False):
             self._log("[fetch] a manual refresh is already running — ignoring this click")
             return
 
-        self._log("[fetch] manual refresh requested — running in background")
         import sys as _sys
+        import threading
+
         base = self.BASE
-        parent = self
+        if getattr(self, "_refresh_bridge", None) is None:
+            self._refresh_bridge = _RefreshBridge()
+            self._refresh_bridge.done.connect(self._on_refresh_finished)
+        self._refresh_busy = True
 
-        class _RefreshThread(QThread):
-            done_signal = Signal()
-            def run(self_inner):
+        def _work() -> None:
+            try:
+                if str(base) not in _sys.path:
+                    _sys.path.insert(0, str(base))
+                # force=True: a human pressed the button. A manual request must
+                # override cache freshness; the window exists to stop redundant
+                # AUTOMATIC fetches, not to ignore a deliberate one.
+                from core.optional_data_fetchers import refresh_all
+                refresh_all(base, force=True)
+            except Exception as exc:
+                print(f"[fetch] manual refresh failed: {type(exc).__name__}: {exc}",
+                      flush=True)
+            finally:
+                # Emitting a Qt signal from a non-Qt thread is safe; the slot runs
+                # on the GUI thread. Never call refresh() directly from here.
                 try:
-                    if str(base) not in _sys.path:
-                        _sys.path.insert(0, str(base))
-                    # force=True: this ran because a human pressed "Refresh
-                    # optional feeds now". A manual request must override cache
-                    # freshness — the freshness window exists to stop redundant
-                    # AUTOMATIC fetches, not to ignore a deliberate one.
-                    from core.optional_data_fetchers import refresh_all
-                    refresh_all(base, force=True)
-                except Exception as e:
-                    print(f"[fetch] manual refresh failed: {e}", flush=True)
-                self_inner.done_signal.emit()
+                    self._refresh_bridge.done.emit()
+                except RuntimeError:
+                    pass  # widget already destroyed — nothing to update
 
-        t = _RefreshThread(self)
-        t.done_signal.connect(lambda: (parent._log("[fetch] manual refresh done"),
-                                       parent.refresh()))
-        # Keep the reference until Qt says the thread has actually finished, then
-        # let Qt delete it. Clearing it any earlier reintroduces the crash above.
-        t.finished.connect(t.deleteLater)
+        self._log("[fetch] manual refresh requested — running in background")
+        t = threading.Thread(target=_work, name="optional-feed-refresh", daemon=True)
         self._refresh_thread = t
         t.start()
 
-    def wait_for_background_work(self, msec: int = 15000) -> bool:
-        """Block until the manual-refresh thread finishes. Returns True if idle.
+    def _on_refresh_finished(self) -> None:
+        """GUI-thread completion handler for the manual refresh."""
+        self._refresh_busy = False
+        self._log("[fetch] manual refresh done")
+        try:
+            self.refresh()
+        except Exception as exc:
+            print(f"[ui] post-refresh redraw failed: {type(exc).__name__}: {exc}",
+                  flush=True)
 
-        The main window calls this before accepting a close: quitting the app
-        while this thread runs destroys a live QThread, which is the fatal path
-        described in _refresh_optional_feeds.
-        """
+    def wait_for_background_work(self, msec: int = 15000) -> bool:
+        """Block until the manual-refresh thread finishes. True if idle."""
         t = getattr(self, "_refresh_thread", None)
-        if t is None or not t.isRunning():
+        if t is None or not t.is_alive():
             return True
-        t.requestInterruption()
-        return bool(t.wait(msec))
+        t.join(msec / 1000.0)
+        return not t.is_alive()
