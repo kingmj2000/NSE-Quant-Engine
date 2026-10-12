@@ -252,26 +252,63 @@ def _overlay_value_asof(name: str, value_col: str, symbol: str,
     return float(ser.iloc[-1])
 
 
+def _overlay_key(df: pd.DataFrame) -> tuple[str | None, pd.Timestamp | None]:
+    """(bare symbol, as-of date) for an overlay lookup.
+
+    Two defects lived here, and together they made the overlay alphas
+    permanently NaN — which is why delivery_momentum and iv_rank showed
+    n_dates=0 and sat at "NEW CANDIDATE" forever:
+
+    1. Symbol format. The price frame carries yfinance tickers ("KOTAKBANK.NS");
+       the overlay caches written by optional_data_fetchers store bare NSE
+       symbols ("KOTAKBANK"). `sym not in wide.columns` was therefore true for
+       every symbol, every date.
+    2. As-of. Once (1) is fixed, the old delivery alpha read the LATEST 20 days
+       of delivery% regardless of which historical date was being evaluated —
+       future data leaking into a past IC. The evaluator slices prices to
+       `Date <= d`; the overlay must be sliced to the same `d`.
+    """
+    if df is None or df.empty or "Symbol" not in df.columns:
+        return None, None
+    sym = str(df["Symbol"].iloc[-1]).strip().upper()
+    if sym.endswith(".NS"):
+        sym = sym[:-3]
+    asof = None
+    if "Date" in df.columns:
+        asof = pd.to_datetime(df["Date"], errors="coerce").max()
+        if pd.isna(asof):
+            asof = None
+    return (sym or None), asof
+
+
 def alpha_delivery_momentum(df: pd.DataFrame) -> float:
-    """5d mean delivery% minus 20d mean delivery%.  Reads cached NSE bhavcopy."""
-    sym = str(df["Symbol"].iloc[-1]) if "Symbol" in df.columns and not df.empty else None
+    """5d mean delivery% minus 20d mean delivery%, as of the slice's last date."""
+    sym, asof = _overlay_key(df)
     if not sym:
         return np.nan
     wide = _overlay_wide("delivery_pct_daily", "Delivery_Pct")
     if wide.empty or sym not in wide.columns:
         return np.nan
     ser = wide[sym].dropna()
+    if asof is not None:
+        ser = ser[ser.index <= asof]
     if len(ser) < 20:
         return np.nan
     return float(ser.tail(5).mean() - ser.tail(20).mean())
 
 
 def alpha_iv_rank(df: pd.DataFrame) -> float:
-    """Latest IV_Rank from cached NSE option-chain daily snapshot."""
-    sym = str(df["Symbol"].iloc[-1]) if "Symbol" in df.columns and not df.empty else None
+    """Latest IV_Rank from the cached NSE option-chain snapshot, as of the slice."""
+    sym, asof = _overlay_key(df)
     if not sym:
         return np.nan
-    return _overlay_value_asof("iv_rank_daily", "IV_Rank", sym)
+    return _overlay_value_asof("iv_rank_daily", "IV_Rank", sym, asof)
+
+
+# Overlay alphas that depend on optional NSE feeds rather than OHLCV. The
+# dashboard labels these from DATA (coverage + survivor status), not from a
+# hard-coded name list.
+CANDIDATE_ALPHAS: tuple[str, ...] = ("delivery_momentum", "iv_rank")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

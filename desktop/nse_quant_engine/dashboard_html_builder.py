@@ -590,30 +590,67 @@ def _alpha_evidence_payload(out_dir: Path) -> dict | None:
             pass
 
     # candidate records from promotion log
-    candidates = []
+    # Writer schema (core.alpha_evaluator.build_promotion_log, written by
+    # trade_plan_builder step 5): one record per (alpha x horizon) with keys
+    # standalone_ic / standalone_tstat / residual_ic / n_dates / decision
+    # ("promote" | "reject" | "no_data") / reason. The old reader looked for
+    # promote / promoted / t_stat / windows — keys the writer never emits — so
+    # even a real log would have rendered every row as "Baseline (no eval)".
     plog_entries = plog.get("candidates") or plog.get("entries") or []
     if isinstance(plog_entries, dict):
         plog_entries = [dict(v, alpha=k) for k, v in plog_entries.items()]
-    plog_names = set()
+    survivor_horizon = {}
+    for s_ in (surv.get("survivors") or []):
+        if isinstance(s_, dict) and s_.get("alpha"):
+            survivor_horizon[str(s_["alpha"])] = s_.get("horizon")
+
+    def _decision(e):
+        d = str(e.get("decision") or "").strip().lower()
+        if d == "promote":
+            return True
+        if d == "reject":
+            return False
+        if d == "no_data":
+            return None
+        p_ = e.get("promote", e.get("promoted"))     # tolerate legacy shape
+        return p_ if isinstance(p_, bool) else None
+
+    def _best(entries):
+        """One row per alpha: promoted first, then the survivor's own horizon,
+        then the largest |standalone IC|."""
+        def k(e):
+            dec = _decision(e)
+            ic = e.get("standalone_ic")
+            try:
+                ic = abs(float(ic))
+            except (TypeError, ValueError):
+                ic = -1.0
+            on_surv_h = e.get("horizon") == survivor_horizon.get(str(e.get("alpha")))
+            return (0 if dec is True else 1, 0 if on_surv_h else 1, -ic)
+        return sorted(entries, key=k)[0]
+
+    by_alpha: dict[str, list] = {}
     for e in plog_entries:
         if not isinstance(e, dict):
             continue
         nm = str(e.get("alpha") or e.get("name") or "").strip()
-        if not nm:
-            continue
-        plog_names.add(nm)
-        promoted = e.get("promote")
-        if promoted is None:
-            promoted = e.get("promoted")
-        reason = str(e.get("reason") or e.get("verdict") or "").strip()
+        if nm:
+            by_alpha.setdefault(nm, []).append(e)
+
+    candidates = []
+    plog_names = set(by_alpha)
+    for nm, entries in by_alpha.items():
+        e = _best(entries)
+        windows = e.get("n_dates", e.get("windows", e.get("n_windows")))
         candidates.append({
             "alpha": nm,
-            "standalone_ic": _num(e.get("standalone_ic") or e.get("mean_IC") or e.get("ic"), 4),
+            "horizon": e.get("horizon"),
+            "standalone_ic": _num(e.get("standalone_ic", e.get("mean_IC")), 4),
             "residual_ic": _num(e.get("residual_ic"), 4),
-            "tstat": _num(e.get("t_stat") or e.get("tstat"), 2),
-            "windows": _num(e.get("windows") or e.get("n_windows"), 0),
-            "promote": promoted,
-            "reason": reason,
+            "tstat": _num(e.get("standalone_tstat", e.get("t_stat", e.get("tstat"))), 2),
+            "windows": _num(windows, 0),
+            "promote": _decision(e),
+            "reason": str(e.get("reason") or "").strip(),
             "in_zoo": nm in survivor_names,
         })
 
@@ -623,18 +660,40 @@ def _alpha_evidence_payload(out_dir: Path) -> dict | None:
             continue
         candidates.append({
             "alpha": nm,
+            "horizon": rec.get("horizon"),
             "standalone_ic": _num(rec.get("mean_IC"), 4),
             "residual_ic": None,
             "tstat": _num(rec.get("t_stat") or rec.get("tstat"), 2),
-            "windows": _num(rec.get("n_windows") or rec.get("windows"), 0),
+            "windows": _num(rec.get("n_dates") or rec.get("n_windows") or rec.get("windows"), 0),
             "promote": True if nm in survivor_names else None,
             "reason": "In zoo — baseline survivor" if nm in survivor_names else "Baseline (no eval this run)",
             "in_zoo": nm in survivor_names,
         })
 
+    # Tag overlay candidates from DATA. The old JS hard-coded
+    # new Set(["delivery_momentum","iv_rank"]), so both rows said "NEW
+    # CANDIDATE" forever — including iv_rank, whose feed NSE blocks outright.
+    try:
+        from core.alpha_zoo import CANDIDATE_ALPHAS as _CANDS
+    except Exception:
+        _CANDS = ("delivery_momentum", "iv_rank")
+    for c in candidates:
+        tag = None
+        if c["alpha"] in _CANDS:
+            if c["in_zoo"] or c.get("promote") is True:
+                tag = None                       # graduated — no longer a candidate
+            elif not c.get("windows"):
+                tag = "NO DATA"                  # nothing to evaluate yet
+            else:
+                tag = "CANDIDATE"                # evaluated, not (yet) through the gate
+        c["tag"] = tag
+
     # sort: promoted first, then by |standalone_ic| desc
     def _rank(c):
-        p = 0 if c.get("promote") is True else (1 if c.get("promote") is None else 2)
+        if c.get("tag") == "NO DATA":
+            p = 3                                   # nothing to show — sink to the bottom
+        else:
+            p = 0 if c.get("promote") is True else (1 if c.get("promote") is None else 2)
         ic = abs(c.get("standalone_ic") or 0.0)
         return (p, -ic)
     candidates.sort(key=_rank)
@@ -718,23 +777,26 @@ def _payload() -> dict:
 
 
     # --- maturity metric cards (matured vs maturing) — filtered to 10-day slice ---
+    # forward_return_history.csv holds ONLY matured rows, so counting
+    # Net_Forward_Return.isna() there is structurally 0 -> "Awaiting 0" and a
+    # permanent 100% maturation rate. Pending signals live in
+    # forward_return_missing_signals.csv. decision_center / run_app already
+    # read through core.ui_readers; the HTML dashboard was never switched over.
     matured = maturing = 0
     total_signals = 0
-    if not forward.empty:
-        fwd = forward
-        if "Horizon_Days" in fwd.columns:
-            try:
-                fwd10 = fwd[fwd["Horizon_Days"] == 10]
-                if not fwd10.empty:
-                    fwd = fwd10
-            except Exception:
-                pass
-        total_signals = int(len(fwd))
-        if "Net_Forward_Return" in fwd.columns:
-            matured = int(fwd["Net_Forward_Return"].notna().sum())
-            maturing = int(fwd["Net_Forward_Return"].isna().sum())
-        else:
-            maturing = total_signals
+    try:
+        from core.ui_readers import read_maturation_progress as _rmp
+        _mp = _rmp(OUT, horizon=10)
+        matured = int(_mp.get("matured") or 0)
+        maturing = int(_mp.get("pending") or 0)
+        total_signals = int(_mp.get("total") or 0)
+    except Exception:
+        if not forward.empty:
+            fwd = forward
+            if "Horizon_Days" in fwd.columns:
+                fwd10 = fwd[pd.to_numeric(fwd["Horizon_Days"], errors="coerce") == 10]
+                fwd = fwd10 if not fwd10.empty else fwd
+            matured = total_signals = int(len(fwd))
     maturation_rate = round(100.0 * matured / total_signals, 1) if total_signals else 0.0
 
 
@@ -1133,6 +1195,8 @@ def _payload() -> dict:
                 "vix_pct": _num(macro_ctx.get("vix_pctile_252d"), 1),
                 "nifty_trend": _num(macro_ctx.get("nifty_50d_trend"), 2),
                 "above_50dma": macro_ctx.get("nifty_above_50dma"),
+                # absent key (older runs) => treat as unknown, not as measured
+                "inputs_ok": bool(macro_ctx.get("regime_inputs_available")),
             }
     except Exception:
         macro_payload = None
@@ -2054,7 +2118,7 @@ document.getElementById("excel").textContent = DATA.excel;
   const body = document.getElementById("marketCtx");
   const regimeColor = m.regime==="risk-on" ? "#3FB950" : (m.regime==="risk-off" ? "#F2B13C" : "#8A92A6");
   body.innerHTML = `
-    <div class="glass panel"><div class="sub">Regime</div><div style="font-size:20px;font-weight:600;color:${regimeColor}">${(m.regime||'neutral').toUpperCase()}</div></div>
+    <div class="glass panel"><div class="sub">Regime</div><div style="font-size:20px;font-weight:600;color:${regimeColor}">${(m.regime||'neutral').toUpperCase()}</div><div class="sub">${m.inputs_ok?'measured (VIX + Nifty)':'default — VIX / Nifty not available this run'}</div></div>
     <div class="glass panel"><div class="sub">India VIX</div><div style="font-size:20px;font-weight:600">${fmt(m.vix,'',2)}</div><div class="sub">${m.vix_pct==null?'':`${m.vix_pct}% percentile (252d)`}</div></div>
     <div class="glass panel"><div class="sub">Nifty 50D trend</div><div style="font-size:20px;font-weight:600">${fmt(m.nifty_trend,'%',2)}</div><div class="sub">${m.above_50dma===true?'Above 50-DMA':(m.above_50dma===false?'Below 50-DMA':'—')}</div></div>
     <div class="glass panel"><div class="sub">Read</div><div class="sub" style="margin-top:6px">Sentiment veto and horizon optimizer act only on the top-5 candidates; this strip is the whole-market backdrop.</div></div>`;
@@ -2086,7 +2150,9 @@ document.getElementById("excel").textContent = DATA.excel;
     const mT  = ev.min_tstat==null ? "—" : Number(ev.min_tstat).toFixed(2);
     const mR  = ev.min_residual_ic==null ? "—" : Number(ev.min_residual_ic).toFixed(3);
     cap.innerHTML = `Survivor gate: IC &ge; <b>${mIC}</b>, t-stat &ge; <b>${mT}</b>, residual IC &ge; <b>${mR}</b>. New candidates enter live scoring only after clearing all three.`;
-    const newSet = new Set(["delivery_momentum","iv_rank"]);
+    const tagHtml = (t) => !t ? '' : (t === 'NO DATA'
+        ? ' <span class="azchip dim">NO DATA</span>'
+        : ' <span class="aznew">CANDIDATE</span>');
     const chipFor = (r) => {
       if(r.promote === true) return '<span class="azchip green">Promoted</span>';
       if(r.promote === false){
@@ -2094,6 +2160,7 @@ document.getElementById("excel").textContent = DATA.excel;
         if(belowResidual) return '<span class="azchip amber">Watch — below residual gate</span>';
         return '<span class="azchip red">Rejected</span>';
       }
+      if(r.tag === 'NO DATA') return '<span class="azchip dim">Not evaluable</span>';
       return '<span class="azchip dim">Baseline (no eval)</span>';
     };
     const fmtIC = v => (v==null) ? '&mdash;' : (v>=0?'+':'') + Number(v).toFixed(3);
@@ -2103,7 +2170,7 @@ document.getElementById("excel").textContent = DATA.excel;
         .map(h=>`<th>${h}</th>`).join('')
       + '</tr></thead><tbody>';
     ev.rows.forEach(r => {
-      const nameCell = `${r.alpha}${newSet.has(r.alpha) ? ' <span class="aznew">NEW CANDIDATE</span>' : ''}`;
+      const nameCell = `${r.alpha}${tagHtml(r.tag)}`;
       const reason = r.reason ? `<div class="sub" style="font-size:10.5px;margin-top:2px">${r.reason}</div>` : '';
       html += `<tr>
         <td>${nameCell}${reason}</td>

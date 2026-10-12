@@ -86,26 +86,34 @@ def evaluate_alphas(prices_long: pd.DataFrame,
                     horizons: Iterable[int] = DEFAULT_HORIZONS,
                     eval_days: int = DEFAULT_EVAL_DAYS,
                     folds: int = DEFAULT_FOLDS,
-                    max_dates: int = 20) -> pd.DataFrame:
+                    max_dates: int = 20,
+                    return_panels: bool = False):
     """Return per-(alpha × horizon) IC statistics across walk-forward folds.
 
     `max_dates` bounds the compute cost: we sample up to that many evaluation
     dates evenly across the eval window (default 20 dates × 15 alphas × 3
     horizons = 900 IC points — fast on pandas).
+
+    `return_panels=True` returns `(ic_df, panels, fwd)` so the caller can build
+    the residual-IC promotion log from the SAME panels instead of recomputing
+    20 x universe x alphas a second time. Default keeps the old return type.
     """
+    def _out(frame, panels=None, fwd=None):
+        return (frame, panels or {}, fwd or {}) if return_panels else frame
+
     cols = ["alpha", "horizon", "n_dates", "mean_IC", "std_IC",
             "t_stat", "hit_rate"]
     if prices_long is None or prices_long.empty:
-        return pd.DataFrame(columns=cols)
+        return _out(pd.DataFrame(columns=cols))
 
     wide = _wide_closes(prices_long)
     if wide.empty or wide.shape[0] < max(horizons) + 20:
-        return pd.DataFrame(columns=cols)
+        return _out(pd.DataFrame(columns=cols))
 
     dates = wide.index.sort_values()
     tail = dates[-eval_days:] if len(dates) > eval_days else dates
     if len(tail) < 30:
-        return pd.DataFrame(columns=cols)
+        return _out(pd.DataFrame(columns=cols))
 
     step = max(1, len(tail) // max_dates)
     eval_dates = list(tail[::step])[-max_dates:]
@@ -113,7 +121,7 @@ def evaluate_alphas(prices_long: pd.DataFrame,
     alpha_names = list(alpha_zoo.ALPHAS.keys())
     panels = _alpha_panel_per_date(prices_long, eval_dates, alpha_names)
     if not panels:
-        return pd.DataFrame(columns=cols)
+        return _out(pd.DataFrame(columns=cols))
 
     fwd = {h: _fwd_returns(wide, h) for h in horizons}
     rows = []
@@ -140,8 +148,9 @@ def evaluate_alphas(prices_long: pd.DataFrame,
                          "mean_IC": round(m, 4), "std_IC": round(sd, 4),
                          "t_stat": round(t, 3) if pd.notna(t) else np.nan,
                          "hit_rate": round(hit, 3)})
-    return pd.DataFrame(rows, columns=cols).sort_values(
+    result = pd.DataFrame(rows, columns=cols).sort_values(
         ["horizon", "mean_IC"], ascending=[True, False]).reset_index(drop=True)
+    return _out(result, panels, fwd)
 
 
 def promote_alphas(eval_df: pd.DataFrame,
@@ -258,7 +267,16 @@ def build_promotion_log(eval_df: pd.DataFrame,
                            and pd.notna(standalone_t) and abs(standalone_t) >= min_tstat)
         residual_pass = pd.notna(mean_resid) and mean_resid >= float(min_residual_ic)
 
-        if standalone_pass and residual_pass:
+        n_dates = int(r["n_dates"]) if "n_dates" in r and pd.notna(r["n_dates"]) else 0
+        if pd.isna(standalone_ic):
+            # No IC at all is not a failed test — it is a test that could not be
+            # run (feed empty, or too few eval dates inside its coverage).
+            # Recording it as "reject: failed gate" would be the exact
+            # couldn't-check-so-call-it-a-result defect this repo keeps hitting.
+            decision, reason = "no_data", ("no feed data in the eval window" if n_dates == 0
+                                            else f"insufficient coverage — only {n_dates} "
+                                                 "usable eval date(s) so far")
+        elif standalone_pass and residual_pass:
             decision, reason = "promote", "passed standalone + residual gates"
         elif not standalone_pass:
             decision, reason = "reject", "failed standalone IC or t-stat gate"
@@ -271,6 +289,7 @@ def build_promotion_log(eval_df: pd.DataFrame,
             "standalone_ic":   None if pd.isna(standalone_ic) else round(standalone_ic, 4),
             "standalone_tstat": None if pd.isna(standalone_t) else round(standalone_t, 3),
             "residual_ic":     None if pd.isna(mean_resid) else round(mean_resid, 4),
+            "n_dates": n_dates,
             "n_residual_dates": len(resid_ics),
             "decision": decision,
             "reason":   reason,

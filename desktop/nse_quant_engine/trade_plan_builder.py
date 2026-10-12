@@ -56,6 +56,7 @@ TOP5_HORIZON_CSV = OUTPUT_DIR / "top5_horizon.csv"
 MACRO_CTX_JSON = OUTPUT_DIR / "macro_context.json"
 ALPHA_IC_CSV = OUTPUT_DIR / "alpha_zoo_ic_report.csv"
 ALPHA_SURVIVORS_JSON = OUTPUT_DIR / "alpha_zoo_survivors.json"
+ALPHA_PROMOTION_LOG_JSON = OUTPUT_DIR / "alpha_promotion_log.json"
 RAW_PRICES = BASE_DIR / "data" / "raw_prices_latest.csv"
 TOP5_FUND_CSV = OUTPUT_DIR / "top5_fundamentals.csv"
 TOP5_SIZING_CSV = OUTPUT_DIR / OP.TOP5_POSITION_SIZING_CSV
@@ -683,7 +684,11 @@ def _emit_horizon_sentiment_alpha(plan: pd.DataFrame) -> None:
     if getattr(C, "MACRO_CONTEXT_ON", True):
         try:
             from core import sentiment_overlay as sent
-            macro = sent.macro_tape_score(prices)
+            # ^NSEI / ^INDIAVIX are not in raw_prices_latest.csv (candidate
+            # universe only), so passing `prices` alone made VIX and Nifty
+            # trend structurally null. Read them from their own cache.
+            _tape = sent.load_index_tape(DATA_DIR)
+            macro = sent.macro_tape_score(_tape if not _tape.empty else prices)
             import json as _j
             # Carry the PRIOR run's regime forward. core/daily_changes.py reads
             # `previous_regime` to emit `regime_change`, and nothing was writing
@@ -710,11 +715,12 @@ def _emit_horizon_sentiment_alpha(plan: pd.DataFrame) -> None:
     if getattr(C, "ALPHA_ZOO_ON", True):
         try:
             from core import alpha_evaluator as ae
-            ic = ae.evaluate_alphas(
+            ic, _panels, _fwd = ae.evaluate_alphas(
                 prices,
                 horizons=(5, 10, 21),
                 eval_days=int(getattr(C, "ALPHA_EVAL_DAYS", 250)),
                 folds=int(getattr(C, "ALPHA_EVAL_FOLDS", 4)),
+                return_panels=True,
             )
             if not ic.empty:
                 ic.to_csv(ALPHA_IC_CSV, index=False)
@@ -733,6 +739,29 @@ def _emit_horizon_sentiment_alpha(plan: pd.DataFrame) -> None:
                     encoding="utf-8")
                 print(f"[vibe] Saved: {ALPHA_IC_CSV.name} + {ALPHA_SURVIVORS_JSON.name} "
                       f"({len(survivors)} survivors)")
+
+                # alpha_promotion_log.json — the residual-IC verdict per alpha.
+                # build_promotion_log() existed and the dashboard read the file,
+                # but no step ever wrote it, so every Alpha Zoo row showed
+                # "Baseline (no eval)" and the footer "not yet available".
+                # REPORT ONLY: nothing in scoring reads this file.
+                try:
+                    from datetime import datetime as _dt
+                    _min_ic = float(getattr(C, "ALPHA_IC_MIN", 0.03))
+                    _min_t = float(getattr(C, "ALPHA_TSTAT_MIN", 2.0))
+                    _min_r = float(getattr(C, "ALPHA_INCREMENTAL_IC_MIN", 0.015))
+                    _plog = ae.build_promotion_log(ic, _panels, _fwd, _min_ic, _min_t, _min_r)
+                    ALPHA_PROMOTION_LOG_JSON.write_text(
+                        _j.dumps({"generated_at": _dt.now().isoformat(timespec="seconds"),
+                                  "threshold_ic": _min_ic,
+                                  "threshold_tstat": _min_t,
+                                  "min_residual_ic": _min_r,
+                                  "candidates": _plog},
+                                 default=str, indent=2),
+                        encoding="utf-8")
+                    print(f"[vibe] Saved: {ALPHA_PROMOTION_LOG_JSON.name} ({len(_plog)} rows)")
+                except Exception as e:
+                    print(f"[step5] promotion log skipped: {e}")
         except Exception as e:
             print(f"[step5] alpha-zoo evaluator skipped: {e}")
 

@@ -115,13 +115,81 @@ def sentiment_veto(sent_df: pd.DataFrame,
 
 
 # ── macro-tape ─────────────────────────────────────────────────────────────
+INDEX_TICKERS: tuple[str, ...] = ("^NSEI", "^INDIAVIX")
+INDEX_CACHE_NAME = "index_prices_latest.csv"
+
+
+def load_index_tape(data_dir: Path, fetch: bool = True) -> pd.DataFrame:
+    """Nifty 50 + India VIX daily closes, long format (Date, Symbol, Close).
+
+    WHY THIS EXISTS: macro_tape_score() looks for ^NSEI and ^INDIAVIX inside
+    the frame it is given, and it was given raw_prices_latest.csv — which by
+    design holds the CANDIDATE universe only (download_price_data strips the
+    benchmark out; India VIX was never downloaded at all). Both series were
+    therefore structurally absent, VIX / Nifty-trend were always null, and the
+    regime fell through to its "neutral" default on every run.
+
+    Index tickers are kept in their own cache so they can never leak into the
+    scored universe. Merge is union-by-(Date, Symbol), newest wins, and a
+    failed or empty fetch never overwrites the cache — the same "a parse that
+    returned nothing is not a success" rule the other feeds follow.
+    """
+    cache = Path(data_dir) / INDEX_CACHE_NAME
+    cols = ["Date", "Symbol", "Close"]
+    old = pd.DataFrame(columns=cols)
+    if cache.exists() and cache.stat().st_size > 0:
+        try:
+            old = pd.read_csv(cache)[cols]
+        except Exception:
+            old = pd.DataFrame(columns=cols)
+
+    new_frames = []
+    if fetch:
+        try:
+            import yfinance as yf  # optional; the pipeline already depends on it
+            for t in INDEX_TICKERS:
+                try:
+                    h = yf.Ticker(t).history(period="2y", interval="1d",
+                                             auto_adjust=False, actions=False,
+                                             raise_errors=False)
+                except Exception:
+                    continue
+                if h is None or h.empty or "Close" not in h.columns:
+                    continue
+                f = h.reset_index()[["Date", "Close"]]
+                f["Date"] = pd.to_datetime(f["Date"], errors="coerce").dt.tz_localize(None).dt.date
+                f["Symbol"] = t
+                new_frames.append(f[cols])
+        except Exception:
+            new_frames = []
+
+    if new_frames:
+        merged = pd.concat(new_frames + [old], ignore_index=True)
+        merged["Date"] = pd.to_datetime(merged["Date"], errors="coerce")
+        merged["Close"] = pd.to_numeric(merged["Close"], errors="coerce")
+        merged = (merged.dropna(subset=cols)
+                        .drop_duplicates(subset=["Date", "Symbol"], keep="first")
+                        .sort_values(["Symbol", "Date"]))
+        if len(merged) >= len(old):        # never shrink the cache
+            try:
+                out = merged.copy()
+                out["Date"] = out["Date"].dt.strftime("%Y-%m-%d")
+                out.to_csv(cache, index=False)
+            except Exception:
+                pass
+            return merged.reset_index(drop=True)
+    return old
+
+
 def macro_tape_score(prices_long: pd.DataFrame,
                      benchmark: str = "^NSEI",
                      vix: str = "^INDIAVIX") -> dict:
     """Read benchmark + India VIX from the cached prices frame. Return a
     lightweight regime record; missing series → neutral defaults."""
     rec = {"regime": "neutral", "vix_level": None, "vix_pctile_252d": None,
-           "nifty_50d_trend": None, "nifty_above_50dma": None}
+           "nifty_50d_trend": None, "nifty_above_50dma": None,
+           # False => "neutral" is the fallback default, NOT a measured regime.
+           "regime_inputs_available": False}
     if prices_long is None or prices_long.empty:
         return rec
     df = prices_long.copy()
@@ -150,6 +218,8 @@ def macro_tape_score(prices_long: pd.DataFrame,
     # regime classification
     trend = rec["nifty_50d_trend"] or 0.0
     vix_pct = rec["vix_pctile_252d"]
+    rec["regime_inputs_available"] = (vix_pct is not None
+                                      and rec["nifty_50d_trend"] is not None)
     if vix_pct is not None:
         if trend > 2.0 and vix_pct < 40:
             rec["regime"] = "risk-on"

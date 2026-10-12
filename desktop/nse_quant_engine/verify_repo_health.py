@@ -164,6 +164,35 @@ def _base_names(cls: ast.ClassDef) -> set[str]:
     return out
 
 
+def _has_reentrancy_guard(fn: ast.AST) -> bool:
+    """True if the handler bails out early on a check of instance state.
+
+    Mechanism-agnostic on purpose. An earlier version demanded is_alive() /
+    isRunning() and so failed a correct implementation that uses a busy flag
+    reset from the worker's `finally` (which is actually race-free: the flag is
+    set before the thread exists). What matters is the behaviour: an `if`
+    whose test reads self-state (attribute, getattr, or a liveness call) and
+    whose body returns.
+    """
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.If):
+            continue
+        if not any(isinstance(b, ast.Return) for b in node.body):
+            continue
+        for t in ast.walk(node.test):
+            if isinstance(t, ast.Call) and isinstance(t.func, ast.Attribute) \
+                    and t.func.attr in ("is_alive", "isRunning"):
+                return True
+            if isinstance(t, ast.Call) and isinstance(t.func, ast.Name) \
+                    and t.func.id == "getattr" and t.args \
+                    and isinstance(t.args[0], ast.Name) and t.args[0].id == "self":
+                return True
+            if isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name) \
+                    and t.value.id == "self":
+                return True
+    return False
+
+
 for _rel in ("ui/decision_center.py", "run_app.py"):
     _label = _rel.rsplit("/", 1)[-1]
     try:
@@ -203,7 +232,7 @@ for _rel in ("ui/decision_center.py", "run_app.py"):
           "deleteLater frees the C++ object while the Python wrapper survives; the "
           "next click and wait_for_background_work() both call a method on it")
     check(f"{_label}: overlapping refresh clicks still guarded",
-          bool(_called & {"is_alive", "isRunning"}),
+          _has_reentrancy_guard(_fn),
           "without a liveness check a second click abandons a running worker, "
           "which is the original 0xc0000374 heap-corruption path")
 

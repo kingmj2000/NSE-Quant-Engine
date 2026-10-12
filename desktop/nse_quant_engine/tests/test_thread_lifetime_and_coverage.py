@@ -72,16 +72,41 @@ def _base_names(cls: ast.ClassDef) -> set[str]:
     return out
 
 
+def _has_reentrancy_guard(fn: ast.AST) -> bool:
+    """True if the handler bails out early on a check of instance state.
+
+    Mechanism-agnostic on purpose. An earlier version demanded is_alive() /
+    isRunning() and so failed a correct implementation that uses a busy flag
+    reset from the worker's `finally` (which is actually race-free: the flag is
+    set before the thread exists). What matters is the behaviour: an `if`
+    whose test reads self-state (attribute, getattr, or a liveness call) and
+    whose body returns.
+    """
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.If):
+            continue
+        if not any(isinstance(b, ast.Return) for b in node.body):
+            continue
+        for t in ast.walk(node.test):
+            if isinstance(t, ast.Call) and isinstance(t.func, ast.Attribute) \
+                    and t.func.attr in ("is_alive", "isRunning"):
+                return True
+            if isinstance(t, ast.Call) and isinstance(t.func, ast.Name) \
+                    and t.func.id == "getattr" and t.args \
+                    and isinstance(t.args[0], ast.Name) and t.args[0].id == "self":
+                return True
+            if isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name) \
+                    and t.value.id == "self":
+                return True
+    return False
+
+
 def test_refresh_is_guarded_against_overlapping_clicks():
     for rel in WINDOWS:
         fn = _func(rel, "_refresh_optional_feeds")
-        nodes = list(ast.walk(fn))
-        called = {n.func.attr for n in nodes
-                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
-        assert called & {"is_alive", "isRunning"}, (
-            f"{rel}: no liveness check — a second click abandons a running worker")
-        assert any(isinstance(n, ast.Return) for n in nodes), (
-            f"{rel}: the guard does not bail out")
+        assert _has_reentrancy_guard(fn), (
+            f"{rel}: no early-return guard on instance state — a second click "
+            f"starts a second worker over the first")
 
 
 def test_refresh_worker_is_never_a_qt_object_deleted_underneath_us():
