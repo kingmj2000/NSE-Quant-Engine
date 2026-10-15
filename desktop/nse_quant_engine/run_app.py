@@ -1992,6 +1992,18 @@ def main():
         w.drawer.append_log(m)
     _early_log.clear()
     w.show()
+    # Loud workspace check — see core/workspace.py for the 2026-10-15 incident.
+    try:
+        from core import workspace as _ws
+        _info = _ws.inspect(BASE)
+        w.setWindowTitle(f"NSE Quant Engine — v{APP_VERSION} — {Path(_info['base']).name}"
+                         + ("  [GIT CLONE]" if _info["git_checkout"] else ""))
+        _warn = _ws.warning(BASE)
+        if _warn:
+            w.drawer.append_log("[workspace] " + _warn.replace("\n", "\n[workspace] "))
+            QMessageBox.warning(w, "Running from the wrong folder?", _warn)
+    except Exception as _exc:
+        print(f"[workspace] check skipped: {_exc}", flush=True)
     sys.exit(app.exec())
 
 

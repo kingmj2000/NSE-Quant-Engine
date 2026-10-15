@@ -162,6 +162,17 @@ def build_steps(include_shadow: bool = True, include_fetch: bool = True) -> list
 def run_all(steps: list[Step], on_log=print, on_step=None) -> dict:
     summary = {"started": time.strftime("%Y-%m-%d %H:%M:%S"), "steps": []}
     overall_t0 = time.time()
+    # Every step can report "ok" on an empty workspace; say so up front.
+    try:
+        from core import workspace as _ws
+        on_log(f"[workspace] running in {BASE}")
+        _warn = _ws.warning(BASE)
+        if _warn:
+            for _ln in _warn.splitlines():
+                on_log(f"[workspace] WARNING {_ln}")
+        summary["workspace"] = _ws.inspect(BASE)
+    except Exception as _exc:
+        on_log(f"[workspace] check skipped: {_exc}")
     for s in steps:
         on_log(f"→ {s.name}")
         # Pre-flight gate
