@@ -284,47 +284,25 @@ def load_config():
 
 
 def fetch_amfi_navall(log_rows):
+    """Fetch NAVAll through core.amfi_nav (single parser, self-diagnosing)."""
+    from core import amfi_nav
+    df, diags = amfi_nav.fetch_navall(timeout=45, data_dir=DATA_DIR)
     last_error = None
-    for url in AMFI_NAVALL_URLS:
-        try:
-            r = requests.get(url, timeout=45, headers={'User-Agent': 'Mozilla/5.0'})
-            r.raise_for_status()
-            rows = []
-            for line in r.text.splitlines():
-                line = line.strip()
-                if not line or ';' not in line:
-                    continue
-                parts = [p.strip() for p in line.split(';')]
-                if len(parts) < 6 or parts[0].lower().startswith('scheme'):
-                    continue
-                code, isin1, isin2, scheme, nav, date = parts[:6]
-                nav_val = parse_float(nav)
-                if pd.isna(nav_val):
-                    continue
-                rows.append({
-                    'Scheme_Code': code,
-                    'ISIN_1': isin1,
-                    'ISIN_2': isin2,
-                    'Scheme_Name': scheme,
-                    'NAV': nav_val,
-                    'NAV_Date': date,
-                    'Source_URL': url,
-                })
-            df = pd.DataFrame(rows)
-            if df.empty:
-                # Parsing nothing is NOT success. Treating it as success wrote an
-                # empty file over a good 14,280-row cache, which then made
-                # etf_quality_builder raise on every subsequent run — a transient
-                # DNS failure turned into a permanently broken pipeline.
-                last_error = RuntimeError(f'{url} returned 0 parseable NAV rows')
-                log_event(log_rows, 'AMFI_NAVAll', 'EMPTY', url, 0)
-                continue
-            _write_nav_cache_if_better(df, log_rows)
-            log_event(log_rows, 'AMFI_NAVAll', 'OK', url, len(df))
-            return df
-        except Exception as exc:
-            last_error = exc
-            log_event(log_rows, 'AMFI_NAVAll', 'ERROR', f'{url}: {exc}', 0)
+    for d in diags:
+        status = "OK" if d.get("rows") else ("EMPTY" if d.get("status") == 200 else "ERROR")
+        detail = (f"{d['url']} status={d['status']} type={d['content_type']} "
+                  f"bytes={d['bytes']} final={d['final_url']} err={d['error']} "
+                  f"head='{d['head'][:160]}'")
+        log_event(log_rows, 'AMFI_NAVAll', status, detail, d.get("rows") or 0)
+        if d.get("error"):
+            last_error = RuntimeError(f"{d['url']}: {d['error']}")
+    if not df.empty:
+        df = df.copy()
+        df["Source_URL"] = next((d["url"] for d in diags if d.get("rows")), "")
+        _write_nav_cache_if_better(df, log_rows)
+        return df
+    print("AMFI NAVAll returned no usable rows. What the server sent:\n  "
+          + amfi_nav.describe(diags).replace(" | ", "\n  "))
 
     # Every URL failed. Fall back to the cache rather than returning nothing:
     # yesterday's NAV table beats no NAV table and keeps the pipeline running.

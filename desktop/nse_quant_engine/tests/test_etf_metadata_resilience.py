@@ -140,11 +140,36 @@ def test_cache_loader_tolerates_a_corrupt_file(tmp_path, monkeypatch):
     assert enr._load_nav_cache().empty
 
 
-def test_zero_parsed_rows_is_not_treated_as_success():
-    """The write path must be guarded by an emptiness check."""
-    src = (ENG / "etf_metadata_enricher.py").read_text(encoding="utf-8")
-    i = src.index("def fetch_amfi_navall")
-    body = src[i:src.index("def _load_nav_cache")]
-    assert "if df.empty:" in body, "an empty parse must not be recorded as OK"
-    assert "_write_nav_cache_if_better" in body, "cache write must be guarded"
-    assert "df.to_csv(AMFI_NAV_OUT" not in body, "unconditional cache write is back"
+def test_zero_parsed_rows_is_not_treated_as_success(tmp_path, monkeypatch):
+    """Behavioural, not a source grep: a 200 response that parses to 0 rows
+    must not be logged OK, must not touch a good cache, and must fall back to
+    that cache. (The earlier version asserted the literal text `if df.empty:`
+    and failed a correct rewrite that guards with `if not df.empty:`.)"""
+    import importlib.util as _ilu
+    spec = _ilu.spec_from_file_location("etf_metadata_enricher_t",
+                                        ENG / "etf_metadata_enricher.py")
+    enr = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(enr)
+    from core import amfi_nav
+
+    cache = tmp_path / "amfi_navall_latest.csv"
+    good = pd.DataFrame({"Scheme_Code": [str(100000 + i) for i in range(50)],
+                         "ISIN_1": "INF", "ISIN_2": "-", "Scheme_Name": "X",
+                         "NAV": 10.0, "NAV_Date": "14-Oct-2026"})
+    good.to_csv(cache, index=False)
+    before = cache.read_bytes()
+    monkeypatch.setattr(enr, "AMFI_NAV_OUT", cache)
+    monkeypatch.setattr(enr, "DATA_DIR", tmp_path)
+    diag = {"url": "u", "status": 200, "final_url": "u", "content_type": "text/html",
+            "bytes": 40, "rows": 0, "error": "0 parseable NAV rows", "head": "<html>"}
+    monkeypatch.setattr(amfi_nav, "fetch_navall",
+                        lambda **kw: (pd.DataFrame(columns=amfi_nav.COLUMNS), [diag]))
+    log_rows: list = []
+    out = enr.fetch_amfi_navall(log_rows)
+    assert len(out) == 50, "must fall back to the good cache"
+    assert cache.read_bytes() == before, "an empty parse overwrote the cache"
+    statuses = [r.get("Status") for r in log_rows if r.get("Source") == "AMFI_NAVAll"]
+    assert "OK" not in statuses, "an empty parse must not be recorded as OK"
+    assert "EMPTY" in statuses
+
+

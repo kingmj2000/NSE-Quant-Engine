@@ -767,40 +767,36 @@ def load_manual_aum(log_rows: list[dict]) -> pd.DataFrame:
 
 
 def fetch_navall(log_rows: list[dict]) -> pd.DataFrame:
-    if NAVALL_CSV.exists():
-        try:
-            df = pd.read_csv(NAVALL_CSV, dtype=str)
-            log(log_rows, "NAVAll", "CACHE_OK", str(NAVALL_CSV), len(df))
-            return df
-        except Exception as exc:
-            log(log_rows, "NAVAll", "CACHE_ERROR", repr(exc), 0)
-    for url in NAVALL_URLS:
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=45)
-            r.raise_for_status()
-            rows = []
-            for line in r.text.splitlines():
-                if ";" not in line:
-                    continue
-                parts = [p.strip() for p in line.split(";")]
-                if len(parts) < 6 or parts[0].lower().startswith("scheme"):
-                    continue
-                code, isin1, isin2, scheme, nav, nav_date = parts[:6]
-                rows.append({
-                    "Scheme_Code": code,
-                    "ISIN_1": isin1,
-                    "ISIN_2": isin2,
-                    "Scheme_Name": scheme,
-                    "NAV": nav,
-                    "NAV_Date": nav_date,
-                })
-            df = pd.DataFrame(rows)
-            df.to_csv(NAVALL_CSV, index=False)
-            log(log_rows, "NAVAll", "FETCH_OK", url, len(df))
-            return df
-        except Exception as exc:
-            log(log_rows, "NAVAll", "FETCH_ERROR", f"{url}: {repr(exc)}", 0)
-    return pd.DataFrame()
+    """Prefer the enricher's cache (written minutes earlier in the same run).
+
+    Two defects fixed here: an unreadable/0-row cache fell through to a fetch
+    whose result was written back EVEN WHEN EMPTY (one source of the 2-byte
+    amfi_navall_latest.csv), and the parser was a third private copy.
+    """
+    try:
+        from core.safe_io import read_cached_csv
+        df = read_cached_csv(NAVALL_CSV, label=NAVALL_CSV.name, dtype=str,
+                             keep_default_na=False, quiet=True)
+    except Exception as exc:
+        df = pd.DataFrame()
+        log(log_rows, "NAVAll", "CACHE_ERROR", repr(exc), 0)
+    if not df.empty:
+        log(log_rows, "NAVAll", "CACHE_OK", str(NAVALL_CSV), len(df))
+        return df
+    from core import amfi_nav
+    live, diags = amfi_nav.fetch_navall(timeout=45, data_dir=DATA_DIR)
+    for d in diags:
+        log(log_rows, "NAVAll", "FETCH_OK" if d.get("rows") else "FETCH_ERROR",
+            f"{d['url']} status={d['status']} err={d['error']} head='{d['head'][:120]}'",
+            d.get("rows") or 0)
+    if live.empty:
+        return pd.DataFrame()                 # never write an empty cache
+    live = live.astype(str)
+    try:
+        live.to_csv(NAVALL_CSV, index=False)
+    except Exception:
+        pass
+    return live
 
 
 def build_nav_mappings(nav: pd.DataFrame) -> tuple[dict[str, str], dict[str, str], pd.DataFrame]:

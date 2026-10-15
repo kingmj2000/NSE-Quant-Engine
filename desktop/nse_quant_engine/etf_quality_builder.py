@@ -84,9 +84,19 @@ def load_config_etfs() -> pd.DataFrame:
 def fetch_amfi_nav() -> pd.DataFrame:
     print("Downloading AMFI NAVAll.txt...")
     try:
-        response = requests.get(AMFI_NAV_URL, headers=HEADERS, timeout=60)
-        response.raise_for_status()
-        text = response.text
+        from core import amfi_nav
+        _df, _diags = amfi_nav.fetch_navall(timeout=60, data_dir=DATA_DIR)
+        if _df.empty:
+            # 200-with-nothing-usable is a failure, not "no ETFs exist today".
+            raise RuntimeError("no usable NAV rows — " + amfi_nav.describe(_diags))
+        live = _df.rename(columns={"Scheme_Code": "AMFI_Scheme_Code",
+                                   "ISIN_1": "AMFI_ISIN_Growth",
+                                   "ISIN_2": "AMFI_ISIN_Div",
+                                   "Scheme_Name": "AMFI_Scheme_Name"})
+        live = live[["AMFI_Scheme_Code", "AMFI_ISIN_Growth", "AMFI_ISIN_Div",
+                     "AMFI_Scheme_Name", "NAV", "NAV_Date"]].copy()
+        live.to_csv(AMFI_NAV_OUT, index=False)
+        return live
     except Exception as exc:
         # Keep the desktop app resilient: AMFI occasionally times out. Reuse the
         # most recent cached NAVAll file created by etf_metadata_enricher instead
@@ -131,30 +141,6 @@ def fetch_amfi_nav() -> pd.DataFrame:
                                      "AMFI_ISIN_Div", "AMFI_Scheme_Name",
                                      "NAV", "NAV_Date"])
 
-    rows = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("Scheme Code"):
-            continue
-        parts = line.split(";")
-        if len(parts) < 6:
-            continue
-        scheme_code, isin_growth, isin_div, scheme_name, nav, nav_date = parts[:6]
-        try:
-            nav_value = float(nav)
-        except Exception:
-            nav_value = pd.NA
-        rows.append({
-            "AMFI_Scheme_Code": str(scheme_code).strip(),
-            "AMFI_ISIN_Growth": str(isin_growth).strip(),
-            "AMFI_ISIN_Div": str(isin_div).strip(),
-            "AMFI_Scheme_Name": str(scheme_name).strip(),
-            "NAV": nav_value,
-            "NAV_Date": str(nav_date).strip(),
-        })
-    df = pd.DataFrame(rows).dropna(subset=["NAV"])
-    df.to_csv(AMFI_NAV_OUT, index=False)
-    return df
 
 
 def mapping_status(match_type: str, match_score: float) -> str:

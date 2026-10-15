@@ -834,14 +834,39 @@ class DQReportView(QWidget):
         def _pct(v):
             try: return f"{float(v)*100:.0f}%"
             except Exception: return "—"
+
+        # dq_report_builder writes coverage keyed by COLUMN NAME
+        # ("NAV", "AUM_Cr", "TER", "Benchmark_Index", "Tracking_Error", ...).
+        # These tiles asked for "nav" / "aum" / "ter" / "benchmark" /
+        # "tracking", so every tile rendered "—" — even TER at 82% — which
+        # made a dead NAV feed indistinguishable from a cosmetic gap.
+        def _cov(d, *names):
+            low = {str(k).lower(): v for k, v in (d or {}).items()}
+            for n in names:
+                if n.lower() in low and low[n.lower()] is not None:
+                    return low[n.lower()]
+            return None
+
+        def _tracking_cov():
+            # "TE or tracking-difference" is a per-ETF OR, not max(column fills).
+            if quality_df is not None and not quality_df.empty:
+                cols = [c for c in ("Tracking_Error", "Tracking_Difference") if c in quality_df.columns]
+                if cols:
+                    has = quality_df[cols].apply(
+                        lambda c: c.astype(str).str.strip().replace({"nan": "", "None": ""}).ne(""))
+                    return float(has.any(axis=1).mean())
+            vals = [v for v in (_cov(cov_str, "Tracking_Error"), _cov(cov_str, "Tracking_Difference"),
+                                _cov(cov_str, "tracking"), _cov(cov_act, "tracking")) if v is not None]
+            return max(vals) if vals else None
+
         kpis = [
             ("Rows analysed", str(rows), "blue", "ETF universe covered"),
             ("Health score", f"{health if health is not None else '—'} / 100", "teal", "0 = broken · 100 = pristine"),
-            ("NAV filled", _pct(cov_act.get("nav")), "green", "actionable"),
-            ("AUM filled", _pct(cov_act.get("aum")), "green", "actionable"),
-            ("TER filled", _pct(cov_act.get("ter")), "amber", "actionable"),
-            ("Benchmark", _pct(cov_act.get("benchmark")), "violet", "actionable"),
-            ("Tracking quality", _pct(cov_str.get("tracking") or cov_act.get("tracking")), "blue", "TE or tracking-difference"),
+            ("NAV filled", _pct(_cov(cov_act, "NAV", "nav")), "green", "actionable"),
+            ("AUM filled", _pct(_cov(cov_act, "AUM_Cr", "aum")), "green", "actionable"),
+            ("TER filled", _pct(_cov(cov_act, "TER", "ter")), "amber", "actionable"),
+            ("Benchmark", _pct(_cov(cov_act, "Benchmark_Index", "benchmark")), "violet", "actionable"),
+            ("Tracking quality", _pct(_tracking_cov()), "blue", "TE or tracking-difference"),
         ]
         for i, (title, val, tone, sub) in enumerate(kpis):
             self.kpi_row.addWidget(_make_kpi_card(title, val, tone, sub), i // 4, i % 4)
