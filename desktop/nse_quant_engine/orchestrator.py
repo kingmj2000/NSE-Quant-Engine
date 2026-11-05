@@ -271,6 +271,9 @@ def write_manifest(summary: dict) -> Path:
         "shadow_note": ("shadow currently ahead — manual review suggested"
                         if experimental_leader == "shadow" else ""),
         "steps": summary["steps"],
+        # run_all() records this; the manifest dropped it, so the 2026-10-15
+        # "which folder did this run in?" question still had no durable answer.
+        "workspace": summary.get("workspace"),
         "artifacts": {
             "dashboard_html": _exists("dashboard_latest.html"),
             "scores_csv":     _exists("latest_scores.csv"),

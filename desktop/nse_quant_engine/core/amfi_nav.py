@@ -63,6 +63,34 @@ def _to_float(x) -> float | None:
         return None
 
 
+def _header_layout(fields: list[str]) -> dict[str, int] | None:
+    """Map our columns to positions using AMFI's own header row.
+
+    AMFI changed NAVAll from 6 columns to 8 — inserting "Plan" and "Option"
+    between Scheme Name and Net Asset Value. Every parser took parts[:6], so
+    NAV became "Growth Option", failed float(), and 1,884 valid rows parsed to
+    zero (HTTP 200, 1.5 MB, text/plain — the file was fine all along). Reading
+    positions from the header makes the next column insertion a non-event.
+    """
+    low = [f.strip().lower() for f in fields]
+    def find(*keys):
+        for i, f in enumerate(low):
+            if all(k in f for k in keys):
+                return i
+        return None
+    pos = {"Scheme_Code": find("scheme code"),
+           "ISIN_1": find("isin", "growth") if find("isin", "growth") is not None else find("isin"),
+           "ISIN_2": find("reinvest"),
+           "Scheme_Name": find("scheme name"),
+           "Plan": find("plan"),
+           "Option": find("option"),
+           "NAV": find("net asset value") if find("net asset value") is not None else find("nav"),
+           "NAV_Date": find("date")}
+    if pos["Scheme_Code"] is None or pos["NAV"] is None:
+        return None
+    return pos
+
+
 def parse_navall_text(text: str) -> pd.DataFrame:
     """Parse NAVAll text into COLUMNS. Returns an empty frame, never raises."""
     if not text:
@@ -74,21 +102,41 @@ def parse_navall_text(text: str) -> pd.DataFrame:
         hits = sum(1 for ln in lines[:4000] if ln.count(d) >= 5)
         if hits > best_hits:
             best, best_hits = d, hits
+
+    layout = None
+    for ln in lines[:50]:
+        if "scheme code" in ln.lower():
+            layout = _header_layout(ln.split(best))
+            break
+    if layout is None:          # legacy 6-column file with no recognisable header
+        layout = {"Scheme_Code": 0, "ISIN_1": 1, "ISIN_2": 2, "Scheme_Name": 3,
+                  "Plan": None, "Option": None, "NAV": 4, "NAV_Date": 5}
+
+    def at(parts, key):
+        i = layout.get(key)
+        return parts[i].strip() if i is not None and i < len(parts) else ""
+
+    need = max(i for i in layout.values() if i is not None) + 1
     rows = []
     for ln in lines:
         parts = [p.strip() for p in ln.split(best)]
-        if len(parts) < 6:
+        if len(parts) < need:
             continue
-        code, isin1, isin2, name, nav, nav_date = parts[:6]
+        code = at(parts, "Scheme_Code")
         # Header rows, AMC/category banner lines and HTML all fail this test —
         # which is what stops a block page from ever counting as data.
         if not _SCHEME_CODE.match(code):
             continue
-        nav_val = _to_float(nav)
+        nav_val = _to_float(at(parts, "NAV"))
         if nav_val is None:
             continue
-        rows.append({"Scheme_Code": code, "ISIN_1": isin1, "ISIN_2": isin2,
-                     "Scheme_Name": name, "NAV": nav_val, "NAV_Date": nav_date})
+        # Keep the pre-change name shape ("<name> - <plan> - <option>") so name
+        # matching downstream sees what it always saw.
+        name = " - ".join(x for x in (at(parts, "Scheme_Name"), at(parts, "Plan"),
+                                      at(parts, "Option")) if x and x != "-")
+        rows.append({"Scheme_Code": code, "ISIN_1": at(parts, "ISIN_1"),
+                     "ISIN_2": at(parts, "ISIN_2"), "Scheme_Name": name,
+                     "NAV": nav_val, "NAV_Date": at(parts, "NAV_Date")})
     return pd.DataFrame(rows, columns=COLUMNS)
 
 

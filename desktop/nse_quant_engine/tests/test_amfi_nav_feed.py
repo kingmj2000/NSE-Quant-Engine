@@ -87,3 +87,30 @@ def test_data_health_tiles_read_dq_column_names():
     src = (ROOT / "run_app.py").read_text(encoding="utf-8")
     for key in ('"NAV"', '"AUM_Cr"', '"TER"', '"Benchmark_Index"'):
         assert f"_cov(cov_act, {key}" in src
+
+
+# Real AMFI layout as served on 2026-11-05: two columns ("Plan", "Option")
+# inserted before Net Asset Value, and \r\r\n line endings. Every parser took
+# parts[:6], so NAV read "Growth Option" and 1,884 valid rows parsed to zero.
+EIGHT_COL = (
+    "Scheme Code;ISIN Div Payout/ ISIN Growth;ISIN Div Reinvestment;Scheme Name;"
+    "Plan;Option;Net Asset Value;Date\r\r\n \r\r\n"
+    "Open Ended Schemes(Other Scheme - Other  ETFs)\r\r\n \r\r\n"
+    "Aditya Birla Sun Life Mutual Fund\r\r\n \r\r\n"
+    "152732;INF209KC1134;-;ADITYA BIRLA SUN LIFE CRISIL BROAD BASED GILT ETF;-;-;12.3456;04-Nov-2026\r\r\n"
+    "135762;INF846K01WO1;-;Axis Children's Fund;Direct Plan;Growth Option;30.0483;04-Nov-2026\r\r\n"
+)
+
+
+def test_eight_column_layout_reads_nav_from_the_header_position():
+    df = amfi_nav.parse_navall_text(EIGHT_COL)
+    assert len(df) == 2, "the Plan/Option insertion must not zero the parse"
+    assert df["NAV"].tolist() == [12.3456, 30.0483]
+    assert df["ISIN_1"].tolist() == ["INF209KC1134", "INF846K01WO1"]
+    # pre-change name shape preserved for downstream name matching
+    assert df["Scheme_Name"].iloc[1] == "Axis Children's Fund - Direct Plan - Growth Option"
+    assert df["Scheme_Name"].iloc[0] == "ADITYA BIRLA SUN LIFE CRISIL BROAD BASED GILT ETF"
+
+
+def test_legacy_six_column_layout_still_parses():
+    assert len(amfi_nav.parse_navall_text(GOOD)) == 2
