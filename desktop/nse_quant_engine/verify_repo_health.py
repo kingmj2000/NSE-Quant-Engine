@@ -372,9 +372,36 @@ else:
     # only recorded as a PASS when it is actually true.
     check("no unreferenced modules", True, "")
 
-# ─── 12. Test files present ─────────────────────────────────────────────────
+# ─── 12. 2026-11-05 run review ──────────────────────────────────────────────
+nqe_now = read("nse_quant_engine.py")
+odf_now = read("core/optional_data_fetchers.py")
+enr_now = read("etf_metadata_enricher.py")
+vb_now = read("validation_builder.py")
+check("zero-volume price jumps are quarantined before scoring",
+      "quarantine_untraded_price_jumps(prices" in nqe_now
+      and "quarantine_untraded_price_jumps(combined" in nqe_now,
+      "NV20.NS 12,045.90 at volume 0 (true ~13.8) scored Opportunity 100 and +901x forward returns")
+check("NAV premium uses price and NAV of the same date",
+      "nav_premium_same_date(df, prices)" in nqe_now
+      and "merge_etf_quality(latest, etf_quality, prices)" in nqe_now,
+      "today's price vs yesterday's NAV flagged 98 of 282 ETFs on a +2.4% day (8 on matching dates)")
+check("flow feeds refetch a recent cache that lacks the latest published day",
+      odf_now.count("_flow_cache_has_latest_day(target)") >= 2,
+      "a 17:40 cache stayed 'fresh' next afternoon; latest-only sources then lost that day for good")
+check("fuzzy AUM/TER import matching skips rows that name their own scheme",
+      "_import_row_is_identified(r)" in enr_now and "(Import Fuzzy)" in enr_now,
+      "20 ETFs took other AMCs' AUM/TER, e.g. three Top 10 Banks ETFs all at 1,720.42 cr")
+check("forward history drops rows computed from quarantined bars",
+      "drop_rows_on_quarantined_bars(fwd, load_quarantined_bars())" in vb_now,
+      "the union merge kept NV20's +901x rows after the bad bar was removed")
+
+# ─── 13. Test files present ─────────────────────────────────────────────────
 expected_tests = ["test_integrity_fail_closed.py", "test_ui_method_contracts.py",
-                  "test_evidence_accumulation.py", "test_history_dedup.py"]
+                  "test_evidence_accumulation.py", "test_history_dedup.py",
+                  "test_price_bar_guard.py", "test_nav_premium_same_date.py",
+                  "test_flow_publication_freshness.py",
+                  "test_import_fuzzy_identified_rows.py",
+                  "test_forward_history_quarantine.py"]
 absent = [t for t in expected_tests if not (ENG / "tests" / t).exists()]
 check("audit regression tests present", not absent,
       f"missing: {', '.join(absent)}" if absent else "")

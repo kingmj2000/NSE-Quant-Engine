@@ -47,6 +47,20 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 ETF_QUALITY_CSV = DATA_DIR / "etf_quality_latest.csv"
 PRICE_CACHE_CSV = DATA_DIR / "price_history_cache.csv"
 DOWNLOAD_DIAGNOSTICS_CSV = DATA_DIR / "price_download_diagnostics.csv"
+PRICE_QUARANTINE_CSV = DATA_DIR / "price_quarantine_log.csv"
+
+# A bar with no trades cannot move the price: on a no-trade day NSE carries the
+# last close forward. Yahoo sometimes serves a zero-volume bar at a foreign level
+# instead. 2026-11-05: NV20.NS came back at 12,045.90 (volume 0) against 13.82 the
+# day before, i.e. roughly the index level. Unchecked, that one bar gave NV20 a
+# +90,950% 21-day return, Opportunity_Score 100, an entry zone of 12,045, and
+# +901x forward returns that dragged validation's all-symbol averages to +189%
+# for 2026-10-22 (10D) and 2026-10-29 (5D).
+UNTRADED_BAR_MAX_MOVE = 0.20
+QUARANTINE_COLUMNS = [
+    "Date", "Symbol", "Close", "Price", "Volume",
+    "Last_Traded_Price", "Move_vs_Last_Traded", "Reason",
+]
 
 BENCHMARK_SYMBOL = "^NSEI"
 PERIOD = "2y"
@@ -327,6 +341,77 @@ def fetch_single_symbol(symbol: str) -> tuple[pd.DataFrame | None, dict]:
     return None, last_diag
 
 
+def quarantine_untraded_price_jumps(
+    prices: pd.DataFrame, skip_symbols=()
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Drop zero-volume bars whose price is >20% away from the last traded bar.
+
+    Only bars with no reported trades are ever dropped. A traded bar is market
+    data whatever its move, so real crashes and (unadjusted) splits stay visible.
+    A series with no traded bar yet has no reference and is left alone. Index
+    symbols (^...) are exempt because Yahoo reports no volume for them.
+
+    Returns (clean_prices, quarantined_rows).
+    """
+    empty = pd.DataFrame(columns=QUARANTINE_COLUMNS)
+    if prices is None or prices.empty or "Price" not in prices.columns:
+        return prices, empty
+
+    work = prices.reset_index(drop=True)
+    dates = pd.to_datetime(work["Date"], errors="coerce")
+    order = pd.DataFrame({"Symbol": work["Symbol"].astype(str), "_d": dates}).sort_values(
+        ["Symbol", "_d"], kind="mergesort").index
+    sym = work["Symbol"].astype(str).loc[order]
+    price = pd.to_numeric(work["Price"], errors="coerce").loc[order]
+    if "Volume" in work.columns:
+        volume = pd.to_numeric(work["Volume"], errors="coerce").loc[order]
+    else:
+        volume = pd.Series(np.nan, index=order)
+    traded = volume.fillna(0) > 0
+
+    # Last traded price strictly before each bar, within the symbol.
+    last_traded = price.where(traded).groupby(sym).ffill()
+    reference = last_traded.groupby(sym).shift(1)
+    move = price / reference - 1
+
+    exempt = sym.str.startswith("^") | sym.isin({str(s) for s in skip_symbols})
+    bad = (~traded) & reference.notna() & (move.abs() > UNTRADED_BAR_MAX_MOVE) & ~exempt
+    if not bad.any():
+        return prices, empty
+
+    bad_idx = bad[bad].index
+    quarantined = pd.DataFrame({
+        "Date": work.loc[bad_idx, "Date"].values,
+        "Symbol": sym.loc[bad_idx].values,
+        "Close": work.loc[bad_idx, "Close"].values if "Close" in work.columns else np.nan,
+        "Price": price.loc[bad_idx].values,
+        "Volume": volume.loc[bad_idx].values,
+        "Last_Traded_Price": reference.loc[bad_idx].values,
+        "Move_vs_Last_Traded": move.loc[bad_idx].values,
+        "Reason": f"zero-volume bar >{UNTRADED_BAR_MAX_MOVE:.0%} from last traded price",
+    }, columns=QUARANTINE_COLUMNS)
+    clean = work.drop(index=bad_idx)
+    return clean, quarantined
+
+
+def _report_price_quarantine(quarantined: pd.DataFrame) -> None:
+    """Rewrite the quarantine log every run: it always describes THIS download."""
+    frame = quarantined if quarantined is not None else pd.DataFrame(columns=QUARANTINE_COLUMNS)
+    try:
+        frame.to_csv(PRICE_QUARANTINE_CSV, index=False)
+    except Exception as exc:
+        print(f"[price-guard] could not write {PRICE_QUARANTINE_CSV.name}: {exc}")
+    if frame.empty:
+        return
+    print(f"[price-guard] WARNING dropped {len(frame)} zero-volume bar(s) that moved "
+          f">{UNTRADED_BAR_MAX_MOVE:.0%} from the last traded price (see {PRICE_QUARANTINE_CSV.name}):")
+    for _, r in frame.head(10).iterrows():
+        print(f"[price-guard]   {r['Symbol']} {r['Date']}: {float(r['Price']):,.2f} vs last traded "
+              f"{float(r['Last_Traded_Price']):,.2f}")
+    if len(frame) > 10:
+        print(f"[price-guard]   ... and {len(frame) - 10} more")
+
+
 def update_price_cache(candidate_prices: pd.DataFrame) -> None:
     """Persist successful prices across runs so validation is less fragile when Yahoo has a bad day."""
     if candidate_prices.empty:
@@ -354,6 +439,8 @@ def update_price_cache(candidate_prices: pd.DataFrame) -> None:
 
     combined = combined.dropna(subset=["Date", "Symbol", "Price"])
     combined = combined.drop_duplicates(subset=["Date", "Symbol"], keep="last")
+    # Bad bars already archived by earlier runs would otherwise outlive the fix.
+    combined, _ = quarantine_untraded_price_jumps(combined)
     combined = combined.sort_values(["Symbol", "Date"])
     combined.to_csv(PRICE_CACHE_CSV, index=False)
 
@@ -395,6 +482,8 @@ def download_price_data(symbols: List[str], benchmark: str) -> Tuple[pd.DataFram
     prices["Price"] = pd.to_numeric(prices["Price"], errors="coerce")
     prices = prices.dropna(subset=["Date", "Symbol", "Price"])
     prices = prices.drop_duplicates(subset=["Date", "Symbol"], keep="last")
+    prices, quarantined = quarantine_untraded_price_jumps(prices, skip_symbols={benchmark})
+    _report_price_quarantine(quarantined)
 
     benchmark_prices = prices[prices["Symbol"] == benchmark][["Date", "Price"]].copy()
     benchmark_prices = benchmark_prices.rename(columns={"Price": "Benchmark_Close"}).dropna(subset=["Benchmark_Close"])
@@ -551,7 +640,71 @@ def market_regime_score(benchmark_prices: pd.DataFrame) -> tuple[float, str]:
     return 55, "Neutral"
 
 
-def merge_etf_quality(latest: pd.DataFrame, etf_quality: pd.DataFrame) -> pd.DataFrame:
+def _parse_nav_dates(values: pd.Series) -> pd.Series:
+    """AMFI NAVAll writes 04-Nov-2026; tolerate ISO / day-first text from manual rows."""
+    text = values.astype("string").str.strip()
+    out = pd.to_datetime(text, format="%d-%b-%Y", errors="coerce")
+    # ISO first and explicitly: day-first parsing reads 2026-11-04 as 11 April.
+    for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S"):
+        rest = (out.isna() & text.notna() & text.ne("")).fillna(False).astype(bool)
+        if rest.any():
+            out.loc[rest] = pd.to_datetime(text[rest], format=fmt, errors="coerce")
+    rest = (out.isna() & text.notna() & text.ne("")).fillna(False).astype(bool)
+    if rest.any():
+        out.loc[rest] = pd.to_datetime(text[rest], errors="coerce", dayfirst=True, format="mixed")
+    return out.dt.normalize()
+
+
+def nav_premium_same_date(df: pd.DataFrame, prices: pd.DataFrame | None = None) -> pd.Series:
+    """Premium/discount of market price to NAV, both taken on the NAV's own date.
+
+    NAV is struck at the close of NAV_Date. Comparing it with a later price folds
+    the market's move since then into the "premium". 2026-11-05 (Nifty +2.4%, NAVs
+    still dated 04-Nov): NIFTYBEES showed +2.18% against a true -0.21%, and 98 of
+    282 ETFs breached the 2% premium limit against 8 on matching dates. The
+    penalty landed on whatever rallied most that day.
+
+    - NAV_Date equals the price date: latest Price (unchanged behaviour).
+    - NAV_Date earlier or later: that day's Close from `prices`; if the ETF has no
+      bar on that date the premium is unknown (NaN, i.e. neutral), never a
+      cross-date comparison.
+    - NAV_Date missing: latest Price (nothing better is known).
+    """
+    nav = pd.to_numeric(df["NAV"], errors="coerce")
+    valid_nav = nav.notna() & (nav != 0)
+    latest_px = pd.to_numeric(df["Price"], errors="coerce")
+    if "NAV_Date" in df.columns:
+        nav_d = _parse_nav_dates(df["NAV_Date"])
+    else:
+        nav_d = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
+    if "Date" in df.columns:
+        px_d = pd.to_datetime(df["Date"], errors="coerce").dt.normalize()
+    else:
+        px_d = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
+
+    same_or_unknown = nav_d.isna() | (nav_d == px_d)
+    ref = latest_px.where(same_or_unknown)
+    need = ~same_or_unknown
+    if need.any() and prices is not None and not prices.empty and {"Symbol", "Date"}.issubset(prices.columns):
+        p = pd.DataFrame({
+            "Symbol": prices["Symbol"].astype(str),
+            "Date": pd.to_datetime(prices["Date"], errors="coerce").dt.normalize(),
+        })
+        close = pd.to_numeric(prices["Close"], errors="coerce") if "Close" in prices.columns \
+            else pd.Series(np.nan, index=prices.index)
+        if "Price" in prices.columns:
+            close = close.where(close.notna(), pd.to_numeric(prices["Price"], errors="coerce"))
+        p["Ref"] = close.values
+        p = p.dropna(subset=["Date", "Ref"]).drop_duplicates(subset=["Symbol", "Date"], keep="last")
+        lookup = pd.Series(p["Ref"].values, index=pd.MultiIndex.from_arrays([p["Symbol"], p["Date"]]))
+        keys = pd.MultiIndex.from_arrays([df["Symbol"].astype(str), nav_d])
+        found = pd.Series(lookup.reindex(keys).values, index=df.index)
+        ref = ref.where(~need, found)
+    return (ref / nav - 1).where(valid_nav)
+
+
+def merge_etf_quality(latest: pd.DataFrame, etf_quality: pd.DataFrame,
+                      prices: pd.DataFrame | None = None) -> pd.DataFrame:
     df = latest.copy()
     if etf_quality.empty:
         for col in [
@@ -571,11 +724,7 @@ def merge_etf_quality(latest: pd.DataFrame, etf_quality: pd.DataFrame) -> pd.Dat
         if col not in etf_quality.columns:
             etf_quality[col] = np.nan if col not in ["Symbol", "NAV_Date", "Benchmark_Index", "ETF_Quality_Data_Flag", "ETF_Quality_Source", "AMFI_Scheme_Code", "AMFI_Scheme_Name", "Mapping_Status"] else ""
     df = df.merge(etf_quality[quality_cols], on="Symbol", how="left")
-    df["NAV_Premium_Discount"] = np.where(
-        pd.to_numeric(df["NAV"], errors="coerce").notna() & (pd.to_numeric(df["NAV"], errors="coerce") != 0),
-        df["Price"] / pd.to_numeric(df["NAV"], errors="coerce") - 1,
-        np.nan
-    )
+    df["NAV_Premium_Discount"] = nav_premium_same_date(df, prices)
     return df
 
 
@@ -1208,7 +1357,7 @@ def main() -> None:
     if latest.empty:
         raise ValueError("No symbols have enough price history. Reduce MIN_HISTORY_DAYS or check symbols.")
 
-    latest = merge_etf_quality(latest, etf_quality)
+    latest = merge_etf_quality(latest, etf_quality, prices)
     latest = build_consistency_features(latest)
     scored = score_candidates(latest, benchmark_prices, rules)
     save_outputs(scored, failed_symbols, config, rules)

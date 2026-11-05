@@ -12,6 +12,7 @@ force=True while the orchestrator step does not.
 from __future__ import annotations
 
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -34,9 +35,12 @@ def _seed_fresh_caches(base: Path) -> Path:
     """Create every optional CSV with a just-now mtime, i.e. maximally fresh."""
     data = base / "data"
     data.mkdir(parents=True, exist_ok=True)
+    # Today's date: FII/DII and bulk-deal caches are fresh only if they hold the
+    # latest published day (see test_flow_publication_freshness.py).
+    today = datetime.now(timezone(timedelta(hours=5, minutes=30))).date().isoformat()  # IST
     for name in TARGETS.values():
         p = data / name
-        p.write_text("Date,Symbol\n2026-08-17,AAA\n", encoding="utf-8")
+        p.write_text(f"Date,Symbol\n{today},AAA\n", encoding="utf-8")
         now = time.time()
         import os
         os.utime(p, (now, now))

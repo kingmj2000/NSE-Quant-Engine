@@ -33,6 +33,8 @@ SCORING_RULES_CSV = BASE_DIR / "scoring_rules.csv"
 FORWARD_OUT = OUTPUT_DIR / "forward_return_history.csv"
 PER_SYMBOL_SUMMARY_OUT = OUTPUT_DIR / "per_symbol_forward_summary.csv"
 MISSING_OUT = OUTPUT_DIR / "forward_return_missing_signals.csv"
+# Written by nse_quant_engine.py on every download: price bars its guard rejected.
+PRICE_QUARANTINE_LOG = DATA_DIR / "price_quarantine_log.csv"
 
 FORWARD_COLUMNS = [
     "Signal_Date",
@@ -370,6 +372,44 @@ def merge_forward_history(new_fwd: pd.DataFrame, path: Path,
     return combined, stats
 
 
+def load_quarantined_bars(path: Path | None = None) -> set:
+    """(Symbol, 'YYYY-MM-DD') bars the engine's price guard rejected this run."""
+    path = PRICE_QUARANTINE_LOG if path is None else path
+    if not path.exists():
+        return set()
+    try:
+        q = pd.read_csv(path)
+    except Exception:
+        return set()
+    if q.empty or not {"Symbol", "Date"}.issubset(q.columns):
+        return set()
+    days = pd.to_datetime(q["Date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    return {(str(s), d) for s, d in zip(q["Symbol"], days) if isinstance(d, str)}
+
+
+def drop_rows_on_quarantined_bars(fwd: pd.DataFrame, bars: set) -> tuple[pd.DataFrame, int]:
+    """Remove forward returns that were computed from a since-rejected price bar.
+
+    merge_forward_history keeps rows this run cannot recompute, which is right
+    for symbols that left the universe and wrong for a row whose price bar was
+    bad. 2026-11-05: NV20.NS's zero-volume 12,045.90 bar (true level ~13.9) gave
+    three rows of +901x to +909x (21D from 10-06, 10D from 10-22, 5D from 10-29).
+    Once the guard drops that bar, those rows can no longer be recomputed, so the
+    union would have kept the bad values on record. A row whose signal or
+    forward bar is in the quarantine log is not evidence; it is recomputed from
+    clean bars as soon as the series has enough of them.
+    """
+    if fwd is None or fwd.empty or not bars:
+        return fwd, 0
+    sym = fwd["Symbol"].astype(str)
+    hit = pd.Series(False, index=fwd.index)
+    for col in ("Forward_Date", "Signal_Date_Actual_In_Price_File"):
+        if col in fwd.columns:
+            days = pd.to_datetime(fwd[col], errors="coerce").dt.strftime("%Y-%m-%d")
+            hit |= pd.Series([(s, d) in bars for s, d in zip(sym, days)], index=fwd.index)
+    return fwd[~hit].reset_index(drop=True), int(hit.sum())
+
+
 def main() -> None:
     print("Validation Builder - Stage 3.3 Hotfix")
     print("=====================================")
@@ -391,6 +431,10 @@ def main() -> None:
         print("  (retained rows are signals this run could not recompute — usually "
               "symbols no longer in the current universe/price file. Keeping them "
               "avoids survivorship bias.)")
+    fwd, n_quarantined = drop_rows_on_quarantined_bars(fwd, load_quarantined_bars())
+    if n_quarantined:
+        print(f"Forward returns — dropped {n_quarantined} row(s) computed from price bars "
+              f"the engine quarantined (see data/{PRICE_QUARANTINE_LOG.name}).")
 
     write_csv_with_headers(fwd, FORWARD_OUT, FORWARD_COLUMNS)
     write_csv_with_headers(missing, MISSING_OUT, MISSING_COLUMNS)

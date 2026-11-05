@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -36,8 +37,10 @@ def _fresh(p: Path, text: str) -> None:
 def _tiles(tmp_path: Path, monkeypatch, files: dict[str, str]) -> dict:
     data = tmp_path / "data"
     data.mkdir(parents=True, exist_ok=True)
-    # Fresh fii_dii cache -> its fetcher is skipped; nothing touches the network.
-    _fresh(data / "fii_dii_daily.csv", "Date,FII_Net\n2026-11-03,1.0\n")
+    # Fresh fii_dii cache holding today -> its fetcher is skipped; nothing
+    # touches the network.
+    today = datetime.now(timezone(timedelta(hours=5, minutes=30))).date().isoformat()  # IST
+    _fresh(data / "fii_dii_daily.csv", f"Date,FII_Net\n{today},1.0\n")
     for name, text in files.items():
         _fresh(data / name, text)
 

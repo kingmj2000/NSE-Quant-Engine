@@ -551,6 +551,32 @@ def _dedupe_rows(df):
     return df.reset_index(drop=True).drop_duplicates().copy()
 
 
+_IMPORT_ID_COLUMNS = ('Import_Symbol', 'Import_ISIN', 'Import_Scheme_Code')
+
+# Per-field source column names as written to manual_etf_quality.csv.
+_FIELD_SOURCE_COLUMN = {
+    'AUM_Cr': 'AUM_Source',
+    'TER': 'TER_Source',
+    'Tracking_Error': 'Tracking_Error_Source',
+    'Tracking_Difference': 'Tracking_Difference_Source',
+    'Benchmark_Index': 'Benchmark_Source',
+}
+
+
+def _import_row_is_identified(r):
+    """True when an import row names its own instrument (symbol, ISIN or scheme code).
+
+    Such a row describes one specific scheme. If none of its identifiers matched
+    this ETF, it belongs to a different product, however similar the names look
+    once AMC words are stripped.
+    """
+    for col in _IMPORT_ID_COLUMNS:
+        v = r.get(col, '')
+        if pd.notna(v) and str(v).strip() and str(v).strip().lower() not in ['nan', 'none']:
+            return True
+    return False
+
+
 def _candidate_import_rows(etf, imports):
     """Return all plausible import rows for an ETF, not just the first one.
 
@@ -582,10 +608,17 @@ def _candidate_import_rows(etf, imports):
         if not hit.empty:
             candidates.append(('Import ISIN', 1.0, hit))
 
-    # Fuzzy fallback only when exact identifiers do not cover any source rows.
+    # Fuzzy fallback only when exact identifiers do not cover any source rows,
+    # and only against rows that carry no identifier of their own. Every row of
+    # the auto AUM/TER imports names its symbol and ISIN, so a name match there is
+    # always another scheme: on 2026-11-05 this path gave 20 ETFs other AMCs'
+    # (or index funds') figures, e.g. Bajaj, Zerodha and Edelweiss "BSE Top 10
+    # Banks ETF" all got AUM 1,720.42 cr / TER 0.12%, and IVZSENSEX got TER 4.00%.
     if not candidates:
         scored = []
         for idx, r in imports.iterrows():
+            if _import_row_is_identified(r):
+                continue
             imp_name = str(r.get('Import_Name', ''))
             if not imp_name or imp_name.lower() == 'nan':
                 continue
@@ -650,6 +683,12 @@ def overlay_existing_manual(out, existing_row):
         if field in existing_row.index:
             old = existing_row.get(field)
             if pd.notna(old) and str(old).strip() not in ['', 'nan', 'None']:
+                # Values written by a name-only fuzzy match are re-derived every
+                # run, never carried forward. This also clears the cross-scheme
+                # values the identified-row fuzzy path stored before it was closed.
+                stored_src = existing_row.get(_FIELD_SOURCE_COLUMN.get(field, ''), '')
+                if pd.notna(stored_src) and '(Import Fuzzy)' in str(stored_src):
+                    continue
                 if field == 'AUM_Cr':
                     ok, clean_aum, reason = valid_etf_aum(old, existing_row.get('AMFI_Scheme_Code', out.get('AMFI_Scheme_Code', np.nan)))
                     if not ok:

@@ -28,7 +28,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -136,6 +136,53 @@ def _seeded_status(last_date: str | None, rows: int, **age_kw) -> str:
 FRESH_FLOW_HOURS  = 24   # FII/DII & bulk deals — daily flow data
 FRESH_FUND_HOURS  = 24 * 7   # fundamentals & earnings — weekly refresh is fine
 FRESH_EVENT_HOURS = 24 * 3
+
+# NSE posts the day's FII/DII figures and bulk-deal file after market processing.
+# The fetch warning below already tells the operator to run after 19:00 IST.
+FLOW_PUBLISH_CUTOFF_HOUR_IST = 19
+_IST = timezone(timedelta(hours=5, minutes=30))   # fixed offset: no tzdata needed on Windows
+
+
+def _now_ist() -> datetime:
+    return datetime.now(_IST)
+
+
+def _expected_flow_day(now: datetime | None = None,
+                       cutoff_hour: int = FLOW_PUBLISH_CUTOFF_HOUR_IST):
+    """Latest weekday whose FII/DII and bulk-deal figures should be out by `now` (IST).
+
+    Exchange holidays are not known here. On one, the cache looks a day short and
+    is refetched: one request per run that returns the same latest day.
+    """
+    now = now or _now_ist()
+    day = now.date() if now.hour >= cutoff_hour else now.date() - timedelta(days=1)
+    while day.weekday() >= 5:
+        day -= timedelta(days=1)
+    return day
+
+
+def _latest_cached_day(path: Path, date_col: str = "Date"):
+    try:
+        dates = pd.to_datetime(pd.read_csv(path, usecols=[date_col])[date_col], errors="coerce")
+    except Exception:
+        return None
+    latest = dates.max()
+    return None if pd.isna(latest) else latest.date()
+
+
+def _flow_cache_has_latest_day(path: Path, now: datetime | None = None) -> bool:
+    """True when a daily-flow cache already holds the latest day NSE should have published.
+
+    A 24-hour mtime window is the wrong freshness test for once-a-day data from
+    latest-only sources. A 17:40 fetch runs before publication and holds the
+    previous day; it still looked fresh at 15:46 the next afternoon, the fetch
+    was skipped, and the day in between could never be fetched again (10-26 was
+    lost that way on the 2026-10-27 run; 11-05 15:43 skipped the same way).
+    Checking the content also covers a late publication: a 19:05 fetch that
+    still gets yesterday is refetched by the next run instead of trusted.
+    """
+    latest = _latest_cached_day(path)
+    return latest is not None and latest >= _expected_flow_day(now)
 
 
 # ------------------------------- utilities ----------------------------------
@@ -875,8 +922,11 @@ def _report_flow_coverage(feed: str, target: Path, backfill_ok: bool) -> None:
 def fetch_fii_dii(data_dir: Path, keep_days: int = 90, force: bool = False) -> bool:
     target = data_dir / "fii_dii_daily.csv"
     if not force and _is_fresh(target, FRESH_FLOW_HOURS):
-        _log(f"fii_dii_daily.csv fresh (<{FRESH_FLOW_HOURS}h) — skipping fetch")
-        return True
+        if _flow_cache_has_latest_day(target):
+            _log(f"fii_dii_daily.csv fresh (<{FRESH_FLOW_HOURS}h) — skipping fetch")
+            return True
+        _log(f"fii_dii_daily.csv is recent but does not hold {_expected_flow_day()} "
+             f"(published after {FLOW_PUBLISH_CUTOFF_HOUR_IST}:00 IST) — refetching")
     sess = _requests_session()
     # The official latest-only endpoint is the only source measured working.
     # Historical NSE is retained as a once-per-day re-probe, not as a retry loop.
@@ -1055,8 +1105,11 @@ def fetch_bulk_deals(data_dir: Path, days: int = 30, keep_days: int = 60,
                      force: bool = False) -> bool:
     target = data_dir / "bulk_deals.csv"
     if not force and _is_fresh(target, FRESH_FLOW_HOURS):
-        _log(f"bulk_deals.csv fresh (<{FRESH_FLOW_HOURS}h) — skipping fetch")
-        return True
+        if _flow_cache_has_latest_day(target):
+            _log(f"bulk_deals.csv fresh (<{FRESH_FLOW_HOURS}h) — skipping fetch")
+            return True
+        _log(f"bulk_deals.csv is recent but does not hold {_expected_flow_day()} "
+             f"(published after {FLOW_PUBLISH_CUTOFF_HOUR_IST}:00 IST) — refetching")
     sess = _requests_session()
     sources = _filter_known_unavailable("bulk_deals", [
         ("nse-archives", lambda: _bulk_from_nse_archive(sess)),
