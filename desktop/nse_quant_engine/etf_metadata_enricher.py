@@ -34,6 +34,13 @@ import numpy as np
 import pandas as pd
 
 from core.safe_io import read_cached_csv, read_required_csv
+from core.etf_source_rules import (
+    AMFI_PARSER_VERSION,
+    ETF_TER_CAP_DECIMAL,
+    benchmark_or_blank,
+    is_amfi_category_label,
+    is_non_etf_category,
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / 'data'
@@ -191,10 +198,12 @@ def parse_amount_to_cr(value):
     return num
 
 
-MAX_REASONABLE_ETF_AUM_CR = float(os.environ.get('MAX_REASONABLE_ETF_AUM_CR', '100000'))
+# SBI Nifty 50 ETF alone is ~2.1 lakh crore (AMFI AAUM Jan-Mar 2026); 1 lakh cr rejected it.
+MAX_REASONABLE_ETF_AUM_CR = float(os.environ.get('MAX_REASONABLE_ETF_AUM_CR', '500000'))
 SCHEME_CODE_MIN = 100000
 SCHEME_CODE_MAX = 200000
-MAX_REASONABLE_TER_DECIMAL = float(os.environ.get('MAX_REASONABLE_TER_DECIMAL', '0.05'))
+# SEBI Reg. 52(6) caps ETF / index-fund TER at 1.00%; 4.00% for a Nifty 50 ETF is a unit error.
+MAX_REASONABLE_TER_DECIMAL = float(os.environ.get('MAX_REASONABLE_TER_DECIMAL', str(ETF_TER_CAP_DECIMAL)))
 MAX_REASONABLE_TRACKING_ERROR_DECIMAL = float(os.environ.get('MAX_REASONABLE_TRACKING_ERROR_DECIMAL', '0.20'))
 MAX_ABS_TRACKING_DIFFERENCE_DECIMAL = float(os.environ.get('MAX_ABS_TRACKING_DIFFERENCE_DECIMAL', '0.20'))
 
@@ -422,8 +431,24 @@ def read_import_files(log_rows):
     return pd.concat(pieces, ignore_index=True) if pieces else pd.DataFrame()
 
 
+def _row_parser_version(value):
+    x = parse_float(value)
+    return int(x) if pd.notna(x) else 0
+
+
+def _is_auto_aum_file(name):
+    return str(name).lower().startswith('auto_amfi_aum_')
+
+
+def _is_auto_amfi_file(name):
+    return str(name).lower().startswith('auto_amfi_')
+
+
+V2_SOURCE_TAG = f'[amfi_parser_v{AMFI_PARSER_VERSION}]'
+
+
 def standardize_import_metadata(raw):
-    cols = ['Import_Symbol','Import_ISIN','Import_Name','Import_Scheme_Code','AUM_Cr','AUM_Validation','TER','TER_Validation','Tracking_Error','Tracking_Error_Validation','Tracking_Difference','Tracking_Difference_Validation','Benchmark_Index','Source_File']
+    cols = ['Import_Symbol','Import_ISIN','Import_Name','Import_Scheme_Code','Scheme_Category','AUM_Cr','AUM_Validation','TER','TER_Validation','Tracking_Error','Tracking_Error_Validation','Tracking_Difference','Tracking_Difference_Validation','Benchmark_Index','Parser_Version','Source_File']
     if raw.empty:
         out = pd.DataFrame(columns=cols)
         out.to_csv(IMPORT_STANDARDIZED_OUT, index=False)
@@ -437,25 +462,50 @@ def standardize_import_metadata(raw):
     te_col = find_col(raw, ['tracking error', 'tracking error annualized', 'tracking error %'])
     td_col = find_col(raw, ['tracking difference', 'tracking deviation', 'tracking diff', 'tracking difference %'])
     bench_col = find_col(raw, ['benchmark index','benchmark','underlying index','index'])
+    category_col = find_col(raw, ['scheme category'])
+    parser_col = find_col(raw, ['parser version'])
     rows = []
     for _, r in raw.iterrows():
         scheme_code = str(r.get(scheme_code_col, '')).strip() if scheme_code_col else ''
+        source_file = str(r.get('__Source_File', ''))
+        parser_version = _row_parser_version(r.get(parser_col)) if parser_col else 0
         ok, clean_aum, aum_reason = valid_etf_aum(r.get(aum_col), scheme_code) if aum_col else (False, np.nan, 'missing_aum_column')
+        if ok and _is_auto_aum_file(source_file) and parser_version < AMFI_PARSER_VERSION:
+            # Pre-v2 AUM files read AMFI's Rs-lakh AAUM as crore (and fuzzy-borrowed
+            # other AMCs' rows). Every value in them is unusable; never score them.
+            ok, clean_aum, aum_reason = False, np.nan, 'legacy_amfi_aum_parser_units'
+        bench_raw = r.get(bench_col, '') if bench_col else ''
+        category = str(r.get(category_col, '')).strip() if category_col and pd.notna(r.get(category_col)) else ''
+        if not category and is_amfi_category_label(bench_raw):
+            # Pre-v2 TER files wrote the AMFI category into the benchmark column.
+            category = ' '.join(str(bench_raw).split())
+        ter_ok, ter_val, ter_reason = valid_ter(r.get(ter_col)) if ter_col else (False, np.nan, 'missing_ter_column')
+        te_ok, te_val, te_reason = valid_tracking_error(r.get(te_col)) if te_col else (False, np.nan, 'missing_tracking_error_column')
+        td_ok, td_val, td_reason = valid_tracking_difference(r.get(td_col)) if td_col else (False, np.nan, 'missing_tracking_difference_column')
+        if is_non_etf_category(category):
+            # The source row is an index fund / FoF / active / liquid scheme, not an ETF.
+            why = f'non_etf_scheme_category: {category}'
+            ok, clean_aum, aum_reason = False, np.nan, why
+            ter_val, ter_reason = np.nan, why
+            te_val, te_reason = np.nan, why
+            td_val, td_reason = np.nan, why
         rows.append({
             'Import_Symbol': str(r.get(symbol_col, '')).strip() if symbol_col else '',
             'Import_ISIN': str(r.get(isin_col, '')).strip() if isin_col else '',
             'Import_Name': str(r.get(name_col, '')).strip() if name_col else '',
             'Import_Scheme_Code': scheme_code,
+            'Scheme_Category': category,
             'AUM_Cr': clean_aum if ok else np.nan,
             'AUM_Validation': aum_reason,
-            'TER': (valid_ter(r.get(ter_col))[1] if ter_col else np.nan),
-            'TER_Validation': (valid_ter(r.get(ter_col))[2] if ter_col else 'missing_ter_column'),
-            'Tracking_Error': (valid_tracking_error(r.get(te_col))[1] if te_col else np.nan),
-            'Tracking_Error_Validation': (valid_tracking_error(r.get(te_col))[2] if te_col else 'missing_tracking_error_column'),
-            'Tracking_Difference': (valid_tracking_difference(r.get(td_col))[1] if td_col else np.nan),
-            'Tracking_Difference_Validation': (valid_tracking_difference(r.get(td_col))[2] if td_col else 'missing_tracking_difference_column'),
-            'Benchmark_Index': str(r.get(bench_col, '')).strip() if bench_col else '',
-            'Source_File': str(r.get('__Source_File', '')),
+            'TER': ter_val,
+            'TER_Validation': ter_reason,
+            'Tracking_Error': te_val,
+            'Tracking_Error_Validation': te_reason,
+            'Tracking_Difference': td_val,
+            'Tracking_Difference_Validation': td_reason,
+            'Benchmark_Index': benchmark_or_blank(bench_raw),
+            'Parser_Version': parser_version,
+            'Source_File': source_file,
         })
     out = pd.DataFrame(rows).replace({'': np.nan})
     out.to_csv(IMPORT_STANDARDIZED_OUT, index=False)
@@ -507,6 +557,8 @@ def match_nav(etf, nav_df):
 
 def row_to_metadata(r, method):
     src = str(r.get('Source_File', 'import'))
+    if _is_auto_amfi_file(src) and _row_parser_version(r.get('Parser_Version')) >= AMFI_PARSER_VERSION:
+        src = f'{src} {V2_SOURCE_TAG}'
     out = {}
     ok, clean_aum, aum_reason = valid_etf_aum(r.get('AUM_Cr', np.nan), r.get('Import_Scheme_Code', np.nan))
     if ok:
@@ -520,9 +572,9 @@ def row_to_metadata(r, method):
     ok_td, clean_td, _ = valid_tracking_difference(r.get('Tracking_Difference', np.nan))
     if ok_td:
         out['Tracking_Difference'] = clean_td; out['Tracking_Difference_Source'] = f'{src} ({method})'
-    bench = r.get('Benchmark_Index', np.nan)
-    if pd.notna(bench) and str(bench).strip() and str(bench).strip().lower() not in ['nan', 'none']:
-        out['Benchmark_Index'] = str(bench).strip(); out['Benchmark_Source'] = f'{src} ({method})'
+    bench = benchmark_or_blank(r.get('Benchmark_Index', np.nan) if pd.notna(r.get('Benchmark_Index', np.nan)) else '')
+    if bench:
+        out['Benchmark_Index'] = bench; out['Benchmark_Source'] = f'{src} ({method})'
     return out
 
 
@@ -676,44 +728,62 @@ def find_existing_manual_row(existing, symbol):
     return None if hit.empty else hit.iloc[0]
 
 
+def _stored_value_is_rederived(stored_src):
+    """True when a stored value came from a source that is rebuilt every run.
+
+    Auto AMFI imports are regenerated by the fetchers, so this run's file is the
+    authority. Values stored from them by an older parser (no v2 tag) are known
+    to carry unit/scheme-mix errors and must not survive via carry-forward.
+    Name-only fuzzy matches are re-derived every run as well.
+    """
+    text = '' if stored_src is None or (not isinstance(stored_src, str) and pd.isna(stored_src)) else str(stored_src)
+    if '(Import Fuzzy)' in text:
+        return True
+    if 'auto_amfi_' in text and V2_SOURCE_TAG not in text:
+        return True
+    return False
+
+
 def overlay_existing_manual(out, existing_row):
+    """Fill gaps from the previous manual_etf_quality.csv; fresh imports win.
+
+    Earlier versions overwrote this run's validated import values with the stored
+    ones, so a corrected source could never replace an old wrong value.
+    """
     if existing_row is None:
         return out
     for field in QUALITY_FIELDS:
-        if field in existing_row.index:
-            old = existing_row.get(field)
-            if pd.notna(old) and str(old).strip() not in ['', 'nan', 'None']:
-                # Values written by a name-only fuzzy match are re-derived every
-                # run, never carried forward. This also clears the cross-scheme
-                # values the identified-row fuzzy path stored before it was closed.
-                stored_src = existing_row.get(_FIELD_SOURCE_COLUMN.get(field, ''), '')
-                if pd.notna(stored_src) and '(Import Fuzzy)' in str(stored_src):
-                    continue
-                if field == 'AUM_Cr':
-                    ok, clean_aum, reason = valid_etf_aum(old, existing_row.get('AMFI_Scheme_Code', out.get('AMFI_Scheme_Code', np.nan)))
-                    if not ok:
-                        continue
-                    out[field] = clean_aum
-                elif field == 'TER':
-                    ok, clean_ter, reason = valid_ter(old)
-                    if not ok:
-                        continue
-                    out[field] = clean_ter
-                elif field == 'Tracking_Error':
-                    ok, clean_te, reason = valid_tracking_error(old)
-                    if not ok:
-                        continue
-                    out[field] = clean_te
-                elif field == 'Tracking_Difference':
-                    ok, clean_td, reason = valid_tracking_difference(old)
-                    if not ok:
-                        continue
-                    out[field] = clean_td
-                else:
-                    out[field] = old
-                src_col = f'{field}_Source'
-                if src_col not in out or not out.get(src_col):
-                    out[src_col] = 'Existing manual_etf_quality.csv'
+        src_col = _FIELD_SOURCE_COLUMN[field]
+        cur = out.get(field, np.nan)
+        if cur is not None and not (isinstance(cur, float) and pd.isna(cur)) and str(cur).strip() not in ['', 'nan', 'None']:
+            continue  # fresh value from this run wins
+        if field not in existing_row.index:
+            continue
+        old = existing_row.get(field)
+        if pd.isna(old) or str(old).strip() in ['', 'nan', 'None']:
+            continue
+        stored_src = existing_row.get(src_col, '') if src_col in existing_row.index else ''
+        if _stored_value_is_rederived(stored_src):
+            continue
+        if field == 'AUM_Cr':
+            ok, clean, _ = valid_etf_aum(old, existing_row.get('AMFI_Scheme_Code', out.get('AMFI_Scheme_Code', np.nan)))
+        elif field == 'TER':
+            ok, clean, _ = valid_ter(old)
+        elif field == 'Tracking_Error':
+            ok, clean, _ = valid_tracking_error(old)
+        elif field == 'Tracking_Difference':
+            ok, clean, _ = valid_tracking_difference(old)
+        else:
+            clean = benchmark_or_blank(old)
+            ok = bool(clean)
+        if not ok:
+            continue
+        out[field] = clean
+        stored_text = '' if pd.isna(stored_src) else str(stored_src).strip()
+        if stored_text.startswith('Carried forward'):
+            out[src_col] = stored_text
+        else:
+            out[src_col] = f"Carried forward ({stored_text or 'manual_etf_quality.csv'})"
     return out
 
 

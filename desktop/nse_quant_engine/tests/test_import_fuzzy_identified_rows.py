@@ -129,19 +129,27 @@ def test_overlay_does_not_carry_forward_fuzzy_sourced_values():
 
 
 def test_overlay_keeps_identifier_sourced_and_hand_entered_values():
-    stored = _stored_row(f"{AUM_FILE} (Import Symbol)",          # exact match
+    # Updated for the AMFI parser v2 fix: auto-import values are carried forward
+    # only when written by the v2 parser (tagged), and an AMFI category label is
+    # never a benchmark (see tests/test_metadata_overlay_fresh_wins.py).
+    v2 = enr.V2_SOURCE_TAG
+    stored = _stored_row(f"{AUM_FILE} {v2} (Import Symbol)",      # exact match, v2 parser
                          "Existing manual_etf_quality.csv",       # carried / hand-entered
                          np.nan)                                  # no source recorded
+    stored["Benchmark_Index"] = "BSE Bankex Top 10 TRI"
     out = enr.overlay_existing_manual({"Symbol": "BANK10BETF.NS"}, stored)
     assert out["AUM_Cr"] == 1720.42
     assert out["TER"] == 0.0012
-    assert out["Benchmark_Index"] == "Other Scheme - Other  ETFs"
+    assert out["Benchmark_Index"] == "BSE Bankex Top 10 TRI"
+    assert out["AUM_Source"].startswith("Carried forward (")
 
 
 def test_overlay_handles_mixed_sources_per_field():
-    stored = _stored_row(f"{AUM_FILE} (Import Symbol)",
-                         f"{TER_FILE} (Import Fuzzy)",
-                         f"{AUM_FILE} (Import Symbol); {TER_FILE} (Import Fuzzy)")
+    v2 = enr.V2_SOURCE_TAG
+    stored = _stored_row(f"{AUM_FILE} {v2} (Import Symbol)",
+                         f"{TER_FILE} {v2} (Import Fuzzy)",
+                         f"{AUM_FILE} {v2} (Import Symbol); {TER_FILE} (Import Fuzzy)")
+    stored["Benchmark_Index"] = "BSE Bankex Top 10 TRI"
     out = enr.overlay_existing_manual({"Symbol": "BANK10BETF.NS"}, stored)
     assert out["AUM_Cr"] == 1720.42           # its own symbol matched
     assert pd.isna(out.get("TER", np.nan))    # borrowed from another scheme

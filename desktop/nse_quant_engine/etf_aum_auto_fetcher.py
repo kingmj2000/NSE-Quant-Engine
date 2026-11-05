@@ -68,6 +68,12 @@ import numpy as np
 import pandas as pd
 
 from core.safe_io import read_required_csv
+from core.etf_source_rules import (
+    AMFI_AAUM_UNIT,
+    AMFI_PARSER_VERSION,
+    is_amfi_category_label,
+    is_non_etf_category,
+)
 import requests
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -85,6 +91,9 @@ NAVALL_CSV = DATA_DIR / "amfi_navall_latest.csv"
 
 AUTO_IMPORT_LATEST = IMPORT_DIR / "auto_amfi_aum_latest.csv"
 SOURCE_STD_OUT = DATA_DIR / "amfi_aum_source_standardized.csv"
+# Flattened AMFI scheme-wise AAUM payload (AMFI_Code, SchemeNAVName,
+# SchemeCat_Desc, AverageAumForTheMonth). Read when no live source is reachable.
+SCHEMEWISE_RAW_CACHE = DATA_DIR / "amfi_aum_schemewise_latest_raw.csv"
 MATCH_DIAG_OUT = DATA_DIR / "etf_aum_auto_match_diagnostics.csv"
 LOG_OUT = DATA_DIR / "etf_aum_auto_fetch_log.csv"
 STATUS_OUT = DATA_DIR / "etf_aum_auto_status.json"
@@ -97,9 +106,12 @@ FORCE_REFRESH = os.environ.get("FORCE_AUM_REFRESH", "").strip().lower() in {"1",
 # AMFI scheme codes are typically six-digit values around 100000-200000.
 # If those get mistaken as AUM, the engine falsely thinks every ETF has huge AUM.
 # Keep this conservative. If an Indian ETF ever exceeds 100000 crore AUM, we can raise it.
-MAX_REASONABLE_ETF_AUM_CR = float(os.environ.get("MAX_REASONABLE_ETF_AUM_CR", "100000"))
+# SBI Nifty 50 ETF averaged about 2.1 lakh crore in Jan-Mar 2026, so the old
+# 1 lakh crore ceiling would reject the largest real ETF once units are right.
+MAX_REASONABLE_ETF_AUM_CR = float(os.environ.get("MAX_REASONABLE_ETF_AUM_CR", "500000"))
 SCHEME_CODE_MIN = 100000
 SCHEME_CODE_MAX = 200000
+FUZZY_TIE_MARGIN = 0.02
 
 NAVALL_URLS = [
     "https://www.amfiindia.com/spages/NAVAll.txt",
@@ -183,6 +195,10 @@ def should_attempt_refresh(log_rows: list[dict]) -> bool:
         log(log_rows, "Schedule", "FORCE", "FORCE_AUM_REFRESH=1; fetching regardless of date")
         return True
 
+    if str(status.get("parser_version", "")) != str(AMFI_PARSER_VERSION):
+        log(log_rows, "Schedule", "ATTEMPT", f"Existing AUM file was built by parser_version={status.get('parser_version', 'none')}; current={AMFI_PARSER_VERSION} (unit fix). Rebuilding.")
+        return True
+
     if today.day < REFRESH_START_DAY:
         log(log_rows, "Schedule", "SKIP", f"Day {today.day} < refresh start day {REFRESH_START_DAY}; reusing last good file")
         return False
@@ -228,6 +244,19 @@ def tokens(value: Any, drop_amc: bool = False) -> list[str]:
     return out
 
 
+_GENERIC_AMC_WORDS = {"life", "sun", "prudential", "oswal", "paribas", "india"}
+
+
+def amc_tokens(value: Any) -> set[str]:
+    """AMC words in a name, including NSE issuer codes like UTIAMC / BIRLASLAMC."""
+    found = set()
+    for w in clean_text(value).split():
+        for t in AMC_TOKENS - _GENERIC_AMC_WORDS:
+            if w == t or (w.endswith("amc") and w.startswith(t)) or (len(t) >= 5 and w.startswith(t)):
+                found.add(t)
+    return found
+
+
 def combined_score(a: Any, b: Any) -> float:
     ta = set(tokens(a, drop_amc=True))
     tb = set(tokens(b, drop_amc=True))
@@ -258,10 +287,19 @@ def parse_float(value: Any) -> float:
         return np.nan
 
 
-def parse_aum_cr(value: Any) -> float:
+def parse_aum_cr(value: Any, unit: str = "auto") -> float:
+    """Return Rs crore.
+
+    unit="lakh" is for AMFI scheme-wise average AUM, which AMFI publishes in
+    Rs lakh. The "auto" branch guessed crore, and divided anything above 10 lakh
+    by 1e7: NIFTYBEES (5,705,866 lakh = 57,059 cr) became 0.57 cr while small
+    ETFs were inflated 100x.
+    """
     num = parse_float(value)
     if pd.isna(num):
         return np.nan
+    if unit == "lakh":
+        return round(num / 100, 2)
     text = str(value).lower() if value is not None else ""
     if "lakh crore" in text:
         return round(num * 100000, 2)
@@ -299,8 +337,8 @@ def is_scheme_code_like_value(value: Any, scheme_code: Any = None) -> bool:
     return False
 
 
-def validate_etf_aum_cr(value: Any, scheme_code: Any = None) -> tuple[bool, str, float]:
-    aum = parse_aum_cr(value)
+def validate_etf_aum_cr(value: Any, scheme_code: Any = None, unit: str = "auto") -> tuple[bool, str, float]:
+    aum = parse_aum_cr(value, unit)
     if pd.isna(aum) or aum <= 0:
         return False, "blank_or_non_positive", np.nan
     if is_scheme_code_like_value(aum, scheme_code):
@@ -413,7 +451,29 @@ def maybe_make_header_from_row(raw: pd.DataFrame, row_idx: int) -> pd.DataFrame:
     return df
 
 
-def dataframe_to_standardized(df: pd.DataFrame, source_name: str) -> pd.DataFrame:
+CATEGORY_KEYS = ["schemecat desc", "scheme category", "schemecategory", "category"]
+
+
+def _aaum_split_columns(cols: list[str]) -> tuple[str | None, str | None]:
+    """AMFI AAUM sheets split each scheme's AUM into two columns.
+
+    "Excluding Fund of Funds - Domestic but including Fund of Funds - Overseas"
+    plus "Fund of Funds - Domestic". The scheme's AUM is their sum.
+    """
+    excl = next((c for c in cols if "excluding" in norm_key(c) and "fundoffunds" in norm_key(c)), None)
+    fof = next((c for c in cols if c != excl and "fundoffundsdomestic" in norm_key(c) and "excluding" not in norm_key(c)), None)
+    return excl, fof
+
+
+def _aaum_total(row: Any, excl: str, fof: str | None) -> Any:
+    a = parse_float(row.get(excl, np.nan))
+    if pd.isna(a):
+        return np.nan
+    b = parse_float(row.get(fof, np.nan)) if fof else np.nan
+    return a + (0.0 if pd.isna(b) else b)
+
+
+def dataframe_to_standardized(df: pd.DataFrame, source_name: str, unit: str = "auto") -> pd.DataFrame:
     if df is None or df.empty:
         return empty_source_df()
     df = flatten_cols(df).dropna(how="all")
@@ -421,7 +481,9 @@ def dataframe_to_standardized(df: pd.DataFrame, source_name: str) -> pd.DataFram
     code_col = find_col(cols, CODE_KEYS)
     name_col = find_col(cols, NAME_KEYS)
     isin_col = find_col(cols, ISIN_KEYS)
-    aum_col = choose_aum_column(df, code_col)
+    cat_col = find_col(cols, CATEGORY_KEYS)
+    excl_col, fof_col = _aaum_split_columns(cols)
+    aum_col = excl_col or choose_aum_column(df, code_col)
 
     if aum_col is None or (name_col is None and code_col is None and isin_col is None):
         return empty_source_df()
@@ -432,7 +494,9 @@ def dataframe_to_standardized(df: pd.DataFrame, source_name: str) -> pd.DataFram
         code = str(r.get(code_col, "")).strip() if code_col else ""
         name = str(r.get(name_col, "")).strip() if name_col else ""
         isin = str(r.get(isin_col, "")).strip().upper() if isin_col else ""
-        ok, reason, aum = validate_etf_aum_cr(r.get(aum_col, np.nan), code)
+        cat = str(r.get(cat_col, "")).strip() if cat_col else ""
+        raw_aum = _aaum_total(r, excl_col, fof_col) if excl_col else r.get(aum_col, np.nan)
+        ok, reason, aum = validate_etf_aum_cr(raw_aum, code, unit)
         if not ok:
             rejected += 1
             continue
@@ -446,6 +510,7 @@ def dataframe_to_standardized(df: pd.DataFrame, source_name: str) -> pd.DataFram
             "Scheme_Code": code,
             "Scheme_Name": name,
             "ISIN": isin,
+            "Scheme_Category": cat if is_amfi_category_label(cat) else "",
             "AUM_Cr": aum,
             "AUM_Source": source_name,
         })
@@ -455,7 +520,7 @@ def dataframe_to_standardized(df: pd.DataFrame, source_name: str) -> pd.DataFram
     out = out.drop_duplicates(subset=["Scheme_Code", "Scheme_Name", "ISIN", "AUM_Cr"], keep="first")
     return out.reset_index(drop=True)
 
-def excel_bytes_to_standardized(raw: bytes, source_name: str, log_rows: list[dict]) -> pd.DataFrame:
+def excel_bytes_to_standardized(raw: bytes, source_name: str, log_rows: list[dict], unit: str = "auto") -> pd.DataFrame:
     try:
         xls = pd.ExcelFile(BytesIO(raw))
     except Exception as exc:
@@ -476,13 +541,13 @@ def excel_bytes_to_standardized(raw: bytes, source_name: str, log_rows: list[dic
                         if any(k in row_text for k in ["scheme", "average", "aum", "aaum", "isin"]):
                             candidate_rows.append(i)
                     for ridx in candidate_rows[:10]:
-                        std = dataframe_to_standardized(maybe_make_header_from_row(raw_df, ridx), f"{source_name}::{sheet}::headerrow{ridx}")
+                        std = dataframe_to_standardized(maybe_make_header_from_row(raw_df, ridx), f"{source_name}::{sheet}::headerrow{ridx}", unit)
                         if len(std) > 0:
                             pieces.append(std)
                     break
                 else:
                     df = pd.read_excel(BytesIO(raw), sheet_name=sheet, header=header)
-                    std = dataframe_to_standardized(df, f"{source_name}::{sheet}::header{header}")
+                    std = dataframe_to_standardized(df, f"{source_name}::{sheet}::header{header}", unit)
                     if len(std) > 0:
                         pieces.append(std)
                         # Continue scanning: some sheets have multiple possible blocks.
@@ -495,23 +560,23 @@ def excel_bytes_to_standardized(raw: bytes, source_name: str, log_rows: list[dic
 
 
 def empty_source_df() -> pd.DataFrame:
-    return pd.DataFrame(columns=["Scheme_Code", "Scheme_Name", "ISIN", "AUM_Cr", "AUM_Source"])
+    return pd.DataFrame(columns=["Scheme_Code", "Scheme_Name", "ISIN", "Scheme_Category", "AUM_Cr", "AUM_Source"])
 
 
-def object_to_standardized(obj: Any, source_name: str, log_rows: list[dict]) -> pd.DataFrame:
+def object_to_standardized(obj: Any, source_name: str, log_rows: list[dict], unit: str = "auto") -> pd.DataFrame:
     if obj is None:
         return empty_source_df()
     # bytes Excel
     if isinstance(obj, (bytes, bytearray)):
-        return excel_bytes_to_standardized(bytes(obj), source_name, log_rows)
+        return excel_bytes_to_standardized(bytes(obj), source_name, log_rows, unit)
     # Polars DataFrame
     if hasattr(obj, "to_pandas"):
         try:
-            return dataframe_to_standardized(obj.to_pandas(), source_name)
+            return dataframe_to_standardized(obj.to_pandas(), source_name, unit)
         except Exception:
             pass
     if isinstance(obj, pd.DataFrame):
-        return dataframe_to_standardized(obj, source_name)
+        return dataframe_to_standardized(obj, source_name, unit)
     # list/dict JSON-like
     rows = []
 
@@ -539,21 +604,30 @@ def object_to_standardized(obj: Any, source_name: str, log_rows: list[dict]) -> 
         if isinstance(item, dict):
             flat = dict(parent)
             nested = []
+            split_total = None
             for k, v in item.items():
-                if isinstance(v, (dict, list)):
+                if isinstance(v, dict) and _aaum_split_columns([str(x) for x in v])[0]:
+                    # {"ExcludingFundOfFunds...": x, "FundOfFundsDomestic": y}
+                    excl, fof = _aaum_split_columns([str(x) for x in v])
+                    split_total = _aaum_total({str(a): b for a, b in v.items()}, excl, fof)
+                elif isinstance(v, (dict, list)):
                     nested.append((k, v))
                 else:
                     flat[str(k)] = v
+            if split_total is not None and pd.notna(split_total):
+                flat["AverageAum_Total"] = split_total
             if has_identity(flat) and has_aum(flat):
                 code = str(find_value(flat, CODE_KEYS)).strip()
                 name = str(find_value(flat, NAME_KEYS)).strip()
                 isin = str(find_value(flat, ISIN_KEYS)).strip().upper()
-                aum = parse_aum_cr(find_value(flat, AUM_KEYS))
+                cat = str(find_value(flat, CATEGORY_KEYS)).strip()
+                aum = parse_aum_cr(flat["AverageAum_Total"] if "AverageAum_Total" in flat else find_value(flat, AUM_KEYS), unit)
                 if pd.notna(aum) and aum > 0:
                     rows.append({
                         "Scheme_Code": code,
                         "Scheme_Name": name,
                         "ISIN": isin,
+                        "Scheme_Category": cat if is_amfi_category_label(cat) else "",
                         "AUM_Cr": aum,
                         "AUM_Source": source_name,
                     })
@@ -646,12 +720,28 @@ def try_amfipy_excel_first(log_rows: list[dict]) -> pd.DataFrame:
     combos = get_latest_fy_periods(aum, log_rows)
     for fy_id, period_id, label in combos[:16]:
         for str_type in ["Categorywise", "Typewise"]:
+            # JSON first: it carries AMFI_Code, which lets merge_aum_to_etfs join by
+            # scheme code instead of fuzzy names. AMFI publishes these values in Rs lakh.
+            for as_df in [False, True]:
+                try:
+                    obj = aum.average_aum_schemewise(fy_id, period_id, str_type=str_type, mf_id=0, as_df=as_df)
+                    save_debug_text(json.dumps(obj, default=str, indent=2), f"average_aum_schemewise_{fy_id}_{period_id}_{str_type}_asdf_{as_df}.json")
+                    df = object_to_standardized(obj, f"amfipy.average_aum_schemewise:{label}:{str_type}:as_df={as_df}", log_rows, unit=AMFI_AAUM_UNIT)
+                    log(log_rows, "amfipy.average_aum_schemewise", "OK", f"fy={fy_id}, period={period_id}, type={str_type}, as_df={as_df}; rows={len(df)}", len(df))
+                    if len(df) > 0:
+                        if not as_df:
+                            write_schemewise_raw_cache(obj, label, log_rows)
+                        pieces.append(df)
+                        return finalize_source_pieces(pieces)
+                except Exception as exc:
+                    log(log_rows, "amfipy.average_aum_schemewise", "ERROR", f"fy={fy_id}, period={period_id}, type={str_type}, as_df={as_df}; {repr(exc)}", 0)
+
             try:
                 raw = aum.average_aum_schemewise_excel(fy_id, period_id, str_type=str_type, mf_id=0)
                 if isinstance(raw, (bytes, bytearray)) and len(raw) > 500:
                     fname = f"average_aum_schemewise_{fy_id}_{period_id}_{str_type}.xlsx".replace("/", "_").replace(" ", "_")
                     save_debug_bytes(bytes(raw), fname)
-                    df = object_to_standardized(raw, f"amfipy.average_aum_schemewise_excel:{label}:{str_type}", log_rows)
+                    df = object_to_standardized(raw, f"amfipy.average_aum_schemewise_excel:{label}:{str_type}", log_rows, unit=AMFI_AAUM_UNIT)
                     log(log_rows, "amfipy.average_aum_schemewise_excel", "OK", f"fy={fy_id}, period={period_id}, type={str_type}; rows={len(df)}", len(df))
                     if len(df) > 0:
                         pieces.append(df)
@@ -661,19 +751,6 @@ def try_amfipy_excel_first(log_rows: list[dict]) -> pd.DataFrame:
                     log(log_rows, "amfipy.average_aum_schemewise_excel", "EMPTY", f"fy={fy_id}, period={period_id}, type={str_type}; returned {type(raw)} len={len(raw) if hasattr(raw, '__len__') else 'NA'}", 0)
             except Exception as exc:
                 log(log_rows, "amfipy.average_aum_schemewise_excel", "ERROR", f"fy={fy_id}, period={period_id}, type={str_type}; {repr(exc)}", 0)
-
-            # JSON/as_df fallback for the same combo.
-            for as_df in [True, False]:
-                try:
-                    obj = aum.average_aum_schemewise(fy_id, period_id, str_type=str_type, mf_id=0, as_df=as_df)
-                    save_debug_text(json.dumps(obj, default=str, indent=2), f"average_aum_schemewise_{fy_id}_{period_id}_{str_type}_asdf_{as_df}.json")
-                    df = object_to_standardized(obj, f"amfipy.average_aum_schemewise:{label}:{str_type}:as_df={as_df}", log_rows)
-                    log(log_rows, "amfipy.average_aum_schemewise", "OK", f"fy={fy_id}, period={period_id}, type={str_type}, as_df={as_df}; rows={len(df)}", len(df))
-                    if len(df) > 0:
-                        pieces.append(df)
-                        return finalize_source_pieces(pieces)
-                except Exception as exc:
-                    log(log_rows, "amfipy.average_aum_schemewise", "ERROR", f"fy={fy_id}, period={period_id}, type={str_type}, as_df={as_df}; {repr(exc)}", 0)
 
     # B. Monthly classified scheme-category-wise Excel fallback.
     try:
@@ -731,6 +808,80 @@ def try_amfipy_excel_first(log_rows: list[dict]) -> pd.DataFrame:
                 log(log_rows, "amfipy.scheme_catwise", "ERROR", f"date={nd}, as_df={as_df}; {repr(exc)}", 0)
 
     return finalize_source_pieces(pieces)
+
+
+def _records_from_obj(obj: Any) -> list[dict]:
+    if isinstance(obj, list):
+        return [x for x in obj if isinstance(x, dict)]
+    if isinstance(obj, dict):
+        for key in ["data", "Data", "records", "result", "Result"]:
+            if isinstance(obj.get(key), list):
+                return [x for x in obj[key] if isinstance(x, dict)]
+    return []
+
+
+def write_schemewise_raw_cache(obj: Any, label: str, log_rows: list[dict]) -> None:
+    """Keep the last good AMFI scheme-wise AAUM JSON (raw, lakh units) as a CSV cache."""
+    try:
+        recs = _records_from_obj(obj)
+        if not recs or not any("AMFI_Code" in r and "AverageAumForTheMonth" in r for r in recs):
+            return
+        raw = pd.DataFrame(recs)
+        raw["__source_name"] = f"AMFI_AUM_Schemewise_{label}"
+        raw.to_csv(SCHEMEWISE_RAW_CACHE, index=False)
+        log(log_rows, "SchemewiseRawCache", "WRITE", f"{SCHEMEWISE_RAW_CACHE.name}; rows={len(raw)}", len(raw))
+    except Exception as exc:
+        log(log_rows, "SchemewiseRawCache", "ERROR", repr(exc), 0)
+
+
+def load_cached_schemewise_raw(log_rows: list[dict], path: Path | None = None) -> pd.DataFrame:
+    """Rebuild standardized AUM from the cached AMFI scheme-wise AAUM JSON dump.
+
+    AverageAumForTheMonth is a dict-string {'ExcludingFundOfFunds...': x,
+    'FundOfFundsDomestic': y} in Rs lakh; total = x + y, converted to crore.
+    """
+    path = path or SCHEMEWISE_RAW_CACHE
+    if not path.exists():
+        return empty_source_df()
+    try:
+        raw = pd.read_csv(path, dtype=str, keep_default_na=False)
+    except Exception as exc:
+        log(log_rows, "SchemewiseRawCache", "ERROR", repr(exc), 0)
+        return empty_source_df()
+    needed = {"AMFI_Code", "SchemeNAVName", "AverageAumForTheMonth"}
+    if not needed.issubset(raw.columns):
+        log(log_rows, "SchemewiseRawCache", "SKIP", f"missing columns {sorted(needed - set(raw.columns))}", 0)
+        return empty_source_df()
+    import ast
+    rows = []
+    for _, r in raw.iterrows():
+        val = str(r.get("AverageAumForTheMonth", "")).strip()
+        total = None
+        if val.startswith("{"):
+            try:
+                d = ast.literal_eval(val)
+                excl, fof = _aaum_split_columns([str(x) for x in d])
+                if excl:
+                    total = _aaum_total({str(a): b for a, b in d.items()}, excl, fof)
+            except Exception:
+                total = None
+        else:
+            total = val
+        aum = parse_aum_cr(total, AMFI_AAUM_UNIT)
+        if pd.isna(aum) or aum <= 0:
+            continue
+        cat = " ".join(str(r.get("SchemeCat_Desc", "")).split())
+        rows.append({
+            "Scheme_Code": str(r.get("AMFI_Code", "")).strip(),
+            "Scheme_Name": " ".join(str(r.get("SchemeNAVName", "")).split()),
+            "ISIN": "",
+            "Scheme_Category": cat if is_amfi_category_label(cat) else "",
+            "AUM_Cr": aum,
+            "AUM_Source": "AMFI scheme-wise AAUM cache:" + str(r.get("__source_name", "") or path.name).strip(),
+        })
+    out = pd.DataFrame(rows) if rows else empty_source_df()
+    log(log_rows, "SchemewiseRawCache", "OK" if len(out) else "EMPTY", f"{path.name}; rows={len(out)}", len(out))
+    return out
 
 
 def finalize_source_pieces(pieces: list[pd.DataFrame]) -> pd.DataFrame:
@@ -876,9 +1027,10 @@ def merge_aum_to_etfs(etfs: pd.DataFrame, aum_df: pd.DataFrame, log_rows: list[d
         enriched_by_symbol = {str(r["Symbol"]).strip().upper(): r for _, r in nav_enriched.iterrows()}
 
     aum = aum_df.copy()
-    for col in ["Scheme_Code", "Scheme_Name", "ISIN", "AUM_Cr", "AUM_Source"]:
+    for col in ["Scheme_Code", "Scheme_Name", "ISIN", "Scheme_Category", "AUM_Cr", "AUM_Source"]:
         if col not in aum.columns:
             aum[col] = ""
+    aum["Scheme_Category"] = aum["Scheme_Category"].fillna("").astype(str)
     aum["Scheme_Code"] = aum["Scheme_Code"].astype(str).str.strip()
     aum["Scheme_Name"] = aum["Scheme_Name"].astype(str).str.strip()
     aum["ISIN"] = aum["ISIN"].astype(str).str.upper().str.strip()
@@ -927,10 +1079,21 @@ def merge_aum_to_etfs(etfs: pd.DataFrame, aum_df: pd.DataFrame, log_rows: list[d
                 method = "NAVAll ISIN -> Scheme_Code"
                 score = 1.0
 
-        # 3. Fuzzy fallback against AUM names plus NAV names.
-        if match is None:
+        # 3. Fuzzy fallback against AUM names plus NAV names. Only for ETFs with no
+        # known AMFI scheme code (a known code that is absent from the AUM source means
+        # "no AUM row", not "borrow a look-alike"), never against non-ETF categories
+        # (index funds / FoF / active funds), only within the same AMC, and never
+        # when the best match is a tie.
+        etf_amcs = amc_tokens(f"{name} {raw_symbol} {scheme_name}")
+        if match is None and not scheme_code and etf_amcs:
             candidates = []
             for idx, r in aum.iterrows():
+                if is_non_etf_category(r.get("Scheme_Category", "")):
+                    continue
+                # combined_score ignores AMC words, so require the same AMC here:
+                # June 2026 gave five bank ETFs "Axis NIFTY Bank ETF" 40,055.67 cr.
+                if not (amc_tokens(r.get("Scheme_Name", "")) & etf_amcs):
+                    continue
                 candidate_name = str(r.get("Scheme_Name", "")).strip()
                 if not candidate_name:
                     code = str(r.get("Scheme_Code", "")).strip()
@@ -942,7 +1105,20 @@ def merge_aum_to_etfs(etfs: pd.DataFrame, aum_df: pd.DataFrame, log_rows: list[d
             if candidates:
                 candidates.sort(reverse=True, key=lambda x: x[0])
                 best_score, best_idx, best_name = candidates[0]
-                if best_score >= 0.72:
+                runner_up = next((c for c in candidates[1:] if norm_key(c[2]) != norm_key(best_name)), None)
+                ambiguous = runner_up is not None and runner_up[0] >= best_score - FUZZY_TIE_MARGIN
+                if best_score >= 0.72 and ambiguous:
+                    diag_rows.append({
+                        "Symbol": symbol,
+                        "ISIN": isin,
+                        "Name": name,
+                        "Known_AMFI_Scheme_Code": scheme_code,
+                        "Known_AMFI_Scheme_Name": scheme_name,
+                        "Best_Candidate": best_name,
+                        "Best_Score": best_score,
+                        "Decision": f"Ambiguous fuzzy match (runner-up {runner_up[2]} {runner_up[0]:.3f})",
+                    })
+                elif best_score >= 0.72:
                     match = aum.loc[best_idx]
                     method = "Fuzzy Scheme_Name"
                     score = float(best_score)
@@ -990,6 +1166,8 @@ def merge_aum_to_etfs(etfs: pd.DataFrame, aum_df: pd.DataFrame, log_rows: list[d
             "Scheme_Code": scheme_code,
             "AUM_Match_Score": score,
             "AUM_Validation": aum_validation,
+            "Scheme Category": str(match.get("Scheme_Category", "")) if match is not None else "",
+            "Parser_Version": AMFI_PARSER_VERSION,
             "Fetch_Date": datetime.now().strftime("%Y-%m-%d"),
         })
 
@@ -1060,6 +1238,14 @@ def main() -> int:
     print("Fetching scheme-wise AUM from AMFI using Excel-first method...")
     aum_df = try_amfipy_excel_first(log_rows)
 
+    from_cache = False
+    if aum_df.empty:
+        cached = load_cached_schemewise_raw(log_rows)
+        if not cached.empty:
+            print(f"AMFI live fetch unavailable. Using cached AMFI scheme-wise AAUM: {SCHEMEWISE_RAW_CACHE.name} ({len(cached)} rows)")
+            aum_df = cached
+            from_cache = True
+
     if aum_df.empty:
         print("AMFI automatic fetch produced 0 standardized rows. Trying manual fallback file...")
         aum_df = load_manual_aum(log_rows)
@@ -1086,8 +1272,11 @@ def main() -> int:
     print(f"Period file: {period_out}")
     print(f"AUM filled: {filled} / {len(output)}")
 
-    status = {**read_status(), "last_attempt_run_date": date.today().isoformat(), "last_attempt_status": "success" if filled > 0 else "matched_zero"}
+    status = {**read_status(), "last_attempt_run_date": date.today().isoformat(),
+              "last_attempt_status": ("success_from_cache" if from_cache else "success") if filled > 0 else "matched_zero"}
     if filled > 0:
+        status["parser_version"] = AMFI_PARSER_VERSION
+    if filled > 0 and not from_cache:
         status.update({"last_success_run_date": date.today().isoformat(), "last_success_period": period_str, "last_success_rows": int(filled)})
     write_status(status)
     pd.DataFrame(log_rows).to_csv(LOG_OUT, index=False)

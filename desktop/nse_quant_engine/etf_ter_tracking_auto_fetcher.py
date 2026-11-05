@@ -61,6 +61,13 @@ import numpy as np
 import pandas as pd
 
 from core.safe_io import read_cached_csv, read_required_csv
+from core.etf_source_rules import (
+    AMFI_PARSER_VERSION,
+    ETF_TER_CAP_DECIMAL,
+    benchmark_or_blank,
+    is_amfi_category_label,
+    is_non_etf_category,
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -86,7 +93,9 @@ FORCE_REFRESH = os.environ.get("FORCE_TER_TRACKING_REFRESH", "").strip().lower()
 # Convenience: when user forces all metadata/AUM refresh, refresh TER/tracking too.
 FORCE_REFRESH = FORCE_REFRESH or os.environ.get("FORCE_METADATA_REFRESH", "").strip().lower() in {"1", "yes", "true", "y"}
 
-MAX_REASONABLE_TER_DECIMAL = float(os.environ.get("MAX_REASONABLE_TER_DECIMAL", "0.05"))
+# SEBI caps an ETF's TER at 1.00% (Reg. 52(6)); the old 5% ceiling let unit
+# errors (0.04% stored as 4%) and index-fund regular-plan TERs through.
+MAX_REASONABLE_TER_DECIMAL = float(os.environ.get("MAX_REASONABLE_TER_DECIMAL", str(ETF_TER_CAP_DECIMAL)))
 MAX_REASONABLE_TRACKING_ERROR_DECIMAL = float(os.environ.get("MAX_REASONABLE_TRACKING_ERROR_DECIMAL", "0.20"))
 MAX_ABS_TRACKING_DIFFERENCE_DECIMAL = float(os.environ.get("MAX_ABS_TRACKING_DIFFERENCE_DECIMAL", "0.20"))
 
@@ -157,15 +166,20 @@ def parse_float(value: Any) -> float:
         return np.nan
 
 
-def parse_percent_decimal(value: Any) -> float:
-    """Return decimal form. 0.42% -> 0.0042, 0.42 -> 0.0042, 0.0042 -> 0.0042."""
+def parse_percent_decimal(value: Any, unit: str = "auto") -> float:
+    """Return decimal form. 0.42% -> 0.0042, 0.42 -> 0.0042, 0.0042 -> 0.0042.
+
+    unit="percent" is for AMFI disclosures, which are always percent figures:
+    there "0.04" is 0.04% (0.0004), not 4%. The "auto" guess below is kept only
+    for hand-made fallback files whose unit is unknown.
+    """
     if pd.isna(value):
         return np.nan
     text = str(value).strip()
     num = parse_float(text)
     if pd.isna(num):
         return np.nan
-    if "%" in text:
+    if unit == "percent" or "%" in text:
         return num / 100.0
     # TER / tracking disclosures are often shown as percent values like 0.42.
     if abs(num) > 0.05:
@@ -173,8 +187,8 @@ def parse_percent_decimal(value: Any) -> float:
     return num
 
 
-def valid_ter(value: Any) -> tuple[bool, float, str]:
-    x = parse_percent_decimal(value)
+def valid_ter(value: Any, unit: str = "auto") -> tuple[bool, float, str]:
+    x = parse_percent_decimal(value, unit)
     if pd.isna(x) or x <= 0:
         return False, np.nan, "blank_or_non_positive"
     if x > MAX_REASONABLE_TER_DECIMAL:
@@ -182,8 +196,8 @@ def valid_ter(value: Any) -> tuple[bool, float, str]:
     return True, round(float(x), 6), "valid"
 
 
-def valid_tracking_error(value: Any) -> tuple[bool, float, str]:
-    x = parse_percent_decimal(value)
+def valid_tracking_error(value: Any, unit: str = "auto") -> tuple[bool, float, str]:
+    x = parse_percent_decimal(value, unit)
     if pd.isna(x) or x < 0:
         return False, np.nan, "blank_or_negative"
     if x > MAX_REASONABLE_TRACKING_ERROR_DECIMAL:
@@ -191,8 +205,8 @@ def valid_tracking_error(value: Any) -> tuple[bool, float, str]:
     return True, round(float(x), 6), "valid"
 
 
-def valid_tracking_difference(value: Any) -> tuple[bool, float, str]:
-    x = parse_percent_decimal(value)
+def valid_tracking_difference(value: Any, unit: str = "auto") -> tuple[bool, float, str]:
+    x = parse_percent_decimal(value, unit)
     if pd.isna(x):
         return False, np.nan, "blank"
     if abs(x) > MAX_ABS_TRACKING_DIFFERENCE_DECIMAL:
@@ -218,6 +232,11 @@ def should_attempt_refresh(log_rows: list[dict]) -> bool:
     status = read_status()
     if FORCE_REFRESH:
         log(log_rows, "Schedule", "FORCE", "FORCE_TER_TRACKING_REFRESH/FORCE_METADATA_REFRESH active")
+        return True
+    if str(status.get("parser_version", "")) != str(AMFI_PARSER_VERSION):
+        # The last file was read by an older parser (percent/category bugs), so
+        # waiting for the monthly window would keep known-wrong values in use.
+        log(log_rows, "Schedule", "ATTEMPT", f"Last import used parser v{status.get('parser_version', '1')}; current v{AMFI_PARSER_VERSION}. Re-fetching now.")
         return True
     if today.day < REFRESH_START_DAY:
         log(log_rows, "Schedule", "SKIP", f"Day {today.day} < refresh start day {REFRESH_START_DAY}. Reusing last file.")
@@ -816,7 +835,15 @@ def standard_base_columns(df: pd.DataFrame) -> pd.DataFrame:
     out["Scheme_Code"] = df[code_col].astype(str).str.strip() if code_col else ""
     out["ISIN"] = df[isin_col].astype(str).str.strip() if isin_col else ""
     out["Scheme_Name"] = df[name_col].astype(str).str.strip() if name_col else ""
-    out["Benchmark_Index"] = df[bench_col].astype(str).str.strip() if bench_col else ""
+    bench_raw = df[bench_col].astype(str).str.strip() if bench_col else pd.Series("", index=df.index)
+    # AMFI TER sheets have no benchmark column; the text-column fallback above
+    # lands on the scheme category ("Other Scheme - Other  ETFs"). Keep that as
+    # the category, never as a benchmark.
+    cat_col = find_col(df, ["scheme category", "schemecat desc", "category", "sub category"])
+    cat = df[cat_col].astype(str).str.strip() if cat_col else pd.Series("", index=df.index)
+    cat = cat.where(cat.apply(is_amfi_category_label), bench_raw.where(bench_raw.apply(is_amfi_category_label), ""))
+    out["Scheme_Category"] = cat
+    out["Benchmark_Index"] = bench_raw.apply(benchmark_or_blank)
     return out
 
 
@@ -824,16 +851,34 @@ def standardize_ter_df(df: pd.DataFrame, source: str) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
     base = standard_base_columns(df)
-    ter_col = find_col(df, ["total expense ratio", "expense ratio", "base expense ratio", "ter"], must_not_include=["change", "date"])
+    ter_col = find_col(
+        df,
+        ["total expense ratio", "ter total", "total ter", "expense ratio", "ter"],
+        must_not_include=["change", "date", "year", "addl", "additional", "base"],
+    )
     if not ter_col:
         return pd.DataFrame()
-    ter_vals = df[ter_col].apply(lambda x: valid_ter(x)[1])
+    ter_vals = df[ter_col].apply(lambda x: valid_ter(x, "percent")[1])
+    # AMFI's TER feed has R_TER (regular plan) and D_TER (direct plan). ETFs have a
+    # single plan disclosed as the regular TER; use it, falling back to D_TER only
+    # where R_TER is blank. (find_col alone returns whichever comes first.)
+    by_norm = {re.sub(r"[^a-z]", "", str(c).lower()): c for c in df.columns}
+    if "rter" in by_norm and "dter" in by_norm:
+        reg = df[by_norm["rter"]].apply(lambda x: valid_ter(x, "percent")[1])
+        dirp = df[by_norm["dter"]].apply(lambda x: valid_ter(x, "percent")[1])
+        ter_vals = reg.where(reg.notna(), dirp)
     out = base.copy()
     out["TER"] = ter_vals
     out["Tracking_Error"] = np.nan
     out["Tracking_Difference"] = np.nan
     out["Source"] = source
     out = out.dropna(subset=["TER"])
+    # AMFI's TER feed is daily (one row per scheme per TER_Date). Downstream picks
+    # the first non-null row per scheme, so put the latest disclosure first.
+    date_col = find_col(df, ["ter date"]) or find_col(df, ["date"])
+    if date_col and len(out):
+        when = pd.to_datetime(df.loc[out.index, date_col], errors="coerce", utc=True)
+        out = out.loc[when.sort_values(ascending=False, kind="stable", na_position="last").index]
     return out
 
 
@@ -849,7 +894,7 @@ def standardize_tracking_error_df(df: pd.DataFrame, source: str) -> pd.DataFrame
     if not candidate_cols:
         return pd.DataFrame()
 
-    vals = first_valid_percent_by_row(df, candidate_cols, valid_tracking_error)
+    vals = first_valid_percent_by_row(df, candidate_cols, lambda v: valid_tracking_error(v, "percent"))
     out = base.copy()
     out["TER"] = np.nan
     out["Tracking_Error"] = vals
@@ -872,7 +917,7 @@ def standardize_tracking_difference_df(df: pd.DataFrame, source: str) -> pd.Data
     if not candidate_cols:
         return pd.DataFrame()
 
-    vals = first_valid_percent_by_row(df, candidate_cols, valid_tracking_difference)
+    vals = first_valid_percent_by_row(df, candidate_cols, lambda v: valid_tracking_difference(v, "percent"))
     out = base.copy()
     out["TER"] = np.nan
     out["Tracking_Error"] = np.nan
@@ -936,12 +981,12 @@ def combine_source_rows(dfs: list[pd.DataFrame]) -> pd.DataFrame:
     clean = []
     for df in dfs:
         if df is not None and not df.empty:
-            for col in ["Scheme_Code", "ISIN", "Scheme_Name", "Benchmark_Index", "TER", "Tracking_Error", "Tracking_Difference", "Source", "Symbol"]:
+            for col in ["Scheme_Code", "ISIN", "Scheme_Name", "Scheme_Category", "Benchmark_Index", "TER", "Tracking_Error", "Tracking_Difference", "Source", "Symbol"]:
                 if col not in df.columns:
                     df[col] = np.nan
-            clean.append(df[["Scheme_Code", "ISIN", "Scheme_Name", "Benchmark_Index", "TER", "Tracking_Error", "Tracking_Difference", "Source", "Symbol"]].copy())
+            clean.append(df[["Scheme_Code", "ISIN", "Scheme_Name", "Scheme_Category", "Benchmark_Index", "TER", "Tracking_Error", "Tracking_Difference", "Source", "Symbol"]].copy())
     if not clean:
-        return pd.DataFrame(columns=["Scheme_Code", "ISIN", "Scheme_Name", "Benchmark_Index", "TER", "Tracking_Error", "Tracking_Difference", "Source", "Symbol"])
+        return pd.DataFrame(columns=["Scheme_Code", "ISIN", "Scheme_Name", "Scheme_Category", "Benchmark_Index", "TER", "Tracking_Error", "Tracking_Difference", "Source", "Symbol"])
     raw = pd.concat(clean, ignore_index=True)
     raw = raw.replace({"": np.nan, "nan": np.nan, "None": np.nan})
     # Group by best key and take first non-null for each field.
@@ -1020,10 +1065,16 @@ def best_source_row_for_etf(etf: pd.Series, ctx_row: pd.Series | None, sources: 
             return merge_source_hits(hit), "ISIN", 1.0
 
     # 4. Conservative fuzzy matching on AMFI scheme name and ETF name.
+    # Only against rows AMFI files as ETFs. "Kotak Nifty Alpha 50 ETF" and
+    # "Kotak Nifty Alpha 50 Index Fund" share every token once ETF/index/fund
+    # are dropped, and in June 2026 this gave 84 ETFs an index fund's,
+    # fund of funds' or active fund's TER (0.6-1.75% instead of ~0.2%).
     candidates = []
     for idx, r in sources.iterrows():
         src_name = str(r.get("Scheme_Name", ""))
         if not src_name or src_name.lower() == "nan":
+            continue
+        if is_non_etf_category(r.get("Scheme_Category", "")):
             continue
         score = max(token_score(scheme_name, src_name), token_score(name, src_name), token_score(raw, src_name))
         candidates.append((score, idx))
@@ -1037,7 +1088,7 @@ def best_source_row_for_etf(etf: pd.Series, ctx_row: pd.Series | None, sources: 
 
 
 def merge_source_hits(hit: pd.DataFrame) -> pd.Series:
-    cols = ["Scheme_Code", "ISIN", "Scheme_Name", "Benchmark_Index", "TER", "Tracking_Error", "Tracking_Difference", "Source", "Symbol"]
+    cols = ["Scheme_Code", "ISIN", "Scheme_Name", "Scheme_Category", "Benchmark_Index", "TER", "Tracking_Error", "Tracking_Difference", "Source", "Symbol"]
     data = {col: first_nonnull(hit[col]) if col in hit.columns else np.nan for col in cols}
     return pd.Series(data)
 
@@ -1072,7 +1123,9 @@ def build_output_import(etfs: pd.DataFrame, sources: pd.DataFrame, log_rows: lis
             "TER": ter if pd.notna(ter) else "",
             "Tracking Error": te if pd.notna(te) else "",
             "Tracking Difference": td if pd.notna(td) else "",
-            "Benchmark Index": bench if pd.notna(bench) else "",
+            "Benchmark Index": benchmark_or_blank(bench) if pd.notna(bench) else "",
+            "Scheme Category": str(source_row.get("Scheme_Category", "") or "") if pd.notna(source_row.get("Scheme_Category", "")) else "",
+            "Parser_Version": AMFI_PARSER_VERSION,
             "Match_Method": method,
             "Match_Score": score,
             "Source": str(source_row.get("Source", "")),
@@ -1216,6 +1269,7 @@ def main() -> int:
         "last_success_tracking_error_rows": int(te_count),
         "last_success_tracking_difference_rows": int(td_count),
         "last_attempt_status": "success" if success else "no_matches",
+        "parser_version": AMFI_PARSER_VERSION if success else read_status().get("parser_version", ""),
     })
 
     if success:

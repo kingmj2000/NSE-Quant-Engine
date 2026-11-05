@@ -395,13 +395,39 @@ check("forward history drops rows computed from quarantined bars",
       "drop_rows_on_quarantined_bars(fwd, load_quarantined_bars())" in vb_now,
       "the union merge kept NV20's +901x rows after the bad bar was removed")
 
+# ─── 12b. AMFI AUM/TER units, categories, helper interpreter ────────────────
+aumf_now = read("etf_aum_auto_fetcher.py")
+terf_now = read("etf_ter_tracking_auto_fetcher.py")
+orch_now = read("orchestrator.py")
+rules_now = read("core/etf_source_rules.py")
+check("AMFI TER read as percent strings, capped at the SEBI ETF limit",
+      'valid_ter(x, "percent")' in terf_now and "ETF_TER_CAP_DECIMAL = 0.01" in rules_now,
+      "26 Nifty 50/Sensex ETFs stored TER 4.00% (AMFI '0.04' kept as a decimal)")
+check("AMFI scheme-wise AAUM read in Rs lakh",
+      'AMFI_AAUM_UNIT = "lakh"' in rules_now and "unit=AMFI_AAUM_UNIT" in aumf_now,
+      "NIFTYBEES 5,705,866 lakh (57,059 cr) stored as 0.57 cr; small ETFs inflated 100x")
+check("non-ETF AMFI categories never feed ETF AUM/TER; categories are not benchmarks",
+      "is_non_etf_category(category)" in enr_now and "benchmark_or_blank(bench_raw)" in enr_now
+      and "is_non_etf_category(r.get(\"Scheme_Category\"" in aumf_now,
+      "84 ETFs took index-fund/FoF/active-fund TERs; 311/332 benchmarks were category labels")
+check("manual_etf_quality carry-forward only fills gaps (fresh imports win)",
+      "fresh value from this run wins" in enr_now and "_stored_value_is_rederived(stored_src)" in enr_now,
+      "stored values overwrote every fresh import, so corrected AMFI data could never land")
+check("AMFI fetchers run under a Python >= 3.11 helper when amfipy is missing",
+      '_amfi_runpy("etf_aum_auto_fetcher.py")' in orch_now
+      and '_amfi_runpy("etf_ter_tracking_auto_fetcher.py")' in orch_now,
+      "amfipy requires Python >= 3.11; in-process on 3.10 every run since June logged IMPORT_ERROR")
+
 # ─── 13. Test files present ─────────────────────────────────────────────────
 expected_tests = ["test_integrity_fail_closed.py", "test_ui_method_contracts.py",
                   "test_evidence_accumulation.py", "test_history_dedup.py",
                   "test_price_bar_guard.py", "test_nav_premium_same_date.py",
                   "test_flow_publication_freshness.py",
                   "test_import_fuzzy_identified_rows.py",
-                  "test_forward_history_quarantine.py"]
+                  "test_forward_history_quarantine.py",
+                  "test_amfi_units_and_categories.py",
+                  "test_metadata_overlay_fresh_wins.py",
+                  "test_amfi_helper_interpreter.py"]
 absent = [t for t in expected_tests if not (ENG / "tests" / t).exists()]
 check("audit regression tests present", not absent,
       f"missing: {', '.join(absent)}" if absent else "")

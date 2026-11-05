@@ -58,6 +58,14 @@ def _runpy(script: str):
     return _run
 
 
+def _amfi_runpy(script: str):
+    """AMFI fetchers need amfipy (Python >= 3.11); see core/amfi_helper.py."""
+    if str(BASE) not in sys.path:
+        sys.path.insert(0, str(BASE))
+    from core.amfi_helper import make_amfi_runner
+    return make_amfi_runner(script, BASE, _runpy(script))
+
+
 def _module(modname: str, func: str = "build"):
     def _run():
         if str(BASE) not in sys.path:
@@ -102,8 +110,8 @@ def build_steps(include_shadow: bool = True, include_fetch: bool = True) -> list
             Step("universe_builder",              _runpy("universe_builder.py"),              network=True),
             Step("etf_quality_builder (pass 1)",  _runpy("etf_quality_builder.py")),
             Step("etf_metadata_enricher (pass 1)", _runpy("etf_metadata_enricher.py"),         network=True),
-            Step("etf_aum_auto_fetcher",          _runpy("etf_aum_auto_fetcher.py"),           network=True, skippable=True),
-            Step("etf_ter_tracking_auto_fetcher", _runpy("etf_ter_tracking_auto_fetcher.py"),  network=True, skippable=True),
+            Step("etf_aum_auto_fetcher",          _amfi_runpy("etf_aum_auto_fetcher.py"),      network=True, skippable=True),
+            Step("etf_ter_tracking_auto_fetcher", _amfi_runpy("etf_ter_tracking_auto_fetcher.py"), network=True, skippable=True),
             Step("etf_metadata_enricher (pass 2)", _runpy("etf_metadata_enricher.py"),         network=True),
             Step("etf_quality_builder (pass 2)",  _runpy("etf_quality_builder.py")),
         ]
