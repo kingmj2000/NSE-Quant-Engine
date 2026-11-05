@@ -73,14 +73,26 @@ def _bound_in_scope(node: ast.AST) -> set[str]:
     return names
 
 
+def python_files(root: Path) -> list[Path]:
+    """Every .py under root, skipping SKIP dirs INSIDE root only.
+
+    Matching SKIP against the absolute path excluded everything when a parent
+    folder was named data/ or output/ (D:\\data\\..., /data/...): the scan read
+    zero files and printed "0 undefined name(s)".
+    """
+    return [p for p in sorted(root.rglob("*.py"))
+            if not SKIP & set(p.relative_to(root).parts)]
+
+
 def scan(root: Path) -> list[str]:
     problems: list[str] = []
-    for path in sorted(root.rglob("*.py")):
-        if SKIP & set(path.parts):
-            continue
+    for path in python_files(root):
         try:
             tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
-        except SyntaxError:
+        except SyntaxError as exc:
+            # An unparseable file was never scanned; it must not read as clean.
+            problems.append(f"{path.relative_to(root)}:{exc.lineno} unparseable "
+                            f"(SyntaxError: {exc.msg}) — not scanned")
             continue
 
         module_scope = _bound_in_scope(tree) | BUILTINS
@@ -118,8 +130,12 @@ def scan(root: Path) -> list[str]:
 
 if __name__ == "__main__":
     root = Path(sys.argv[1] if len(sys.argv) > 1 else ".").resolve()
+    n_files = len(python_files(root))
+    if not n_files:
+        print(f"no .py files found under {root} — nothing was scanned")
+        sys.exit(2)
     found = scan(root)
     for f in found:
         print(f)
-    print(f"\n{len(found)} undefined name(s)")
+    print(f"\n{len(found)} undefined name(s) in {n_files} file(s)")
     sys.exit(1 if found else 0)

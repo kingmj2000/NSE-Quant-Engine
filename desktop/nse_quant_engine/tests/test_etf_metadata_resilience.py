@@ -60,8 +60,12 @@ NAV_COLS = ["AMFI_Scheme_Code", "AMFI_Scheme_Name",
     pd.DataFrame(),                       # AMFI never answered
     pd.DataFrame(columns=NAV_COLS),       # answered with no rows
 ])
-def test_empty_nav_table_does_not_halt_the_pipeline(nav):
+def test_empty_nav_table_does_not_halt_the_pipeline(nav, tmp_path, monkeypatch):
     eqb = _load("eqb_empty", "etf_quality_builder.py")
+    # make_mapping_suggestions() writes MAPPING_SUGGESTIONS_OUT; unredirected it
+    # rewrote the live data/etf_mapping_suggestions.csv on every test run.
+    monkeypatch.setattr(eqb, "MAPPING_SUGGESTIONS_OUT",
+                        tmp_path / "etf_mapping_suggestions.csv")
     out = eqb.make_mapping_suggestions(_etfs(), nav)
 
     assert len(out) == 2, "every ETF must still get a row"
@@ -76,9 +80,13 @@ def test_no_match_is_reported_as_missing_not_verified():
     assert eqb.mapping_status("ISIN", 1.0) == "Verified"
 
 
-def test_populated_nav_table_still_matches():
+def test_populated_nav_table_still_matches(tmp_path, monkeypatch):
     """Degrading gracefully must not degrade the working path."""
     eqb = _load("eqb_ok", "etf_quality_builder.py")
+    # make_mapping_suggestions() writes MAPPING_SUGGESTIONS_OUT; unredirected it
+    # rewrote the live data/etf_mapping_suggestions.csv on every test run.
+    monkeypatch.setattr(eqb, "MAPPING_SUGGESTIONS_OUT",
+                        tmp_path / "etf_mapping_suggestions.csv")
     nav = pd.DataFrame([{
         "AMFI_Scheme_Code": "101234",
         "AMFI_Scheme_Name": "Nippon India ETF Nifty BeES",

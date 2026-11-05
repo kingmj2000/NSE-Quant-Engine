@@ -42,8 +42,11 @@ ETF_QUALITY_OUT = DATA_DIR / "etf_quality_latest.csv"
 MAPPING_SUGGESTIONS_OUT = DATA_DIR / "etf_mapping_suggestions.csv"
 AMFI_NAV_OUT = DATA_DIR / "amfi_nav_latest.csv"
 
-AMFI_NAV_URL = "https://www.amfiindia.com/spages/NAVAll.txt"
-HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "text/plain,*/*"}
+# AMFI URLs and request headers live in core/amfi_nav.py (NAVALL_URLS, HEADERS).
+# The old AMFI_NAV_URL / HEADERS constants here were read by nothing after the
+# shared-fetcher refactor, yet tests kept monkeypatching AMFI_NAV_URL to
+# "simulate" an outage - so they hit the real AMFI. Removed so such a patch
+# fails loudly (AttributeError) instead of silently doing nothing.
 
 
 def normalize_text(text: str) -> str:

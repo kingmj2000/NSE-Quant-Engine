@@ -113,9 +113,23 @@ def _cache_row_count(csv_path: Path) -> int:
     try:
         if not csv_path.exists():
             return 0
-        return int(sum(1 for _ in csv_path.open("r", encoding="utf-8")) - 1)
+        # A 0-byte file has no header either; never report -1 rows.
+        return max(0, int(sum(1 for _ in csv_path.open("r", encoding="utf-8")) - 1))
     except Exception:
         return 0
+
+
+def _seeded_status(last_date: str | None, rows: int, **age_kw) -> str:
+    """Tile status for a feed seeded from a file's mtime.
+
+    A fresh mtime proves the file was rewritten, not that it holds data. The
+    TER/TE importer rewrites a header-only file when it finds no source rows
+    (2026-10-29: "no_source_rows"), and the tile showed GREEN with 0 rows.
+    No data rows means red, whatever the file's age.
+    """
+    if rows <= 0:
+        return "red"
+    return _health_status_from_age(last_date, **age_kw)
 
 
 # --------- freshness windows (hours) ----------------------------------------
@@ -1713,10 +1727,11 @@ def refresh_all(base: Path | None = None, only: Iterable[str] | None = None,
         if price_meta.exists() or raw_prices.exists():
             src = price_meta if price_meta.exists() else raw_prices
             last = datetime.fromtimestamp(src.stat().st_mtime).strftime("%Y-%m-%d")
+            n = _cache_row_count(raw_prices)
             _write_health_row(data_dir, "price",
-                              _health_status_from_age(last),
-                              _cache_row_count(raw_prices), last,
-                              f"from {src.name}")
+                              _seeded_status(last, n), n, last,
+                              f"from {src.name}" if n > 0
+                              else f"0 data rows in {raw_prices.name}")
         # AMFI standardized imports
         for feed, fname in (
             ("amfi_nav", "amfi_aum_source_standardized.csv"),
@@ -1725,9 +1740,11 @@ def refresh_all(base: Path | None = None, only: Iterable[str] | None = None,
             p = data_dir / fname
             if p.exists():
                 last = datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d")
+                n = _cache_row_count(p)
                 _write_health_row(data_dir, feed,
-                                  _health_status_from_age(last, warn_days=7, fail_days=30),
-                                  _cache_row_count(p), last, f"from {fname}")
+                                  _seeded_status(last, n, warn_days=7, fail_days=30),
+                                  n, last,
+                                  f"from {fname}" if n > 0 else f"0 data rows in {fname}")
         # News
         news = base / "output" / "news_market_context.md"
         if news.exists():

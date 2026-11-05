@@ -28,10 +28,16 @@ SKIP = {"__pycache__", "vendor", "node_modules", ".venv", "output", "data"}
 
 results: list[tuple[str, bool, str]] = []
 warnings: list[tuple[str, str]] = []
+skipped: list[tuple[str, str]] = []
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:
     results.append((name, bool(ok), detail))
+
+
+def skip(name: str, why: str) -> None:
+    """A check that could not run here. Reported, never counted as a PASS."""
+    skipped.append((name, why))
 
 
 def read(rel: str) -> str:
@@ -39,8 +45,19 @@ def read(rel: str) -> str:
     return p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
 
 
+def _skipped_path(p: Path, base: Path) -> bool:
+    # Match SKIP against the path INSIDE `base`, never the absolute path: a
+    # folder named data/ or output/ ABOVE the engine (D:\data\..., /data/...)
+    # used to exclude every file, and every scan then passed on zero files.
+    try:
+        parts = p.relative_to(base).parts
+    except ValueError:
+        parts = p.parts
+    return bool(SKIP & set(parts))
+
+
 def py_files() -> list[Path]:
-    return [p for p in sorted(ENG.rglob("*.py")) if not SKIP & set(p.parts)]
+    return [p for p in sorted(ENG.rglob("*.py")) if not _skipped_path(p, ENG)]
 
 
 # ─── 1. Fail-closed portfolio validation ────────────────────────────────────
@@ -237,6 +254,14 @@ for _rel in ("ui/decision_center.py", "run_app.py"):
           "which is the original 0xc0000374 heap-corruption path")
 
 # ─── 9. Pattern scan: private methods that do not exist ─────────────────────
+# Every scan below is only as good as its file list. An empty list makes every
+# "no X found" check pass, so prove the list covers the engine first.
+_scanned = {p.relative_to(ENG).as_posix() for p in py_files()}
+_must_scan = [r for r in ("orchestrator.py", "run_app.py") if r not in _scanned]
+check(f"source scans cover the engine ({len(_scanned)} .py files)",
+      bool(_scanned) and not _must_scan,
+      f"not scanned: {', '.join(_must_scan) or 'any file'} — the pattern scans "
+      f"below would pass on files they never read")
 missing_methods: list[str] = []
 for p in py_files():
     try:
@@ -264,11 +289,13 @@ for p in py_files():
 try:
     from tools_scan_undefined_names import scan as _scan_undefined
     _undef = _scan_undefined(ENG)
-except Exception as _exc:  # scanner itself must never break the health check
-    _undef = []
-    warnings.append((f"undefined-name scan unavailable: {_exc}", "run it manually"))
-check("no function uses an undefined name", not _undef,
-      "; ".join(_undef[:5]) or "NameError raises at call time, not import time")
+    _undef_err = ""
+except Exception as _exc:  # scanner itself must never CRASH the health check...
+    _undef, _undef_err = [], f"{type(_exc).__name__}: {_exc}"
+# ...but a scan that did not run is a FAIL, not a PASS with a footnote.
+check("no function uses an undefined name", not _undef and not _undef_err,
+      (f"scanner unavailable ({_undef_err}) — the scan did not run" if _undef_err
+       else "; ".join(_undef[:5]) or "NameError raises at call time, not import time"))
 
 check("no class calls an undefined private method",
       not missing_methods,
@@ -293,10 +320,9 @@ def _git_root(start: Path) -> Path | None:
 
 git_root = _git_root(ENG)
 if git_root is None:
-    warnings.append(("runtime-data check skipped: not a git checkout",
-                     "expected in a live run folder; run this in your clone to "
-                     "verify output/ and data/ are untracked"))
-    check("runtime data untracked (n/a outside a checkout)", True, "")
+    skip("no runtime data tracked by git",
+         "not a git checkout — expected in a live run folder; run this in your "
+         "clone to verify output/ and data/ are untracked")
 else:
     tracked: list[str] = []
     try:
@@ -321,7 +347,7 @@ else:
 corpus = {}
 for pat in ("*.py", "*.bat", "*.md", "*.yml", "*.yaml", "*.toml", "*.cfg", "*.ini"):
     for p in list(ENG.rglob(pat)) + list(ROOT.glob(pat)):
-        if SKIP & set(p.parts):
+        if _skipped_path(p, ENG if p.is_relative_to(ENG) else ROOT):
             continue
         corpus[p] = p.read_text(encoding="utf-8", errors="replace")
 orphans = []
@@ -333,7 +359,7 @@ for p in py_files():
     # it — which is how probe_fiidii_sources_v2.py ended up outside the repo
     # while the handoff claimed it was in it.
     if p.stem in ("__init__", "run_app", "orchestrator", "verify_repo_health") \
-            or "tests" in p.parts \
+            or "tests" in p.relative_to(ENG).parts \
             or p.stem.startswith(("test_", "diagnose_", "tools_", "probe_")):
         continue
     if not any(q != p and re.search(rf"\b{re.escape(p.stem)}\b", s) for q, s in corpus.items()):
@@ -341,7 +367,10 @@ for p in py_files():
 if orphans:
     warnings.append(("unreferenced module(s): " + ", ".join(orphans),
                      "dead code in a public repo — wire it up or delete it"))
-check("no unreferenced modules", True, "")
+else:
+    # Orphans are a WARN by design (dead code is not a broken fix), so this is
+    # only recorded as a PASS when it is actually true.
+    check("no unreferenced modules", True, "")
 
 # ─── 12. Test files present ─────────────────────────────────────────────────
 expected_tests = ["test_integrity_fail_closed.py", "test_ui_method_contracts.py",
@@ -362,11 +391,15 @@ for name, ok, detail in results:
     print(f"  {'PASS' if ok else 'FAIL'}  {name}")
     if not ok and detail:
         print(f"        why it matters: {detail}")
+for name, why in skipped:
+    print(f"  SKIP  {name}")
+    print(f"        {why}")
 for msg, why in warnings:
     print(f"  WARN  {msg}")
     print(f"        {why}")
 print("-" * 74)
-print(f"{len(passed)} passed, {len(failed)} failed, {len(warnings)} warning(s)")
+print(f"{len(passed)} passed, {len(failed)} failed, {len(skipped)} skipped, "
+      f"{len(warnings)} warning(s)")
 if failed:
     print("\nEach FAIL names the file and the bug it guards. For a missing fix,")
     print("the commit most likely did not include that file — re-copy and re-run.")

@@ -100,6 +100,24 @@ def test_a_corrupt_cache_is_never_deleted(tmp_path):
     assert p.exists()
 
 
+def _amfi_unreachable(monkeypatch, eqb, data):
+    """Simulate the outage at the real seam: requests.Session.get.
+
+    These tests used to monkeypatch eqb.AMFI_NAV_URL, which nothing reads since
+    the fetch moved to core/amfi_nav.fetch_navall() (its own URL list). They
+    then fetched the REAL AMFI and passed only while AMFI's 8-column format made
+    every parse fail; with AMFI reachable and parsing they failed and rewrote
+    the live data/amfi_nav_latest.csv.
+    """
+    import requests
+
+    def _dns_down(self, url, *a, **k):
+        raise requests.exceptions.ConnectionError(f"simulated DNS failure: {url}")
+
+    monkeypatch.setattr(requests.Session, "get", _dns_down)
+    monkeypatch.setattr(eqb, "AMFI_NAV_OUT", data / "amfi_nav_latest.csv")
+
+
 # ── the pipeline path that actually broke ───────────────────────────────────
 
 def test_amfi_fetch_survives_dns_failure_and_empty_cache(tmp_path, monkeypatch):
@@ -110,8 +128,7 @@ def test_amfi_fetch_survives_dns_failure_and_empty_cache(tmp_path, monkeypatch):
     (data / "amfi_navall_latest.csv").write_text("", encoding="utf-8")
 
     monkeypatch.setattr(eqb, "DATA_DIR", data)
-    monkeypatch.setattr(eqb, "AMFI_NAV_URL",
-                        "https://portal.amfiindia.invalid/spages/NAVAll.txt")
+    _amfi_unreachable(monkeypatch, eqb, data)
 
     nav = eqb.fetch_amfi_nav()          # must not raise
 
@@ -131,8 +148,7 @@ def test_amfi_fetch_uses_a_good_cache_when_the_network_is_down(tmp_path, monkeyp
     }).to_csv(data / "amfi_navall_latest.csv", index=False)
 
     monkeypatch.setattr(eqb, "DATA_DIR", data)
-    monkeypatch.setattr(eqb, "AMFI_NAV_URL",
-                        "https://portal.amfiindia.invalid/spages/NAVAll.txt")
+    _amfi_unreachable(monkeypatch, eqb, data)
 
     nav = eqb.fetch_amfi_nav()
     assert len(nav) == 1
