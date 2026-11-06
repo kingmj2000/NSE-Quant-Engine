@@ -400,7 +400,7 @@ aumf_now = read("etf_aum_auto_fetcher.py")
 terf_now = read("etf_ter_tracking_auto_fetcher.py")
 orch_now = read("orchestrator.py")
 rules_now = read("core/etf_source_rules.py")
-check("AMFI TER read as percent strings, capped at the SEBI ETF limit",
+check("AMFI TER read as percent strings; ETF totals above 1.00% left blank",
       'valid_ter(x, "percent")' in terf_now and "ETF_TER_CAP_DECIMAL = 0.01" in rules_now,
       "26 Nifty 50/Sensex ETFs stored TER 4.00% (AMFI '0.04' kept as a decimal)")
 check("AMFI scheme-wise AAUM read in Rs lakh",
@@ -418,6 +418,36 @@ check("AMFI fetchers run under a Python >= 3.11 helper when amfipy is missing",
       and '_amfi_runpy("etf_ter_tracking_auto_fetcher.py")' in orch_now,
       "amfipy requires Python >= 3.11; in-process on 3.10 every run since June logged IMPORT_ERROR")
 
+# ─── 12c. 2026-11-06 run review: AMFI TER/tracking matching (parser v3) ─────
+check("TER/TE/TD matched per stream and never across fund houses",
+      "def match_stream(" in terf_now and "Name_Tokens_Same_AMC" in terf_now
+      and "def amc_of(" in rules_now and "AMFI_PARSER_VERSION = 3" in rules_now,
+      "184 of 319 matched ETFs took another AMC's row (176 of 287 TERs), e.g. SBI Nifty Bank ETF at Baroda BNP Paribas's 0.51%")
+check("an untrusted NAV-name guess never picks an ETF's TER",
+      "TRUSTED_NAV_METHODS" in terf_now,
+      "HDFCNIMEG ('No reliable match') matched TER through a guessed Mirae Asset name")
+check("SEBI 2026 category names are recognised (never a benchmark)",
+      r"exchange\s+traded\s+funds?" in rules_now and r"index\s+funds?" in rules_now,
+      "174 of 206 stored benchmarks were labels like 'Exchange Traded Funds (ETFs) - Equity ETF'")
+check("TER read from the direct plan when an ETF has no regular plan",
+      "def _plan_total_ter_columns(" in terf_now,
+      "92 of 326 ETF schemes (Zerodha, Groww, DSP, Tata, Angel One) had no TER: regular column 0.00")
+check("TER months and tracking periods combined; future dates not queried",
+      "TER_MONTHS_TO_COMBINE" in terf_now and "TRACKING_PERIODS_TO_COMBINE" in terf_now,
+      "partial Nov sheet had no Nippon/HDFC rows (NIFTYBEES, GOLDBEES no TER); TE = 31-Oct SBI rows only")
+check("ID columns are never TE/TD values; 1Y beats since-launch",
+      "def _is_id_column(" in terf_now and "_TENURES" in terf_now,
+      "mfId was parsed as a tracking value; since-launch TD was preferred over 1Y")
+check("AMFI TER workbook sheets are read once",
+      "pd.read_excel(xls, sheet_name=sheet, header=None)" in terf_now,
+      "each sheet was read twice: 7,997 TER rows became 15,994")
+check("TER/tracking values from pre-v3 files are neither scored nor carried",
+      "AMFI_TER_MIN_PARSER_VERSION" in enr_now and "legacy_amfi_parser_v" in enr_now,
+      "the enricher trusted v2 files whose TERs came from other fund houses")
+check("a cache fallback is retried live; early-month TER refresh repeats after day 10",
+      "last_live_attempt_date" in aumf_now and "ran before day {REFRESH_START_DAY}" in terf_now,
+      "IMPORT_ERROR rebuilt AUM from the Jan-Mar cache as 'success'; the next run skipped ('Day 5 < 10')")
+
 # ─── 13. Test files present ─────────────────────────────────────────────────
 expected_tests = ["test_integrity_fail_closed.py", "test_ui_method_contracts.py",
                   "test_evidence_accumulation.py", "test_history_dedup.py",
@@ -427,7 +457,8 @@ expected_tests = ["test_integrity_fail_closed.py", "test_ui_method_contracts.py"
                   "test_forward_history_quarantine.py",
                   "test_amfi_units_and_categories.py",
                   "test_metadata_overlay_fresh_wins.py",
-                  "test_amfi_helper_interpreter.py"]
+                  "test_amfi_helper_interpreter.py",
+                  "test_ter_tracking_matching.py"]
 absent = [t for t in expected_tests if not (ENG / "tests" / t).exists()]
 check("audit regression tests present", not absent,
       f"missing: {', '.join(absent)}" if absent else "")

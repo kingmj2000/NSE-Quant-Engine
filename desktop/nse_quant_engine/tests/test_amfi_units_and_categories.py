@@ -5,7 +5,7 @@ Measured on the 2026-11-05 run folder (AMFI data fetched June 2026):
   anything <= 0.05 "as a decimal", so 26 Nifty 50 / Sensex ETFs got 4.00%.
 * TER: the fuzzy name fallback matched ETFs to index funds (69), FoFs (6), active
   equity (8, e.g. DEFENCE 1.51%) and a liquid fund; their TERs are not ETF TERs.
-  SEBI Reg. 52(6) caps ETF TER at 1.00%.
+  Totals above 1.00% are left blank for ETFs (rule 2 in core/etf_source_rules.py).
 * Benchmark: 311/332 stored "benchmarks" were AMFI category labels.
 * AUM: AMFI scheme-wise AAUM is in Rs lakh. The fetcher treated it as crore and
   divided values > 1e6 by 1e7: NIFTYBEES 5,705,866.48 lakh (57,059 cr) -> 0.57 cr;

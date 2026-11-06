@@ -199,6 +199,16 @@ def should_attempt_refresh(log_rows: list[dict]) -> bool:
         log(log_rows, "Schedule", "ATTEMPT", f"Existing AUM file was built by parser_version={status.get('parser_version', 'none')}; current={AMFI_PARSER_VERSION} (unit fix). Rebuilding.")
         return True
 
+    # A cache fallback is not a refresh. On 2026-11-05 the 23:29 run could not
+    # import amfipy, rebuilt the file from the cached Jan-Mar 2026 quarter and
+    # stamped the parser version; the 23:37 run, with amfipy working, then
+    # skipped ("Day 5 < 10") and the stale quarter stayed in use. Retry the live
+    # fetch once a day until one succeeds.
+    if str(status.get("last_attempt_status", "")) == "success_from_cache" \
+            and str(status.get("last_live_attempt_date", "")) != today.isoformat():
+        log(log_rows, "Schedule", "ATTEMPT", "Last AUM file was built from the cached AMFI download (live fetch failed); retrying the live fetch once today")
+        return True
+
     if today.day < REFRESH_START_DAY:
         log(log_rows, "Schedule", "SKIP", f"Day {today.day} < refresh start day {REFRESH_START_DAY}; reusing last good file")
         return False
@@ -1237,6 +1247,7 @@ def main() -> int:
 
     print("Fetching scheme-wise AUM from AMFI using Excel-first method...")
     aum_df = try_amfipy_excel_first(log_rows)
+    write_status({**read_status(), "last_live_attempt_date": date.today().isoformat()})
 
     from_cache = False
     if aum_df.empty:

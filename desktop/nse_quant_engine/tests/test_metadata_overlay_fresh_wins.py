@@ -11,6 +11,11 @@ written before parser v2 (unit/category bugs) or from a name-only fuzzy match ar
 never carried; carried values are revalidated (TER cap, category-label
 benchmarks) and labelled in the real source column. standardize_import_metadata
 also ignores pre-v2 AUM files and drops numbers from non-ETF category rows.
+
+Parser v3 (2026-11-06 review): TER/tracking files written before v3 are ignored
+as well (176 of 287 TERs in the 2026-11-05 file belonged to another fund
+house's scheme), while v2 AUM files stay valid. Sources carry the version of the
+parser that wrote them, so carry-forward applies the same per-file minimum.
 """
 from __future__ import annotations
 
@@ -25,6 +30,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import etf_metadata_enricher as enr  # noqa: E402
+from core import etf_source_rules as rules  # noqa: E402
 
 AUM_FILE = "auto_amfi_aum_latest.csv"
 TER_FILE = "auto_amfi_ter_tracking_latest.csv"
@@ -75,7 +81,7 @@ def test_carried_values_are_revalidated():
                      TER=0.04, TER_Source="Existing manual_etf_quality.csv",
                      Benchmark_Source="Existing manual_etf_quality.csv")
     out = enr.overlay_existing_manual({"Symbol": "IVZSENSEX.NS"}, stored)
-    assert pd.isna(out.get("TER", np.nan))                    # 4.00% > SEBI 1% cap
+    assert pd.isna(out.get("TER", np.nan))                    # 4.00% > 1.00% ETF bound
     assert pd.isna(out.get("Benchmark_Index", np.nan))        # a category label
 
 
@@ -102,7 +108,16 @@ def _raw_imports():
          "Scheme Name": "Nippon India ETF Nifty 50 BeES", "AUM Cr": 57058.66, "Scheme_Code": 140084,
          "Scheme Category": "Other Scheme - Other ETFs", "Parser_Version": 2, "__Source_File": "auto_amfi_aum_2026_11.csv"},
     ])
-    return pd.concat([aum_legacy, ter_legacy, aum_v2], ignore_index=True)
+    # The same TER/tracking rows as written by the current parser.
+    ter_current = ter_legacy.assign(Parser_Version=rules.AMFI_PARSER_VERSION,
+                                    __Source_File="auto_amfi_ter_tracking_2026_11.csv")
+    # A v2 file (2026-11-05): SBI Nifty Bank ETF carried Baroda BNP Paribas's TER.
+    ter_v2 = pd.DataFrame([
+        {"Symbol": "SBIBANKNIF.NS", "NSE Symbol": "SBIBANKNIF", "Scheme Name": "SBI Nifty Bank ETF",
+         "TER": 0.0051, "Tracking Error": 0.0003, "Benchmark Index": "NIFTY BANK",
+         "Parser_Version": 2, "__Source_File": TER_FILE},
+    ])
+    return pd.concat([aum_legacy, ter_legacy, aum_v2, ter_current, ter_v2], ignore_index=True)
 
 
 def test_standardize_import_rules(tmp_path, monkeypatch):
@@ -111,13 +126,21 @@ def test_standardize_import_rules(tmp_path, monkeypatch):
     legacy_aum = out[out["Source_File"].eq(AUM_FILE)].iloc[0]
     assert pd.isna(legacy_aum["AUM_Cr"]) and legacy_aum["AUM_Validation"] == "legacy_amfi_aum_parser_units"
     v2_aum = out[out["Source_File"].eq("auto_amfi_aum_2026_11.csv")].iloc[0]
-    assert v2_aum["AUM_Cr"] == pytest.approx(57058.66)
-    defence = out[out["Import_Symbol"].eq("DEFENCE.NS")].iloc[0]
+    assert v2_aum["AUM_Cr"] == pytest.approx(57058.66)       # v2 AUM files stay valid under v3
+
+    # TER/tracking files from before parser v3: nothing in them is used.
+    legacy_ter = out[out["Source_File"].eq(TER_FILE)]
+    assert len(legacy_ter) == 4
+    assert legacy_ter[["TER", "Tracking_Error", "Tracking_Difference", "Benchmark_Index"]].isna().all().all()
+    assert set(legacy_ter["TER_Validation"]) == {"legacy_amfi_parser_v0", "legacy_amfi_parser_v2"}
+
+    cur = out[out["Source_File"].eq("auto_amfi_ter_tracking_2026_11.csv")]
+    defence = cur[cur["Import_Symbol"].eq("DEFENCE.NS")].iloc[0]
     assert pd.isna(defence["TER"]) and "non_etf_scheme_category" in defence["TER_Validation"]
-    itbees = out[out["Import_Symbol"].eq("ITBEES.NS")].iloc[0]
+    itbees = cur[cur["Import_Symbol"].eq("ITBEES.NS")].iloc[0]
     assert itbees["TER"] == pytest.approx(0.0016)
     assert pd.isna(itbees["Benchmark_Index"])                  # category label, not a benchmark
-    bees_td = out[out["Import_Symbol"].eq("NIFTYBEES.NS") & out["Source_File"].eq(TER_FILE)].iloc[0]
+    bees_td = cur[cur["Import_Symbol"].eq("NIFTYBEES.NS")].iloc[0]
     assert bees_td["Benchmark_Index"] == "Nifty 50 TRI"
     assert bees_td["Tracking_Difference"] == pytest.approx(-0.0034)
 
@@ -126,9 +149,29 @@ def test_v2_rows_are_tagged_in_source():
     r = pd.Series({"Source_File": "auto_amfi_aum_2026_11.csv", "Parser_Version": 2, "AUM_Cr": 57058.66,
                    "Import_Scheme_Code": "140084"})
     md = enr.row_to_metadata(r, "Import Symbol")
-    assert V2 in md["AUM_Source"]
+    assert "[amfi_parser_v2]" in md["AUM_Source"]               # the parser that wrote the row
+    assert not enr._stored_value_is_rederived(md["AUM_Source"])  # v2 AUM is still right
     r_legacy = pd.Series({"Source_File": TER_FILE, "Parser_Version": 0, "TER": 0.0016})
-    assert V2 not in enr.row_to_metadata(r_legacy, "Import Symbol")["TER_Source"]
+    assert "[amfi_parser_v" not in enr.row_to_metadata(r_legacy, "Import Symbol")["TER_Source"]
+    r_cur = pd.Series({"Source_File": TER_FILE, "Parser_Version": rules.AMFI_PARSER_VERSION, "TER": 0.0016})
+    assert V2 in enr.row_to_metadata(r_cur, "Import Symbol")["TER_Source"]
+
+
+def test_pre_v3_ter_values_are_not_carried_forward():
+    stored = _stored(AUM_Cr=57058.66, AUM_Source=f"{AUM_FILE} [amfi_parser_v2] (Import Symbol)",
+                     TER=0.0051, TER_Source=f"{TER_FILE} [amfi_parser_v2] (Import Symbol)",
+                     Tracking_Difference=-0.0034,
+                     Tracking_Difference_Source=f"Carried forward ({TER_FILE} [amfi_parser_v2] (Import Symbol))",
+                     Benchmark_Index="Nifty 50 TRI",
+                     Benchmark_Source=f"{AUM_FILE} [amfi_parser_v2] (Import Symbol); {TER_FILE} [amfi_parser_v2] (Import Symbol)")
+    out = enr.overlay_existing_manual({"Symbol": "NIFTYBEES.NS"}, stored)
+    assert out["AUM_Cr"] == 57058.66                         # AUM: v2 is the minimum
+    assert pd.isna(out.get("TER", np.nan))                    # TER/tracking: v3 is the minimum
+    assert pd.isna(out.get("Tracking_Difference", np.nan))
+    assert pd.isna(out.get("Benchmark_Index", np.nan))        # one part from a v2 TER file
+    cur = f"{TER_FILE} {V2} (Import Symbol)"
+    assert not enr._stored_value_is_rederived(cur)
+    assert not enr._stored_value_is_rederived(f"Carried forward ({cur})")
 
 
 def test_sanity_caps():
