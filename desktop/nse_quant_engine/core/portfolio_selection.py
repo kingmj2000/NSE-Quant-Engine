@@ -36,7 +36,9 @@ def _returns_panel(prices_long: pd.DataFrame, symbols: list[str],
         df.pivot_table(index="Date", columns="Symbol", values="Close", aggfunc="last")
           .sort_index()
     )
-    rets = wide.pct_change().tail(window).dropna(how="all")
+    # pandas 2.x otherwise forward-fills missing prices by default, creating
+    # fictitious zero returns and distorting correlations / benchmark stats.
+    rets = wide.pct_change(fill_method=None).tail(window).dropna(how="all")
     return rets
 
 
@@ -148,11 +150,12 @@ def benchmark_stats(prices_long: pd.DataFrame,
             rows.append(rec); continue
         stk = rets[s]
         try:
-            s21 = stk.tail(short_window).dropna()
-            b21 = bench.tail(short_window).dropna()
-            if len(s21) >= 5 and len(b21) >= 5:
-                r_s = (1.0 + s21).prod() - 1.0
-                r_b = (1.0 + b21).prod() - 1.0
+            # Both returns must cover the same complete, latest window.
+            # Never compare a stock's dates with different benchmark dates.
+            paired21 = pd.concat([stk, bench], axis=1, keys=["s", "b"]).tail(short_window)
+            if len(paired21) == short_window and paired21.notna().all().all():
+                r_s = (1.0 + paired21["s"]).prod() - 1.0
+                r_b = (1.0 + paired21["b"]).prod() - 1.0
                 rec["Excess_21D"] = float(r_s - r_b)
 
             paired = pd.concat([stk, bench], axis=1, keys=["s", "b"]).dropna().tail(long_window)
@@ -164,7 +167,10 @@ def benchmark_stats(prices_long: pd.DataFrame,
                     rec["InformationRatio_63D"] = float(excess.mean() / sd * np.sqrt(_TRADING_DAYS))
                 var_b = paired["b"].var(ddof=0)
                 if var_b and not np.isnan(var_b):
-                    rec["BetaVsBenchmark_63D"] = float(paired.cov().loc["s", "b"] / var_b)
+                    rec["BetaVsBenchmark_63D"] = float(
+                        ((paired["s"] - paired["s"].mean())
+                         * (paired["b"] - paired["b"].mean())).mean() / var_b
+                    )
         except Exception:
             pass
         rows.append(rec)

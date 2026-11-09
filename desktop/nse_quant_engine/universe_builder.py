@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from io import StringIO
+import re
 import pandas as pd
 import requests
 
@@ -110,7 +111,10 @@ def infer_etf_category(row: pd.Series) -> str:
         return "International ETF"
     if any(k in text for k in ["BANK", "FINANCIAL", "PSU BANK"]):
         return "Bank/Financial ETF"
-    if "IT" in text or "TECH" in text:
+    # "IT" occurs inside EQUITY, NIFTY and many ISINs.  A substring
+    # search therefore labeled most ordinary equity ETFs as technology.
+    # The underlying description uses "Nifty IT" for actual IT funds.
+    if re.search(r"\bIT\b", text) or "TECH" in text:
         return "IT ETF"
     if "PHARMA" in text or "HEALTH" in text:
         return "Pharma/Healthcare ETF"

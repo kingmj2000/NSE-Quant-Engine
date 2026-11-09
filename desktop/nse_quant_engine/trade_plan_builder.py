@@ -606,7 +606,12 @@ def _emit_corr_and_benchmark(plan: pd.DataFrame) -> None:
             sub_corr = corr.loc[official, official] if official else corr
             sub_corr.to_csv(TOP5_CORR_CSV, index=True)
 
-            bench = psel.benchmark_stats(prices, official)
+            # Candidate prices intentionally exclude ^NSEI. Read the existing
+            # index cache separately, without fetching or altering the universe.
+            from core.sentiment_overlay import load_index_tape
+            index_tape = load_index_tape(DATA_DIR, fetch=False)
+            bench_prices = pd.concat([prices, index_tape], ignore_index=True, sort=False)
+            bench = psel.benchmark_stats(bench_prices, official)
             bench.to_csv(TOP5_BENCH_CSV, index=False)
             print(f"Saved: {TOP5_CORR_CSV.name} (avg|corr|={psel.avg_abs_offdiag(sub_corr):.2f})")
             print(f"Saved: {TOP5_BENCH_CSV.name}")

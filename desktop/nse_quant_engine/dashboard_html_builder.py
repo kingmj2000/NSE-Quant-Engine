@@ -95,20 +95,19 @@ def _cfg(name: str, default):
 def _assert_top5_alignment(cards: list, trade_plan_df, rank_col: str) -> dict:
     """Compare dashboard cards Top-5 symbols vs trade_plan_latest.csv Top-5 symbols.
 
-    Both sides must sort by the SAME authoritative order: ``rank_col``
-    (Confidence_Adjusted_Score) descending, then Symbol ascending. Final_Score
-    is never a tie-breaker or fallback. If the ordered symbol lists diverge, the
-    dashboard renders a RED "Top-5 mismatch" honesty chip listing both lists.
+    Compare the dashboard's displayed cards to the actual official trade-plan
+    Top-5, not a second copy filtered by the dashboard's separate veto list.
+    The latter hides real disagreements between the two surfaces.
     """
     dash_syms = [_norm_sym(c.get("sym")) for c in cards[:5]]
     plan_syms: list[str] = []
     try:
         if trade_plan_df is None or getattr(trade_plan_df, "empty", True) or "Symbol" not in trade_plan_df.columns:
             return {"ok": None, "dash": dash_syms, "plan": [], "reason": "trade plan not available"}
-        tp = trade_plan_df[~trade_plan_df["Symbol"].apply(_veto_symbol)].copy()
-        if rank_col not in tp.columns:
+        if rank_col not in trade_plan_df.columns:
             return {"ok": None, "dash": dash_syms, "plan": [], "reason": f"{rank_col} not in trade plan"}
-        plan_syms = [_norm_sym(s) for s in _official_order(tp, rank_col)["Symbol"].head(5).tolist()]
+        from core.top5_contract import official_top5
+        plan_syms = [_norm_sym(s) for s in official_top5(trade_plan_df)["Symbol"].tolist()]
     except Exception as e:
         return {"ok": None, "dash": dash_syms, "plan": [], "reason": f"alignment check errored: {e}"}
     ok = dash_syms == plan_syms and len(dash_syms) > 0
