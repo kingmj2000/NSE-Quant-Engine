@@ -57,6 +57,75 @@ def pick_column(df: pd.DataFrame, name: str) -> str | None:
 
 # ─── Low-level safe readers ────────────────────────────────────────────────
 
+# The engine writes the literal "Clean" into Risk_Flag when no risk applies, so
+# "non-empty" is NOT "flagged". Treating it as a flag made the Candidates
+# "Risk flag: Flagged" filter return every row, "Clean" return none, and put
+# "Risk flag on Top-5: X — Clean" into the Overview review queue.
+NO_RISK_FLAG_VALUES = frozenset({"", "nan", "none", "clean", "-", "\u2014"})
+
+
+def is_risk_flag(value: Any) -> bool:
+    """True when a Risk_Flag value names an actual risk."""
+    if value is None:
+        return False
+    try:
+        if pd.isna(value):
+            return False
+    except (TypeError, ValueError):
+        pass
+    return str(value).strip().lower() not in NO_RISK_FLAG_VALUES
+
+
+def risk_flag_mask(series: pd.Series) -> pd.Series:
+    """Vectorised is_risk_flag for a Risk_Flag column."""
+    text = series.astype(str).str.strip().str.lower()
+    return series.notna() & ~text.isin(NO_RISK_FLAG_VALUES)
+
+
+def candidate_source(trade: pd.DataFrame, scores: pd.DataFrame) -> pd.DataFrame:
+    """The frame the Overview's official Top-N should be cut from.
+
+    trade_plan_latest.csv carries no Opportunity_Eligible column, so
+    top_official_candidates(trade) is always empty (missing column = nothing
+    eligible, by design). Preferring it whenever it had rows made the Overview
+    print "No officially eligible candidates" while 494 rows were eligible, and
+    left the Top-5 risk-flag review check with nothing to look at.
+    """
+    trade = trade if trade is not None else pd.DataFrame()
+    scores = scores if scores is not None else pd.DataFrame()
+    if not trade.empty and "Opportunity_Eligible" in trade.columns:
+        return trade
+    return scores if not scores.empty else trade
+
+
+def format_cell(v: Any) -> str:
+    """Display formatting only — the CSV keeps full precision.
+
+    Raw floats like 935.4000244140624 or 20.00000459516826 made every table
+    wide and unreadable. Whole numbers lose the trailing .0, large values get
+    thousands separators and 2 dp, small values keep 4 significant digits
+    (TER 0.0008, tracking error 0.0072).
+    """
+    if v is None:
+        return ""
+    try:
+        if pd.isna(v):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    if isinstance(v, bool):
+        return str(v)
+    if isinstance(v, float):
+        if v.is_integer() and abs(v) < 1e15:
+            return f"{int(v):,}" if abs(v) >= 10000 else str(int(v))
+        if abs(v) >= 1000:
+            return f"{v:,.2f}"
+        if abs(v) >= 1:
+            return f"{v:.2f}"
+        return f"{v:.4g}"
+    return str(v)
+
+
 def read_json(path: str | Path) -> dict:
     p = Path(path)
     if not p.exists():

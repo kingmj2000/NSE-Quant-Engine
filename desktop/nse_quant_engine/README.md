@@ -1,4 +1,10 @@
-# NSE Quant Engine — Clean Core v4
+# NSE Quant Engine v5.0
+
+> v5.0 (2026-11-11): Midnight Sapphire UI across the desktop app and the HTML
+> dashboard, one sidebar navigation, display-correctness fixes. Scoring, validation
+> and the ranking schema (v2) are unchanged. Version lives in `core/version.py`.
+
+## Clean Core (since v4)
 
 A clean, unit-tested core that fixes the real analytical flaws of the patched
 engine and adds two new analysis pieces (fundamental/quality factor + cost-aware

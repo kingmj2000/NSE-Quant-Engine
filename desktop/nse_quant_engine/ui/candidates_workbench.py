@@ -21,30 +21,44 @@ from PySide6.QtWidgets import (
 )
 
 from core import output_paths as OP
+from ui import theme
+from ui import widgets as W
 from core.candidate_selection import (
     canonical_order, is_eligible,
     PRIMARY_SCORE_COL, SECONDARY_SCORE_COL,
 )
 from core.ui_readers import (
     pick_column as _pick_col, read_news_digest, read_daily_changes,
-    stories_for_symbol,
+    stories_for_symbol, is_risk_flag, risk_flag_mask,
 )
 
 
 # ---- shared helpers (kept local; no cycle with run_app.py) ------------------
 
 def _pill(text: str, tone: str = "dim") -> QLabel:
-    lbl = QLabel(text); lbl.setObjectName("Pill"); lbl.setProperty("tone", tone)
-    lbl.style().unpolish(lbl); lbl.style().polish(lbl)
-    return lbl
+    return W.pill(text, tone)
 
 
 def _section_label(text: str) -> QLabel:
-    lbl = QLabel(text.upper())
-    lbl.setStyleSheet(
-        "color:#8A92A6;font-size:10.5px;letter-spacing:1.4px;"
-        "font-weight:700;margin-top:6px;background:transparent;")
-    return lbl
+    return W.section_label(text)
+
+
+# Table sorting: QStandardItemModel sorts on this role. Numeric columns carry a
+# float (so 10 sorts after 9), text columns their lower-cased text, and "Rank"
+# carries the canonical position, so sorting by Rank restores official order.
+SORT_ROLE = Qt.UserRole + 1
+ROW_ROLE = Qt.UserRole          # canonical position of the row in _df_view
+_NUMERIC_HEADERS = {"ΔRank", "Adj Score", "Raw Score", "Confidence", "RSI", "Vol",
+                    "DD", "News", "Shadow Rank", "Shadow Score"}
+_MISSING_SORT = -1e18           # blanks sink to the bottom of a descending sort
+
+
+def _as_float(v: Any) -> float | None:
+    try:
+        f = float(v)
+    except Exception:
+        return None
+    return None if pd.isna(f) else f
 
 
 def _read_csv(p: Path) -> pd.DataFrame:
@@ -109,77 +123,84 @@ class CandidatesWorkbench(QWidget):
 
     # ------------- Filter bar ------------------------------------------------
     def _build_filter_bar(self) -> QWidget:
-        bar = QFrame(); bar.setObjectName("Card"); bar.setProperty("accent", "indigo")
-        h = QHBoxLayout(bar); h.setContentsMargins(10, 8, 10, 8); h.setSpacing(8)
+        bar, outer = W.card(margins=12)
+        h = QHBoxLayout(); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(10)
+        outer.addLayout(h)
 
         self.txt_search = QLineEdit()
-        self.txt_search.setPlaceholderText("Search symbol or name…")
+        self.txt_search.setPlaceholderText("Symbol or company name")
         self.txt_search.setClearButtonEnabled(True)
         self.txt_search.textChanged.connect(self._apply_filters)
-        h.addWidget(self.txt_search, 2)
+        h.addWidget(W.labeled("Search", self.txt_search), 3)
 
-        self.cb_universe = QComboBox(); self.cb_universe.addItems(["All universes"])
+        def _combo(items):
+            cb = QComboBox(); cb.addItems(items)
+            cb.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            cb.setMinimumContentsLength(9)
+            W.polish_combo(cb)
+            return cb
+
+        self.cb_universe = _combo(["All universes"])
         self.cb_universe.currentIndexChanged.connect(self._apply_filters)
-        h.addWidget(self.cb_universe)
+        h.addWidget(W.labeled("Universe", self.cb_universe), 2)
 
-        self.cb_type = QComboBox(); self.cb_type.addItems(["Stocks + ETFs", "Stocks only", "ETFs only"])
+        self.cb_type = _combo(["Stocks + ETFs", "Stocks only", "ETFs only"])
         self.cb_type.currentIndexChanged.connect(self._apply_filters)
-        h.addWidget(self.cb_type)
+        h.addWidget(W.labeled("Instrument", self.cb_type), 2)
 
-        self.cb_bucket = QComboBox(); self.cb_bucket.addItems(["All raw score buckets"])
+        self.cb_bucket = _combo(["All raw score buckets"])
         self.cb_bucket.setToolTip("Raw Score Bucket — diagnostic only; official standing "
                                   "is rank + Confidence_Adjusted_Score.")
 
         self.cb_bucket.currentIndexChanged.connect(self._apply_filters)
-        h.addWidget(self.cb_bucket)
+        h.addWidget(W.labeled("Raw score bucket", self.cb_bucket), 2)
 
-        self.cb_eligible = QComboBox()
-        self.cb_eligible.addItems(["All", "Eligible", "Ineligible"])
+        self.cb_eligible = _combo(["All", "Eligible", "Ineligible"])
         self.cb_eligible.currentIndexChanged.connect(self._apply_filters)
-        h.addWidget(self.cb_eligible)
+        h.addWidget(W.labeled("Eligibility", self.cb_eligible), 1)
 
-        self.cb_flag = QComboBox()
-        self.cb_flag.addItems(["All", "Clean", "Flagged"])
+        self.cb_flag = _combo(["All", "Clean", "Flagged"])
         self.cb_flag.currentIndexChanged.connect(self._apply_filters)
-        h.addWidget(self.cb_flag)
+        h.addWidget(W.labeled("Risk flag", self.cb_flag), 1)
+
+        self.cb_new20 = _combo(["Any", "New Top-20 entrant only"])
+        self.cb_new20.currentIndexChanged.connect(self._apply_filters)
+        h.addWidget(W.labeled("Top-20", self.cb_new20), 1)
 
         # Mode: strictly separated. Official is the pipeline authority.
         # Shadow shows shadow-only ordering (never merged into official).
         # Compare uses OFFICIAL ordering and appends Shadow_Rank / Shadow_Score.
-        self.cb_mode = QComboBox()
-        self.cb_mode.addItems(["Official", "Shadow", "Compare"])
+        self.cb_mode = _combo(["Official", "Shadow", "Compare"])
+        self.cb_mode.setToolTip("Official = pipeline authority. Shadow = diagnostic "
+                                "ordering only. Compare = official order + shadow columns.")
         self.cb_mode.currentIndexChanged.connect(self._on_mode_changed)
-        h.addWidget(QLabel("Mode:"))
-        h.addWidget(self.cb_mode)
-
-        self.cb_new20 = QComboBox()
-        self.cb_new20.addItems(["Any", "New Top-20 entrant only"])
-        self.cb_new20.currentIndexChanged.connect(self._apply_filters)
-        h.addWidget(self.cb_new20)
+        h.addWidget(W.labeled("Ranking", self.cb_mode), 1)
 
         return bar
 
     # ------------- Table side ------------------------------------------------
     def _build_table_side(self) -> QWidget:
-        w = QWidget(); v = QVBoxLayout(w); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(6)
-        self.lbl_count = QLabel("0 candidates"); self.lbl_count.setObjectName("Sub")
-        self.lbl_count.setStyleSheet("color:#8A92A6;font-size:11px;padding:2px 4px;")
+        w = QWidget(); v = QVBoxLayout(w); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(8)
+        self.lbl_count = QLabel("0 candidates"); self.lbl_count.setObjectName("Meta")
         v.addWidget(self.lbl_count)
 
         self.table = QTableView()
         self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.verticalHeader().setVisible(False)
+        W.style_table(self.table, row_height=32)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        # Start in canonical (Rank) order; header clicks re-sort numerically.
+        self.table.horizontalHeader().setSortIndicator(0, Qt.AscendingOrder)
         self.table.setSortingEnabled(True)
         self.table.setAlternatingRowColors(True)
         v.addWidget(self.table, 1)
 
-        btn_row = QHBoxLayout(); btn_row.setSpacing(6)
-        self.btn_copy = QPushButton("Copy selected row")
+        btn_row = QHBoxLayout(); btn_row.setSpacing(8)
+        self.btn_copy = QPushButton("⧉  Copy selected row")
+        self.btn_copy.setToolTip("Copy the selected candidate as tab-separated values")
         self.btn_copy.clicked.connect(self._copy_selected_row)
         btn_row.addWidget(self.btn_copy)
-        self.btn_open_scores = QPushButton("Open latest_scores.csv")
+        self.btn_open_scores = QPushButton("↗  Show latest_scores.csv")
         self.btn_open_scores.clicked.connect(
             lambda: self._reveal(self.OUT / "latest_scores.csv"))
         btn_row.addWidget(self.btn_open_scores)
@@ -193,11 +214,9 @@ class CandidatesWorkbench(QWidget):
         self._inspector_scroll.setFrameShape(QFrame.NoFrame)
         self._insp_holder = QWidget()
         self._insp_v = QVBoxLayout(self._insp_holder)
-        self._insp_v.setContentsMargins(6, 6, 6, 6); self._insp_v.setSpacing(10)
+        self._insp_v.setContentsMargins(2, 0, 6, 0); self._insp_v.setSpacing(theme.GAP)
         self._inspector_scroll.setWidget(self._insp_holder)
-        placeholder = QLabel("Select a candidate to inspect.")
-        placeholder.setStyleSheet("color:#6B6F76;font-size:12px;padding:16px;background:transparent;")
-        self._insp_v.addWidget(placeholder); self._insp_v.addStretch()
+        self._insp_v.addWidget(W.empty_note("Select a candidate to inspect.")); self._insp_v.addStretch()
         return self._inspector_scroll
 
     # ------------- Refresh entry point --------------------------------------
@@ -254,6 +273,24 @@ class CandidatesWorkbench(QWidget):
                            sorted(df["Bucket"].dropna().astype(str).unique().tolist()) if "Bucket" in df.columns else [])
 
         self._apply_filters()
+
+    def focus_symbol(self, symbol: str) -> None:
+        """Show one symbol (used by the Overview links): search for it and select it."""
+        sym = str(symbol or "").strip()
+        if not sym:
+            return
+        self.txt_search.setText(sym)          # triggers _apply_filters + selects row 0
+        try:
+            self.txt_search.setFocus()
+        except Exception:
+            pass
+
+    def focus_search(self) -> None:
+        try:
+            self.txt_search.setFocus()
+            self.txt_search.selectAll()
+        except Exception:
+            pass
 
     def _on_mode_changed(self):
         # Switching Official ↔ Shadow swaps the base dataset entirely.
@@ -342,7 +379,7 @@ class CandidatesWorkbench(QWidget):
 
         flag = self.cb_flag.currentText()
         if flag != "All" and "Risk_Flag" in df.columns:
-            has_flag = df["Risk_Flag"].astype(str).str.strip().ne("") & df["Risk_Flag"].notna()
+            has_flag = risk_flag_mask(df["Risk_Flag"])   # "Clean" is not a flag
             m &= has_flag if flag == "Flagged" else ~has_flag
 
         if self.cb_new20.currentIndex() > 0:
@@ -374,6 +411,7 @@ class CandidatesWorkbench(QWidget):
 
         model = QStandardItemModel(len(df), len(headers))
         model.setHorizontalHeaderLabels(headers)
+        model.setSortRole(SORT_ROLE)
 
         col_map = {
             "Rank":       "Opportunity_Rank",
@@ -381,6 +419,9 @@ class CandidatesWorkbench(QWidget):
             "Name":       "Name",
             "Universe":   "Universe",
             "Bucket":     "Bucket",
+            # The header is "Raw Score Bucket"; without this key the column
+            # looked up a non-existent "Raw Score Bucket" field and was blank.
+            "Raw Score Bucket": "Bucket",
             "Adj Score":  PRIMARY_SCORE_COL,
             "Raw Score":  SECONDARY_SCORE_COL,
             "Confidence": _pick_col(df, "Confidence") or "Confidence_Score",
@@ -395,6 +436,7 @@ class CandidatesWorkbench(QWidget):
         for r, (_, row) in enumerate(df.iterrows()):
             sym = str(row.get("Symbol", ""))
             for c, h in enumerate(headers):
+                sort_val: Any = None
                 if h == "ΔRank":
                     # In Shadow mode there is no official ΔRank — leave blank.
                     if mode == "Shadow":
@@ -405,14 +447,17 @@ class CandidatesWorkbench(QWidget):
                             txt = ""
                         else:
                             di = int(d)
-                            txt = ("▲" if di > 0 else ("▼" if di < 0 else "•")) + str(abs(di))
+                            txt = ("▲" + str(di)) if di > 0 else (("▼" + str(abs(di))) if di < 0 else "•")
+                            sort_val = float(di)
                     it = QStandardItem(txt)
                 elif h == "Shadow Rank":
                     sr = self._shadow_rank_map.get(sym)
                     it = QStandardItem("" if sr is None else str(int(sr)))
+                    sort_val = None if sr is None else float(sr)
                 elif h == "Shadow Score":
                     ss = self._shadow_score_map.get(sym)
                     it = QStandardItem(_fmt(ss, 1) if ss is not None else "")
+                    sort_val = ss
                 else:
                     src = col_map.get(h, h)
                     val = row.get(src) if src in row.index else None
@@ -426,10 +471,28 @@ class CandidatesWorkbench(QWidget):
                     else:
                         txt = "" if val is None or (isinstance(val, float) and pd.isna(val)) else str(val)
                     it = QStandardItem(txt)
+                    if h in _NUMERIC_HEADERS:
+                        sort_val = _as_float(val)
+                # Sort key for this cell (see SORT_ROLE).
+                if h == "Rank":
+                    it.setData(float(r), SORT_ROLE)        # canonical position
+                    it.setData(r, ROW_ROLE)                # survives re-sorting
+                elif h in _NUMERIC_HEADERS:
+                    it.setData(_MISSING_SORT if sort_val is None else float(sort_val), SORT_ROLE)
+                else:
+                    it.setData(txt.lower(), SORT_ROLE)
+                if h in _NUMERIC_HEADERS or h == "Rank":
+                    it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 it.setEditable(False)
                 model.setItem(r, c, it)
 
         self.table.setModel(model)
+        # Apply the header's current sort (Rank ascending = canonical order on
+        # first load; the user's chosen column afterwards).
+        hdr = self.table.horizontalHeader()
+        if 0 <= hdr.sortIndicatorSection() < len(headers):
+            self.table.sortByColumn(hdr.sortIndicatorSection(), hdr.sortIndicatorOrder())
+        W.fit_columns(self.table, max_w=240)
         self.table.selectionModel().selectionChanged.connect(
             lambda *_: self._on_selection_changed())
         # Preselect first row so inspector isn't empty
@@ -437,11 +500,27 @@ class CandidatesWorkbench(QWidget):
             self.table.selectRow(0)
 
     def _selected_index(self) -> int | None:
+        """Position of the selected row in self._df_view.
+
+        The view row is NOT that position once the user sorts by a header: the
+        model reorders its rows in place, so inspecting `_df_view.iloc[view_row]`
+        showed a different candidate than the highlighted one. Every row carries
+        its canonical position in ROW_ROLE on the first column instead.
+        """
         sel = self.table.selectionModel()
         if sel is None: return None
         rows = sel.selectedRows()
         if not rows: return None
-        return rows[0].row()
+        view_row = rows[0].row()
+        model = self.table.model()
+        try:
+            item = model.item(view_row, 0)
+            pos = item.data(ROW_ROLE) if item is not None else None
+            if pos is not None:
+                return int(pos)
+        except Exception:
+            pass
+        return view_row
 
     def _on_selection_changed(self):
         idx = self._selected_index()
@@ -458,9 +537,8 @@ class CandidatesWorkbench(QWidget):
     def _render_inspector(self, row: pd.Series | None):
         self._clear_inspector()
         if row is None:
-            lbl = QLabel("Select a candidate to inspect.")
-            lbl.setStyleSheet("color:#6B6F76;font-size:12px;padding:16px;background:transparent;")
-            self._insp_v.addWidget(lbl); self._insp_v.addStretch(); return
+            self._insp_v.addWidget(W.empty_note("Select a candidate to inspect."))
+            self._insp_v.addStretch(); return
 
         sym = str(row.get("Symbol", "?"))
         name = str(row.get("Name", "") or "")
@@ -468,19 +546,16 @@ class CandidatesWorkbench(QWidget):
         bucket = str(row.get("Bucket", "") or "")
 
         # Header card
-        head = QFrame(); head.setObjectName("Card")
-        head.setProperty("accent", "teal" if elig.strip().lower() == "yes" else "amber")
-        hv = QVBoxLayout(head); hv.setContentsMargins(14, 12, 14, 12); hv.setSpacing(4)
-        row_top = QHBoxLayout()
-        sym_lbl = QLabel(sym); sym_lbl.setStyleSheet("font-size:18px;font-weight:800;color:#fff;background:transparent;")
-        row_top.addWidget(sym_lbl); row_top.addStretch()
+        is_elig = elig.strip().lower() == "yes"
+        head, hv = W.card(None if is_elig else "amber", variant="hero", spacing=4)
+        row_top = QHBoxLayout(); row_top.setSpacing(6)
+        row_top.addWidget(W.text(sym, "Hero")); row_top.addStretch()
         row_top.addWidget(_pill(bucket or "—", "teal" if "Top" in bucket else "blue"))
-        row_top.addWidget(_pill("ELIGIBLE" if elig.strip().lower() == "yes" else "INELIGIBLE",
+        row_top.addWidget(_pill("Eligible" if elig.strip().lower() == "yes" else "Ineligible",
                                 "green" if elig.strip().lower() == "yes" else "amber"))
         hv.addLayout(row_top)
         if name:
-            nl = QLabel(name); nl.setStyleSheet("color:#8A92A6;font-size:12px;background:transparent;")
-            nl.setWordWrap(True); hv.addWidget(nl)
+            hv.addWidget(W.text(name, "Meta", wrap=True))
         self._insp_v.addWidget(head)
 
         # Ranking-explanation card (horizontal bars)
@@ -501,9 +576,8 @@ class CandidatesWorkbench(QWidget):
         self._insp_v.addStretch()
 
     def _card_ranking_explanation(self, row: pd.Series) -> QFrame:
-        wrap = QFrame(); wrap.setObjectName("Card"); wrap.setProperty("accent", "blue")
-        v = QVBoxLayout(wrap); v.setContentsMargins(14, 12, 14, 12); v.setSpacing(6)
-        v.addWidget(_section_label("Ranking explanation (horizontal bars)"))
+        wrap, v = W.card(spacing=7)
+        v.addWidget(W.text("What drives the score", "CardTitle"))
         components = [
             ("Momentum",           "Momentum_Score"),
             ("Trend",              "Trend_Score"),
@@ -528,40 +602,34 @@ class CandidatesWorkbench(QWidget):
             f"&nbsp;·&nbsp; Raw Final_Score = {_fmt(row.get(SECONDARY_SCORE_COL), 1)} "
             f"&nbsp;·&nbsp; Confidence = {conf_txt}")
         note.setTextFormat(Qt.RichText); note.setWordWrap(True)
-        note.setStyleSheet("color:#B7BCC6;font-size:11.5px;background:transparent;margin-top:4px;")
+        note.setObjectName("Meta")
         v.addWidget(note)
-        disc = QLabel("Displayed for interpretation only. No score is computed here.")
-        disc.setStyleSheet("color:#6B6F76;font-size:10.5px;font-style:italic;background:transparent;")
-        v.addWidget(disc)
+        v.addWidget(W.empty_note("Displayed for interpretation only. No score is computed here."))
         return wrap
 
     def _hbar(self, label: str, value: float | None) -> QWidget:
-        w = QWidget(); h = QHBoxLayout(w); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(8)
-        lbl = QLabel(label); lbl.setFixedWidth(160)
-        lbl.setStyleSheet("color:#B7BCC6;font-size:11.5px;background:transparent;")
+        w = QWidget(); h = QHBoxLayout(w); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(10)
+        lbl = W.text(label, "Meta"); lbl.setFixedWidth(150)
         h.addWidget(lbl)
-        bar = QFrame(); bar.setFixedHeight(10); bar.setMinimumWidth(180)
-        bar.setStyleSheet("background:rgba(255,255,255,0.06);border-radius:5px;")
+        bar = QFrame(); bar.setObjectName("BarTrack"); bar.setFixedHeight(8); bar.setMinimumWidth(140)
         h.addWidget(bar, 1)
-        v_txt = QLabel(_fmt(value, 1) if value is not None else "—")
-        v_txt.setFixedWidth(50); v_txt.setAlignment(Qt.AlignRight)
-        v_txt.setStyleSheet("color:#ECEDEE;font-size:11.5px;background:transparent;")
+        v_txt = W.text(_fmt(value, 1) if value is not None else "—", "Value")
+        v_txt.setFixedWidth(46); v_txt.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         h.addWidget(v_txt)
         # Overlay fill inside bar
         if value is not None:
             clipped = max(-100.0, min(100.0, float(value)))
             pct = (clipped + 100.0) / 200.0 if clipped < 0 or clipped > 100 else clipped / 100.0
             pct = max(0.0, min(1.0, pct))
-            fill = QFrame(bar); fill.setStyleSheet("background:#7FE0A6;border-radius:5px;")
+            fill = QFrame(bar); fill.setObjectName("BarFill")
             def _resize(evt, bar=bar, fill=fill, pct=pct):
                 fill.setGeometry(0, 0, int(bar.width() * pct), bar.height())
             bar.resizeEvent = _resize  # type: ignore
         return w
 
     def _card_price_ladder(self, sym: str, row: pd.Series) -> QFrame:
-        wrap = QFrame(); wrap.setObjectName("Card"); wrap.setProperty("accent", "violet")
-        v = QVBoxLayout(wrap); v.setContentsMargins(14, 12, 14, 12); v.setSpacing(6)
-        v.addWidget(_section_label("Mechanical price ladder"))
+        wrap, v = W.card(spacing=8)
+        v.addWidget(W.text("Mechanical price ladder", "CardTitle"))
 
         # Prefer trade_plan_latest.csv row for the symbol
         trade = _read_csv(self.OUT / "trade_plan_latest.csv")
@@ -570,6 +638,16 @@ class CandidatesWorkbench(QWidget):
             m = trade[trade["Symbol"].astype(str) == sym]
             if not m.empty: tr = m.iloc[0]
         src = tr if tr is not None else row
+
+        def _price_from(r):
+            for key in ("Current_Price", "Close", "Price"):
+                try:
+                    f = float(r.get(key)) if key in r.index else None
+                    if f is not None and not pd.isna(f):
+                        return f
+                except Exception:
+                    continue
+            return None
 
         def _g(key):
             val = src.get(key) if key in src.index else None
@@ -583,33 +661,30 @@ class CandidatesWorkbench(QWidget):
             "Stop":        _g("Stop_Loss"),
             "Buy zone lo": _g("Buy_Zone_Low"),
             "Buy zone hi": _g("Buy_Zone_High"),
-            "Current":     _g("Current_Price") or _g("Close"),
+            # trade_plan_latest.csv carries no price column, so "Current" was
+            # always blank; fall back to the scores row (Close / Price).
+            "Current":     _g("Current_Price") or _g("Close") or _price_from(row),
             "Target 1":    _g("Target_1"),
             "Target 2":    _g("Target_2"),
         }
         # Grid layout for level chips
-        grid = QGridLayout(); grid.setHorizontalSpacing(10); grid.setVerticalSpacing(4)
+        level_tone = {"Stop": "amber", "Target 1": "teal", "Target 2": "teal", "Current": "blue"}
+        grid = QGridLayout(); grid.setHorizontalSpacing(12); grid.setVerticalSpacing(8)
         for i, (k, v_) in enumerate(levels.items()):
-            grid.addWidget(QLabel(k), 0, i)
-            val = QLabel(_fmt(v_, 2) if v_ is not None else "—")
-            val.setStyleSheet("color:#ECEDEE;font-weight:700;font-size:13px;background:transparent;")
-            grid.addWidget(val, 1, i)
-            grid.itemAtPosition(0, i).widget().setStyleSheet(
-                "color:#6B6F76;font-size:10.5px;letter-spacing:.4px;background:transparent;")
+            grid.addWidget(W.stat(k, _fmt(v_, 2) if v_ is not None else "—",
+                                  level_tone.get(k)), i // 3, i % 3)
         v.addLayout(grid)
 
         # Warn about mechanical-only unless validation positive
         vstat = _read_json(self.OUT / "validation_status.json")
         if str(vstat.get("verdict", "")) != "Validation Positive":
-            warn = QLabel("Mechanical reference levels only — validation is not positive.")
-            warn.setStyleSheet("color:#F2B13C;font-size:11px;font-weight:600;background:transparent;margin-top:4px;")
-            warn.setWordWrap(True); v.addWidget(warn)
+            v.addWidget(W.banner("Mechanical reference levels only — validation is not positive.",
+                                 "amber"))
         return wrap
 
     def _card_history(self, sym: str) -> QFrame:
-        wrap = QFrame(); wrap.setObjectName("Card"); wrap.setProperty("accent", "indigo")
-        v = QVBoxLayout(wrap); v.setContentsMargins(14, 12, 14, 12); v.setSpacing(6)
-        v.addWidget(_section_label("History"))
+        wrap, v = W.card(spacing=8)
+        v.addWidget(W.text("Rank history", "CardTitle"))
 
         sh = _read_csv(self.OUT / "score_history.csv")
         rc = _read_csv(self.OUT / "rank_changes.csv")
@@ -639,9 +714,7 @@ class CandidatesWorkbench(QWidget):
 
         grid = QGridLayout(); grid.setHorizontalSpacing(12); grid.setVerticalSpacing(4)
         def _kv(col, k, v_):
-            kl = QLabel(k); kl.setStyleSheet("color:#6B6F76;font-size:10.5px;letter-spacing:.4px;background:transparent;")
-            vl = QLabel(v_); vl.setStyleSheet("color:#ECEDEE;font-size:13px;font-weight:700;background:transparent;")
-            grid.addWidget(kl, 0, col); grid.addWidget(vl, 1, col)
+            grid.addWidget(W.stat(k, v_), 0, col)
         _kv(0, "Current rank",  str(cur_rank) if cur_rank is not None else "—")
         _kv(1, "Previous rank", str(prev_rank) if prev_rank is not None else "—")
         _kv(2, "Best recent",   str(best_rank) if best_rank is not None else "—")
@@ -650,14 +723,13 @@ class CandidatesWorkbench(QWidget):
         return wrap
 
     def _card_risk_context(self, sym: str, row: pd.Series) -> QFrame:
-        wrap = QFrame(); wrap.setObjectName("Card"); wrap.setProperty("accent", "amber")
-        v = QVBoxLayout(wrap); v.setContentsMargins(14, 12, 14, 12); v.setSpacing(6)
-        v.addWidget(_section_label("Risk & context"))
+        wrap, v = W.card(spacing=6)
+        v.addWidget(W.text("Risk & context", "CardTitle"))
 
         bullets: list[tuple[str, str]] = []
 
         rf = str(row.get("Risk_Flag", "") or "").strip()
-        if rf: bullets.append((f"Risk flag: {rf}", "amber"))
+        if is_risk_flag(rf): bullets.append((f"Risk flag: {rf}", "amber"))
 
         # Earnings inside hold window?
         ev = _read_csv(self.OUT / OP.TOP5_EVENTS_CSV)
@@ -700,30 +772,24 @@ class CandidatesWorkbench(QWidget):
                     bullets.append((f"Expected value: {fv:.2f}%", "teal"))
 
         if not bullets:
-            v.addWidget(QLabel("No additional risk / context data available."))
+            v.addWidget(W.empty_note("No additional risk / context data available."))
+        elif any(t == "amber" for _, t in bullets):
+            wrap.setProperty("accent", "amber"); W.repolish(wrap)
         for text, tone in bullets:
-            dot = {"green": "#7FE0A6", "amber": "#F2B13C", "red": "#FF8597",
-                   "blue": "#9CC6FF", "violet": "#C6A8FA", "teal": "#7FE0C6"}.get(tone, "#B7BCC6")
-            lbl = QLabel(f"<span style='color:{dot};'>●</span>  {text}")
-            lbl.setTextFormat(Qt.RichText); lbl.setWordWrap(True)
-            lbl.setStyleSheet("color:#ECEDEE;font-size:11.5px;background:transparent;padding:1px 0;")
-            v.addWidget(lbl)
+            v.addWidget(W.dot_line(text, tone))
         return wrap
 
     def _card_news_reserved(self, sym: str) -> QFrame:
-        wrap = QFrame(); wrap.setObjectName("Card"); wrap.setProperty("accent", "dim")
-        v = QVBoxLayout(wrap); v.setContentsMargins(14, 12, 14, 12); v.setSpacing(6)
-        v.addWidget(_section_label("News & filings (context only)"))
+        wrap, v = W.card(spacing=6)
+        v.addWidget(W.text("News & filings", "CardTitle"))
         digest = read_news_digest(self.OUT)
         stories = stories_for_symbol(digest, sym)
         rows = len(stories)
         lbl = QLabel(f"{rows} recent headline(s) referencing {sym}." if rows
                      else f"No recent headlines linked to {sym}.")
-        lbl.setStyleSheet("color:#B7BCC6;font-size:11.5px;background:transparent;")
+        lbl.setObjectName("Meta")
         lbl.setWordWrap(True); v.addWidget(lbl)
-        disc = QLabel("Context only — no effect on ranking or validation.")
-        disc.setStyleSheet("color:#6B6F76;font-size:10.5px;font-style:italic;background:transparent;")
-        v.addWidget(disc)
+        v.addWidget(W.empty_note("Context only — no effect on ranking or validation."))
         return wrap
 
     # ------------- Utility actions ------------------------------------------

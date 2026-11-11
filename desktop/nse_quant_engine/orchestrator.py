@@ -268,7 +268,12 @@ def write_manifest(summary: dict) -> Path:
         fp = OUT / p
         return str(fp) if fp.exists() else ""
 
+    try:
+        from core.version import APP_VERSION as _app_version
+    except Exception:
+        _app_version = ""
     manifest = {
+        "app_version": _app_version,          # release label; not the ranking schema
         "completed_at": summary.get("finished"),
         "started_at": summary.get("started"),
         "duration_s": summary.get("duration_s"),

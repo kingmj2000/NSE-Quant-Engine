@@ -448,6 +448,31 @@ check("a cache fallback is retried live; early-month TER refresh repeats after d
       "last_live_attempt_date" in aumf_now and "ran before day {REFRESH_START_DAY}" in terf_now,
       "IMPORT_ERROR rebuilt AUM from the Jan-Mar cache as 'success'; the next run skipped ('Day 5 < 10')")
 
+# ─── 12b. UI overhaul (2026-11) — catch a round trip that reverts it ───────
+_th = ENG / "ui" / "theme.py"
+check("UI theme is the single style source",
+      _th.exists() and "THEME.build_qss()" in read("run_app.py"),
+      "run_app.py must take its stylesheet from ui/theme.py (no second inline QSS)")
+_cwb = read("ui/candidates_workbench.py")
+check("sorted Candidates table maps selection by stored row position",
+      "ROW_ROLE" in _cwb and "setSortRole" in _cwb,
+      "after a header sort the inspector showed a different stock than the highlighted row")
+check("UI treats the engine's 'Clean' Risk_Flag as no flag",
+      "def risk_flag_mask" in read("core/ui_readers.py")
+      and "risk_flag_mask" in _cwb and "risk_flag_mask" in read("ui/decision_center.py"),
+      "'Flagged' returned every row and Top-5 'Clean' rows entered the review queue")
+_dhb = read("dashboard_html_builder.py")
+check("dashboard regime comes from macro_context, matured delta fails closed",
+      'val.get("regime") or "Neutral"' not in _dhb
+      and 'if "Net_Forward_Return" not in sub.columns:' in _dhb,
+      "the payload showed Neutral beside a risk-off panel and +total as a daily delta")
+
+check("Overview Top candidates cut from a frame that has the eligibility column",
+      "candidate_source(trade, scores)" in read("ui/decision_center.py")
+      and "def candidate_source" in read("core/ui_readers.py"),
+      "trade_plan_latest.csv has no Opportunity_Eligible, so 'No officially eligible "
+      "candidates' showed while 494 rows were eligible")
+
 # ─── 13. Test files present ─────────────────────────────────────────────────
 expected_tests = ["test_integrity_fail_closed.py", "test_ui_method_contracts.py",
                   "test_evidence_accumulation.py", "test_history_dedup.py",
@@ -458,7 +483,8 @@ expected_tests = ["test_integrity_fail_closed.py", "test_ui_method_contracts.py"
                   "test_amfi_units_and_categories.py",
                   "test_metadata_overlay_fresh_wins.py",
                   "test_amfi_helper_interpreter.py",
-                  "test_ter_tracking_matching.py"]
+                  "test_ter_tracking_matching.py",
+                  "test_ui_theme_overhaul.py"]
 absent = [t for t in expected_tests if not (ENG / "tests" / t).exists()]
 check("audit regression tests present", not absent,
       f"missing: {', '.join(absent)}" if absent else "")

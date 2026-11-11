@@ -490,10 +490,12 @@ def _delta_matured_from_history(history_csv: Path, matured_today: int) -> int | 
                 sub = s10
         except Exception:
             pass
-    if "Net_Forward_Return" in sub.columns:
-        prior_matured = int(sub["Net_Forward_Return"].notna().sum())
-    else:
-        prior_matured = 0
+    # score_history.csv carries no forward-return column. Treating the absent
+    # column as "0 matured before" printed the whole matured total as today's
+    # delta (+37,840 since prior run). An uncomputable delta hides the chip.
+    if "Net_Forward_Return" not in sub.columns:
+        return None
+    prior_matured = int(sub["Net_Forward_Return"].notna().sum())
     return int(matured_today) - prior_matured
 
 
@@ -1243,7 +1245,10 @@ def _payload() -> dict:
         "grade": grade,
         "decision_use": decision_use,
         "bottom_line": bottom_line,
-        "regime": (val.get("regime") or "Neutral"),
+        # validation_status.json has no "regime" key, so the old read always
+        # fell back to "Neutral" while the Market Context panel said risk-off.
+        # The measured regime lives in macro_context.json; blank when absent.
+        "regime": ((macro_ctx or {}).get("regime") or val.get("regime") or "—"),
         "signal_count": maturing,
         "maturity": {"matured": matured, "maturing": maturing,
                      "total": total_signals, "rate": maturation_rate},
@@ -1530,18 +1535,193 @@ canvas{margin-top:4px}
   box-shadow:0 8px 24px -8px rgba(0,0,0,0.7);opacity:0;pointer-events:none;
   transition:opacity .12s ease;z-index:50;white-space:normal}
 .gloss:hover .tt,.gloss:focus .tt,.gloss:focus-within .tt,.gloss:active .tt{opacity:1;pointer-events:auto}
+
+/* ===== Midnight Sapphire — same tokens as the desktop app (ui/theme.py renders the
+   variables below at build time). Presentation only: payload and render logic unchanged.
+   Radii: 14 surfaces, 10 controls / pills, 6 bars. ===== */
+/*__THEME_VARS__*/
+html,body {
+  background:
+    radial-gradient(900px 520px at 88% -6%,var(--glow-a),transparent 62%),
+    radial-gradient(800px 480px at -8% 30%,var(--glow-b),transparent 60%),
+    linear-gradient(135deg,var(--bg) 0%,var(--bg2) 55%,var(--bg3) 100%);
+  background-color:var(--bg);
+  color:var(--txt);font-family:var(--font-ui);font-size:14.5px;line-height:1.55;min-height:100vh}
+body {max-width:none;margin:0;padding:0}
+body * {text-transform:none !important;letter-spacing:normal}
+b,strong {font-weight:650}
+
+/* ---- Shell: sticky, collapsible sidebar (icons + text / icons only) ---- */
+.shell {display:flex;align-items:flex-start;min-height:100vh}
+.side {position:sticky;top:0;height:100vh;flex:none;width:236px;z-index:50;display:flex;flex-direction:column;gap:6px;
+  padding:18px 12px 14px;border-right:1px solid var(--line);overflow:hidden;
+  background:linear-gradient(180deg,var(--glow-a),rgba(255,255,255,.02) 45%,var(--glow-b));
+  transition:width .18s ease}
+.content {flex:1;min-width:0;max-width:1240px;margin:0 auto;padding:24px 36px 56px}
+.side-brand {display:flex;align-items:center;gap:10px;padding:0 4px 18px;min-height:56px}
+.brand-mark {display:grid;place-items:center;flex:none;width:38px;height:38px;border-radius:var(--r-md);
+  color:var(--brand-text);font-family:var(--font-display);font-size:15px;font-weight:800;background:var(--brand)}
+.brand-copy-side {min-width:0;white-space:nowrap}
+.brand-name {font-family:var(--font-display);font-size:15px;font-weight:700;color:#fff;line-height:1.2}
+.brand-sub {font-size:11px;color:var(--dim)}
+.app-nav {display:flex;flex-direction:column;gap:4px}
+.app-nav a {display:flex;align-items:center;gap:12px;color:var(--muted);text-decoration:none;font-size:13px;font-weight:600;
+  padding:9px 12px;border-radius:var(--r-md);border:1px solid transparent;white-space:nowrap}
+.app-nav a .gl,.side-toggle .gl {flex:none;width:18px;text-align:center}
+.app-nav a:hover {background:var(--panel2);color:var(--txt)}
+.app-nav a.active {background:linear-gradient(90deg,var(--accent-bg-strong),var(--glow-b));border-color:var(--line2);color:#fff}
+.app-nav a:focus-visible,.side-toggle:focus-visible {outline:none;border-color:var(--accent);color:#fff}
+.side-status {margin-top:auto;background:var(--panel);border:1px solid var(--line);border-radius:var(--r-lg);padding:12px;white-space:nowrap}
+.side-status .k {font-size:11px;color:var(--dim)} .side-status .v {font-size:13px;font-weight:700;margin:2px 0 8px;white-space:normal}
+.side-toggle {display:flex;align-items:center;gap:12px;margin-top:8px;padding:8px 12px;border-radius:var(--r-md);
+  border:1px solid var(--line);background:transparent;color:var(--muted);font:600 12.5px var(--font-ui);cursor:pointer;white-space:nowrap}
+.side-toggle:hover {background:var(--panel2);color:var(--txt)}
+.side-toggle .gl {font-size:16px;line-height:1;transition:transform .18s ease}
+/* icons only */
+.side-collapsed .side {width:68px}
+.side-collapsed .side .lbl,.side-collapsed .brand-copy-side {display:none}
+.side-collapsed .app-nav a,.side-collapsed .side-toggle {justify-content:center;padding-left:0;padding-right:0}
+.side-collapsed .side-toggle .gl {transform:rotate(180deg)}
+.side-collapsed .side-status {padding:10px 0;text-align:center;border-radius:var(--r-md)}
+.side-collapsed .side-status .k,.side-collapsed .side-status .v {display:none}
+.side-collapsed .side-status .spill {padding:3px 6px}
+.side-collapsed .side-status .spill .t {display:none}
+.app-head {display:flex;align-items:flex-end;justify-content:space-between;gap:16px;padding:6px 0 16px;margin-bottom:20px;border-bottom:1px solid var(--line)}
+.app-head .brand-copy {min-width:0}
+h1 {background:none;-webkit-text-fill-color:initial;color:#fff;font-family:var(--font-display);font-size:24px;font-weight:700;letter-spacing:-.01em;line-height:1.2}
+.app-head .sub {margin-top:4px}
+h2 {font-family:var(--font-display);font-size:15px;font-weight:700;color:#fff;margin:34px 0 12px;scroll-margin-top:20px}
+.sub {color:var(--muted);font-size:12.5px}
+
+/* ---- Pills / chips (10 px, same as app pills) ---- */
+.pill,.upill,.streak {background:var(--panel2);border:1px solid var(--line);border-radius:var(--r-md);color:var(--muted);font-size:12px;box-shadow:none;backdrop-filter:none}
+.upills {margin-top:8px}
+.spill {display:inline-block;padding:3px 10px;border-radius:var(--r-md);font-size:11px;font-weight:600}
+.spill.amber {background:var(--amber-bg);color:var(--amber)} .spill.green {background:var(--green-bg);color:var(--green)}
+.matdelta,.tag,.rchip,.azchip,.aznew,.lblchip {border-radius:var(--r-md);font-size:11.5px;padding:3px 9px}
+.lblchip {background:var(--amber-bg);color:var(--amber)} .lblchip.review {background:var(--teal-bg);color:var(--teal)}
+.ribbon {position:static;transform:none;display:inline-block;border-radius:var(--r-md);padding:3px 10px;font-size:11px;font-weight:600;box-shadow:none;margin-bottom:12px}
+.ribbon.watch {background:var(--amber-bg);color:var(--amber);border:none} .ribbon.live {background:var(--green-bg);color:var(--green);border:none}
+.chip {border-radius:var(--r-md);background:var(--grad);box-shadow:none}
+.shadow-row.green .chip {background:var(--green-bg);color:var(--green)} .shadow-row.amber .chip {background:var(--amber-bg);color:var(--amber)}
+
+/* ---- Surfaces (14 px cards / tiles, same as app) ---- */
+.glass,.glass.g-teal,.glass.g-amber,.glass.g-green,.glass.g-blue,.glass.g-violet,.glass.g-primary,
+.verdict,.shadow-row,.card,.card.clean,.card.warn,.card.risk {
+  background:var(--panel);border:1px solid var(--line);border-radius:var(--r-lg);box-shadow:none;backdrop-filter:none}
+.glass.g-amber,.card.warn,.card.risk {border-color:var(--amber-line)} .glass.g-green {border-color:var(--green-line)}
+.panel {padding:18px}
+.tile,.lv,.pd,.vchip,.caption,.foot,.plain {background:var(--panel2);border:1px solid var(--line);border-radius:var(--r-lg);box-shadow:none;backdrop-filter:none}
+.tile {padding:14px} .tile .k {height:auto;color:var(--muted);font-size:12px} .tile .val {font-size:20px;font-family:var(--font-display)}
+.plain-summary {margin:0 0 6px;background:linear-gradient(135deg,var(--accent-bg),rgba(255,255,255,.03) 60%,var(--glow-b))}
+.plain-summary .ps-head {color:var(--accent-soft);font-size:12px;font-weight:700}
+.plain-summary .ps-body {font-size:15px;line-height:1.65} .plain-summary .ps-sub {font-size:12px;color:var(--muted)}
+.bottomline,.watchbanner {background:var(--amber-bg);border:1px solid var(--amber-line);border-radius:var(--r-md);color:var(--txt);padding:12px 16px;font-size:13.5px;font-weight:500}
+.bottomline b,.watchbanner b {color:var(--amber)}
+.verdict .v {color:#fff;font-family:var(--font-display)}
+.verdict.amber,.vchip.amber,.shadow-row.amber {background:var(--amber-bg);border-color:var(--amber-line)}
+.verdict.green,.vchip.green,.shadow-row.green {background:var(--green-bg);border-color:var(--green-line)}
+.vchip.red {background:var(--red-bg);border-color:var(--red-line)} .vchip.neutral {background:var(--panel2);border-color:var(--line)}
+.verdict.amber .v,.vchip.amber .vtitle {color:var(--amber)} .verdict.green .v,.vchip.green .vtitle {color:var(--green)}
+.vchip .vtitle {font-family:var(--font-display)}
+.vchip .vhead,.pblab,.rrow .rl {color:var(--muted);font-size:12px}
+.vchip .vgloss,.pbfoot,.pbraw,.matline {color:var(--muted);font-size:12.5px}
+.pbcount {font-family:var(--font-display)}
+.cards {align-items:start;gap:12px}
+.card {padding:18px;overflow:visible;transition:border-color .15s}
+.card:hover {transform:none;border-color:var(--line2)} .card.warn:hover,.card.risk:hover {border-color:var(--amber)}
+.card .sym {font-family:var(--font-display);font-size:17px} .card .px .p {font-size:17px}
+.card .nm,.card .px .lbl,.lv .l,.pd .l {font-size:12px;color:var(--muted)}
+.lv .n,.pd .n {font-size:14px} .lv,.pd {padding:10px} .levels {gap:8px} .card .top {gap:12px}
+.lv.stop .n {color:var(--amber)} .lv.t .n {color:var(--teal)}
+.fdot.d-green {background:var(--green)} .fdot.d-amber,.fdot.d-red {background:var(--amber)}
+.flag,.plain {font-size:13px} .flag {color:var(--muted)}
+
+/* ---- Bars (6 px) ---- */
+.pbbar,.rbar {background:rgba(255,255,255,.07);border-radius:var(--r-sm)}
+.pbbar > .pbfill,.rbar > span {border-radius:var(--r-sm)}
+.pbbar > .pbfill,.pbbar > .pbfill.mid,.rbar.mid > span {background:var(--grad)}
+.pbbar > .pbfill.low,.rbar.low > span {background:linear-gradient(90deg,var(--amber),var(--amber))}
+.rbar.ok > span {background:linear-gradient(90deg,var(--teal),var(--green))}
+.pbtick {background:var(--accent-soft)} .pbtick::after {color:var(--accent-soft);left:auto;right:6px;transform:none}
+.matdelta.up {background:var(--green-bg);color:var(--green)}
+
+/* ---- Tables ---- */
+table,.aztable {font-size:13px}
+th,.aztable th {color:var(--dim);font-size:11.5px;font-weight:700}
+th,td {padding:9px 12px;border-bottom:1px solid var(--line)} tbody tr:hover td {background:rgba(255,255,255,.03)}
+#dataHealth,#corrTable,#alphaZooBody {max-width:100%;overflow-x:auto}
+#dataHealth table,#corrTable table,#alphaZooBody table {min-width:580px}
+.chart-error {border-radius:var(--r-md)}
+
+/* ---- Misc ---- */
+summary {cursor:pointer;color:var(--muted)}
+summary:focus-visible,.gloss:focus-visible {outline:2px solid var(--accent);outline-offset:3px;border-radius:var(--r-sm)}
+.gloss {border-bottom-color:var(--accent-soft)}
+.gloss .tt {background:var(--popup);color:var(--txt);font-size:12.5px;border:1px solid var(--line2);border-radius:var(--r-md)}
+.plain-disclaimer .pd-head {color:var(--amber)}
+::selection {background:var(--accent-bg-strong)}
+::-webkit-scrollbar {width:10px;height:10px} ::-webkit-scrollbar-thumb {background:rgba(255,255,255,.12);border-radius:5px}
+::-webkit-scrollbar-thumb:hover {background:var(--accent)}
+
+/* ---- Embedded in the desktop app: the app sidebar is the only navigation ---- */
+.embedded .side {display:none !important}
+.embedded .content {max-width:none;padding:6px 22px 40px}
+.embedded .app-head {padding-top:0}
+
+/* ---- Phone: sidebar becomes a sticky top bar ---- */
+@media(max-width:760px) {
+  .shell {display:block}
+  .side,.side-collapsed .side {position:sticky;top:0;height:auto;width:auto;flex-direction:row;align-items:center;gap:8px;
+    padding:8px 12px;border-right:none;border-bottom:1px solid var(--line);background:rgba(7,16,29,.92);backdrop-filter:blur(12px)}
+  .side-brand {padding:0;min-height:0} .brand-copy-side,.side-status,.side-toggle {display:none}
+  .app-nav {flex-direction:row;gap:2px;overflow-x:auto} .app-nav a {padding:8px 10px} .app-nav a .gl {display:none}
+  .side-collapsed .side .lbl {display:inline}
+}
+@media(max-width:760px) {
+  .content {padding:16px 14px 40px} h1 {font-size:20px}
+  .cards {grid-template-columns:1fr} .evid,#maturityCards,#shadowCards {grid-template-columns:repeat(2,minmax(0,1fr)) !important}
+  #marketCtx {grid-template-columns:repeat(2,minmax(0,1fr)) !important}
+  .progress-row,.twocol {grid-template-columns:1fr} .panel {padding:16px} .levels {grid-template-columns:repeat(2,minmax(0,1fr))}
+  .rrow {grid-template-columns:minmax(100px,1fr) 2fr 54px}
+  .gloss .tt {position:fixed;left:16px;right:16px;bottom:16px;transform:none;min-width:0;max-width:none}
+  .pbtick::after {left:auto;right:0;transform:none} .pd .l {overflow-wrap:anywhere}
+  #dataHealth::before,#corrTable::before,#alphaZooBody::before {content:"Scroll sideways to see all columns";display:block;color:var(--muted);font-size:12px;padding:0 0 8px}
+}
+@media(prefers-reduced-motion:reduce) {* {scroll-behavior:auto !important;transition:none !important}}
+
 </style></head>
 
 <body>
 
-<h1>NSE Quant Evidence Review</h1>
-<div class="sub">Daily run &middot; Generated __GENERATED__ &middot; expanded NSE stock universe / NSE ETFs &middot; cross-sectional validation report is the authority</div>
-<div class="upills" id="universePills"></div>
+<div class="shell">
+<aside class="side" id="side" aria-label="Dashboard navigation">
+  <div class="side-brand"><div class="brand-mark" aria-hidden="true">NQ</div>
+    <div class="brand-copy-side"><div class="brand-name">NSE Quant</div><div class="brand-sub">Evidence review &middot; v__APP_VERSION__</div></div></div>
+  <nav class="app-nav" aria-label="Dashboard sections">
+    <a href="#plainSummary" title="Overview"><span class="gl" aria-hidden="true">&#9670;</span><span class="lbl">Overview</span></a>
+    <a href="#validationProgress" title="Validation"><span class="gl" aria-hidden="true">&#10003;</span><span class="lbl">Validation</span></a>
+    <a href="#dataHealth" title="Data health"><span class="gl" aria-hidden="true">&#10010;</span><span class="lbl">Data health</span></a>
+    <a href="#shadowTitle" title="Shadow"><span class="gl" aria-hidden="true">&#8943;</span><span class="lbl">Shadow</span></a>
+    <a href="#top5Title" title="Candidates"><span class="gl" aria-hidden="true">&#9678;</span><span class="lbl">Candidates</span></a>
+    <a href="#plainDisclaimer" title="Risk notes"><span class="gl" aria-hidden="true">&#9650;</span><span class="lbl">Risk notes</span></a>
+  </nav>
+  <div class="side-status" id="sideStatus" aria-live="polite"></div>
+  <button class="side-toggle" id="sideToggle" type="button" aria-controls="side" aria-expanded="true"
+          title="Collapse sidebar (\)"><span class="gl" aria-hidden="true">&#8249;</span><span class="lbl">Collapse</span></button>
+</aside>
+<main class="content" id="content">
+
+<header class="app-head">
+  <div class="brand-copy"><h1>Evidence review</h1>
+  <div class="sub">Generated __GENERATED__ &middot; NSE stocks and ETFs &middot; validation_status.json is the authority</div>
+  <div class="upills" id="universePills"></div></div>
+</header>
 
 <div id="plainSummary"></div>
 
 
-<h2>Progress to a verdict</h2>
+<h2 id="validationProgress">Progress to a verdict</h2>
 <div class="glass g-violet panel">
   <div class="progress-row">
     <div class="vchip neutral" id="verdictChip">
@@ -1584,7 +1764,7 @@ canvas{margin-top:4px}
   </div>
 </div>
 
-<h2>Shadow vs Official &mdash; running record</h2>
+<h2 id="shadowTitle">Shadow vs Official &mdash; running record</h2>
 <div class="glass g-blue panel">
   <div class="streakstrip" id="streakStrip"></div>
   <div class="evid" id="shadowCards" style="grid-template-columns:repeat(4,1fr);margin-bottom:10px"></div>
@@ -1672,13 +1852,69 @@ canvas{margin-top:4px}
 <div class="foot">
 
   Excel-ready summary: <code id="excel"></code><br><br>
-  Personal screening &amp; validation tool &mdash; <b>not financial advice</b> and not a substitute for a SEBI-registered adviser.
+  NSE Quant Engine v__APP_VERSION__ &middot; personal screening &amp; validation tool &mdash; <b>not financial advice</b> and not a substitute for a SEBI-registered adviser.
   All numbers pulled directly from the engine output files; nothing estimated.
+</div>
+
+</main>
 </div>
 
 <script id="DATA-JSON" type="application/json">__DATA__</script>
 <script>
 const DATA = JSON.parse(document.getElementById("DATA-JSON").textContent);
+const PAL = __THEME_PAL__;
+// Sidebar status card + active-section highlight (presentation only).
+(function(){
+  try {
+    const live = DATA.verdict === "Validation Positive";
+    const el = document.getElementById("sideStatus");
+    if (el) el.innerHTML = `<div class="k">Evidence status</div><div class="v">${DATA.verdict || "No verdict yet"}</div>`
+      + `<span class="spill ${live ? "green" : "amber"}" title="${live ? "Live — validation positive" : "Watchlist only"}">`
+      + `${live ? "&#10003;" : "&#9888;&#xFE0E;"}<span class="t"> ${live ? "Live — validation positive" : "Watchlist only"}</span></span>`;
+    // Collapsible sidebar: icons + text <-> icons only. Remembers the choice;
+    // defaults to icons only on narrow windows. Inside the desktop app
+    // (?embedded=1) the page sidebar is hidden altogether.
+    const root = document.documentElement, btn = document.getElementById("sideToggle");
+    const KEY = "nq-dash-side-collapsed";
+    let saved = null; try { saved = localStorage.getItem(KEY); } catch (e) {}
+    const embedded = /(^|[?&])embedded=1(&|$)/.test(location.search);
+    if (embedded) root.classList.add("embedded");   // app sidebar is the navigation
+    const setCollapsed = (c, persist) => {
+      root.classList.toggle("side-collapsed", c);
+      if (btn) {
+        btn.setAttribute("aria-expanded", String(!c));
+        btn.title = (c ? "Expand" : "Collapse") + " sidebar (\\)";
+        const l = btn.querySelector(".lbl"); if (l) l.textContent = c ? "Expand" : "Collapse";
+      }
+      if (persist) { try { localStorage.setItem(KEY, c ? "1" : "0"); } catch (e) {} }
+    };
+    setCollapsed(saved !== null ? saved === "1" : (embedded || window.innerWidth < 1240), false);
+    if (btn) btn.addEventListener("click", () => setCollapsed(!root.classList.contains("side-collapsed"), true));
+    document.addEventListener("keydown", e => {
+      if (e.key === "\\" && !/input|textarea|select/i.test((e.target.tagName || ""))) {
+        setCollapsed(!root.classList.contains("side-collapsed"), true);
+      }
+    });
+    const links = Array.from(document.querySelectorAll(".app-nav a"));
+    const mark = (id) => links.forEach(a => a.classList.toggle("active", a.getAttribute("href") === "#" + id));
+    links.forEach(a => a.addEventListener("click", () => mark(a.getAttribute("href").slice(1))));
+    // Active section = the last one whose top has passed 30% of the viewport.
+    const targets = links.map(a => document.getElementById(a.getAttribute("href").slice(1))).filter(Boolean);
+    let ticking = false;
+    const spy = () => {
+      ticking = false;
+      const line = window.innerHeight * 0.3;
+      let cur = targets.length ? targets[0].id : null, best = -Infinity;
+      targets.forEach(t => {
+        const top = t.getBoundingClientRect().top;
+        if (t.offsetParent !== null && top <= line && top > best) { best = top; cur = t.id; }
+      });
+      if (cur) mark(cur);
+    };
+    window.addEventListener("scroll", () => { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, {passive: true});
+    spy();
+  } catch (e) { console.warn("side status", e); }
+})();
 const fmt = (v, suffix="", nd=2) => (v===null||v===undefined||Number.isNaN(v)) ? "&mdash;" : (Number(v).toFixed(nd)+suffix);
 const num = v => (v===null||v===undefined) ? "&mdash;" : Number(v).toLocaleString('en-IN');
 
@@ -1807,10 +2043,10 @@ function safeChart(id, config){
   }
 }
 if(typeof Chart !== 'undefined'){
-  Chart.defaults.color="#9BA1A6"; Chart.defaults.font.size=11;
+  Chart.defaults.color=PAL.text2; Chart.defaults.font.size=11;
   Chart.defaults.font.family="-apple-system,Segoe UI,Inter,sans-serif";
 }
-const grid={color:"rgba(255,255,255,0.06)"};
+const grid={color:PAL.grid};
 
 
 // Maturity metric cards (matured / awaiting / total / rate).
@@ -1854,12 +2090,12 @@ const _ov = sh.overlap ?? 0, _ad = sh.added ?? 0, _dr = sh.dropped ?? 0;
 safeChart("shadowBar",{
   type:"bar",
   data:{labels:["Ranking overlap"], datasets:[
-    {label:"Common", data:[_ov], backgroundColor:"#38BDB0", stack:"s", borderRadius:4},
-    {label:"Shadow only", data:[_ad], backgroundColor:"#58A6FF", stack:"s", borderRadius:4},
-    {label:"Official only", data:[_dr], backgroundColor:"#A371F7", stack:"s", borderRadius:4},
+    {label:"Common", data:[_ov], backgroundColor:PAL.teal, stack:"s", borderRadius:4},
+    {label:"Shadow only", data:[_ad], backgroundColor:PAL.blue, stack:"s", borderRadius:4},
+    {label:"Official only", data:[_dr], backgroundColor:PAL.violet, stack:"s", borderRadius:4},
   ]},
   options:{indexAxis:"y", plugins:{legend:{position:"bottom",labels:{boxWidth:10,padding:10}}},
-    scales:{x:{stacked:true,grid:{color:"rgba(255,255,255,0.06)"}},y:{stacked:true,grid:{display:false}}}}
+    scales:{x:{stacked:true,grid:{color:PAL.grid}},y:{stacked:true,grid:{display:false}}}}
 });
 const _shadowReasonHtml = sh.reason ? `<div style="margin-bottom:6px">${sh.reason}</div>` : "";
 document.getElementById("shadowWarnings").innerHTML =
@@ -1884,7 +2120,7 @@ if(!qvals.length || qvals.every(v => v===null||v===undefined||Math.abs(Number(v)
     type:"bar",
     data:{labels:["Q5 Lowest","Q4","Q3","Q2","Q1 Highest"],
       datasets:[{label:`Median net return ${qh}D (%)`,data:qvals,
-        backgroundColor:qvals.map(v => v===null ? "rgba(255,255,255,0.08)" : v>=0.5 ? "#3FB950" : v>=0 ? "#38BDB0" : "#F2B13C"),
+        backgroundColor:qvals.map(v => v===null ? "rgba(255,255,255,0.08)" : v>=0.5 ? PAL.green : v>=0 ? PAL.teal : PAL.amber),
         borderRadius:6,barPercentage:.72}]},
     options:{plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>(c.parsed.y??'—')+"% median"}}},
       scales:{y:{grid,title:{display:true,text:"% median net return"}},x:{grid:{display:false}}}}
@@ -1893,22 +2129,22 @@ if(!qvals.length || qvals.every(v => v===null||v===undefined||Math.abs(Number(v)
 
 // scatter — minimal: no grid, no ticks, subtle threshold shading, rich tooltip.
 const band={id:"band",beforeDraw(ch){const{ctx,chartArea:a,scales:{x,y}}=ch;if(!a)return;ctx.save();
-  const rsi=x.getPixelForValue(71.5);ctx.fillStyle="rgba(242,177,60,.06)";ctx.fillRect(rsi,a.top,a.right-rsi,a.bottom-a.top);
-  const vol=y.getPixelForValue(30);ctx.fillStyle="rgba(163,113,247,.05)";ctx.fillRect(a.left,a.top,a.right-a.left,vol-a.top);
-  ctx.setLineDash([4,4]);ctx.strokeStyle="rgba(242,177,60,0.55)";ctx.lineWidth=1;
+  const rsi=x.getPixelForValue(71.5);ctx.fillStyle=PAL.amberWash;ctx.fillRect(rsi,a.top,a.right-rsi,a.bottom-a.top);
+  const vol=y.getPixelForValue(30);ctx.fillStyle=PAL.violetWash;ctx.fillRect(a.left,a.top,a.right-a.left,vol-a.top);
+  ctx.setLineDash([4,4]);ctx.strokeStyle=PAL.amberLine;ctx.lineWidth=1;
   ctx.beginPath();ctx.moveTo(rsi,a.top);ctx.lineTo(rsi,a.bottom);ctx.stroke();
-  ctx.strokeStyle="rgba(163,113,247,0.45)";ctx.beginPath();ctx.moveTo(a.left,vol);ctx.lineTo(a.right,vol);ctx.stroke();ctx.restore();}};
+  ctx.strokeStyle=PAL.violetLine;ctx.beginPath();ctx.moveTo(a.left,vol);ctx.lineTo(a.right,vol);ctx.stroke();ctx.restore();}};
 safeChart("scatterChart",{
   type:"scatter",plugins:[band],
   data:{datasets:[{label:"Top-20 candidates",data:DATA.scatter,pointRadius:7,pointHoverRadius:10,
-    backgroundColor:c=>{const d=c.raw;return (d&&(d.x>=71||d.y>=30))?"#F2B13C":"#38BDB0";},
+    backgroundColor:c=>{const d=c.raw;return (d&&(d.x>=71||d.y>=30))?PAL.amber:PAL.teal;},
     borderColor:"rgba(255,255,255,0.85)",borderWidth:1.2}]},
   options:{plugins:{legend:{display:false},
-      tooltip:{backgroundColor:"rgba(14,16,26,0.94)",borderColor:"rgba(255,255,255,0.10)",borderWidth:1,
-        padding:10,titleColor:"#ECEDEE",bodyColor:"#DEE0E5",
+      tooltip:{backgroundColor:PAL.tooltip,borderColor:"rgba(255,255,255,0.10)",borderWidth:1,
+        padding:10,titleColor:PAL.text,bodyColor:PAL.text,
         callbacks:{title:c=>c[0].raw.s, label:c=>[`RSI(14): ${c.raw.x}`,`20D volatility: ${c.raw.y}%`]}}},
-    scales:{x:{min:30,max:90,grid:{display:false,drawBorder:false},ticks:{display:false},title:{display:true,text:"RSI(14)",color:"#8A92A6",font:{size:11,weight:"600"}}},
-            y:{min:0,suggestedMax:45,grid:{display:false,drawBorder:false},ticks:{display:false},title:{display:true,text:"20-day volatility (%)",color:"#8A92A6",font:{size:11,weight:"600"}}}}}
+    scales:{x:{min:30,max:90,grid:{display:false,drawBorder:false},ticks:{display:false},title:{display:true,text:"RSI(14)",color:PAL.text2,font:{size:11,weight:"600"}}},
+            y:{min:0,suggestedMax:45,grid:{display:false,drawBorder:false},ticks:{display:false},title:{display:true,text:"20-day volatility (%)",color:PAL.text2,font:{size:11,weight:"600"}}}}}
 });
 
 
@@ -2115,7 +2351,7 @@ document.getElementById("excel").textContent = DATA.excel;
   if(!m) return;
   const wrap = document.getElementById("marketCtxWrap");
   const body = document.getElementById("marketCtx");
-  const regimeColor = m.regime==="risk-on" ? "#3FB950" : (m.regime==="risk-off" ? "#F2B13C" : "#8A92A6");
+  const regimeColor = m.regime==="risk-on" ? PAL.green : (m.regime==="risk-off" ? PAL.amber : PAL.text2);
   body.innerHTML = `
     <div class="glass panel"><div class="sub">Regime</div><div style="font-size:20px;font-weight:600;color:${regimeColor}">${(m.regime||'neutral').toUpperCase()}</div><div class="sub">${m.inputs_ok?'measured (VIX + Nifty)':'default — VIX / Nifty not available this run'}</div></div>
     <div class="glass panel"><div class="sub">India VIX</div><div style="font-size:20px;font-weight:600">${fmt(m.vix,'',2)}</div><div class="sub">${m.vix_pct==null?'':`${m.vix_pct}% percentile (252d)`}</div></div>
@@ -2246,6 +2482,27 @@ def build() -> Path:
         1)
     tpl = tpl.replace("Show RSI &times; volatility map",
                       f"Show {_gloss('RSI')} &times; {_gloss('volatility')} map", 1)
+    # Theme tokens come from ui/theme.py (pure Python) so the browser dashboard
+    # matches the desktop app. Fail-soft: without it the page keeps its base
+    # palette from the top of the stylesheet.
+    try:
+        from ui import theme as _theme
+        theme_vars, theme_pal = _theme.css_vars(), json.dumps(_theme.chart_palette())
+    except Exception as exc:
+        print(f"[dashboard] theme tokens unavailable ({type(exc).__name__}: {exc}); using base palette")
+        theme_vars, theme_pal = "", json.dumps({
+            "text": "#ECEDEE", "text2": "#9BA1A6", "grid": "rgba(255,255,255,0.06)",
+            "teal": "#38BDB0", "blue": "#58A6FF", "violet": "#A371F7", "green": "#3FB950",
+            "amber": "#F2B13C", "red": "#E5556A", "accent": "#58A6FF",
+            "amberWash": "rgba(242,177,60,.06)", "violetWash": "rgba(163,113,247,.05)",
+            "amberLine": "rgba(242,177,60,0.55)", "violetLine": "rgba(163,113,247,0.45)",
+            "tooltip": "rgba(14,16,26,0.94)"})
+    tpl = tpl.replace("/*__THEME_VARS__*/", theme_vars, 1).replace("__THEME_PAL__", theme_pal, 1)
+    try:
+        from core.version import APP_VERSION as _app_version
+    except Exception:
+        _app_version = ""
+    tpl = tpl.replace("__APP_VERSION__", _app_version)
     html = (tpl
             .replace("__DATE__", payload["date"])
             .replace("__GENERATED__", payload["generated_at"])

@@ -1,13 +1,16 @@
-"""PySide6 desktop runner — glassmorphic black/crimson theme, one-button pipeline.
+"""PySide6 desktop runner — "Midnight Sapphire" theme (ui/theme.py), sidebar navigation,
+one-button pipeline.
 
 Install once:
     pip install PySide6 PySide6-WebEngine pandas numpy yfinance
 Run:
     python run_app.py   (or double-click run_app.bat)
 
-v4.8
+v5.0 (version from core/version.py)
 ----
-- Header + About show a single "v4.8" pill (no descriptor).
+- Midnight Sapphire theme (ui/theme.py), one sidebar navigation with sub-pages,
+  breadcrumb header, embedded HTML dashboard without its own sidebar.
+- Header + About show a single version pill (no descriptor).
 - Report content in the Validation and Trade Plan tabs is rendered through
   `md_to_widgets` into themed glass panels, styled tables, and bulleted
   paragraphs — no more raw markdown / pipe tables in a QTextEdit.
@@ -22,9 +25,10 @@ v4.8
 """
 from __future__ import annotations
 
-APP_VERSION = "4.8"
+from core.version import APP_VERSION  # single source (core/version.py)
 import sys
 import json
+import numbers
 import threading
 import traceback
 import faulthandler
@@ -42,7 +46,7 @@ try:
         QApplication, QMainWindow, QWidget, QPushButton, QVBoxLayout, QHBoxLayout,
         QTextEdit, QCheckBox, QTabWidget, QTableView, QLabel, QGridLayout,
         QStatusBar, QPlainTextEdit, QSplitter, QFrame, QProgressBar, QScrollArea,
-        QSizePolicy, QStackedWidget, QToolButton, QMessageBox,
+        QSizePolicy, QStackedWidget, QToolButton, QMessageBox, QButtonGroup, QComboBox,
     )
 except ImportError:
     print("PySide6 not installed. Run:  pip install PySide6 PySide6-WebEngine")
@@ -58,6 +62,8 @@ from core.candidate_selection import (
 )
 from ui.decision_center import DecisionCenterView
 from ui.candidates_workbench import CandidatesWorkbench
+from ui import theme as THEME
+from ui import widgets as W
 
 
 # Optional: try to enable the embedded HTML dashboard (QWebEngineView). If the
@@ -139,158 +145,9 @@ DATA = BASE / "data"
 
 
 # ----------------------------- Theme (QSS) ----------------------------------
-# Palette
-# bg gradient        : #0A0B12 → #10131F → #0E0A18
-# panel              : rgba(22,24,34,0.62) with white-7% border
-# accent (crimson)   : #D8345F  ·  soft #FF6B8F  ·  deep #8F1837
-# accent2 (coral)    : #FF8A5C  ·  soft #FFB193
-# teal positive      : #38BDB0
-# amber caution      : #F2B13C
-# green ok           : #3FB950
-# red veto/error     : #E5556A  (used sparingly)
-QSS = """
-* { font-family: 'Segoe UI', 'Inter', sans-serif; color: #ECEDEE; }
-QMainWindow { background: #0A0B12; }
-QWidget { background: transparent; }
-QWidget#AppRoot, QWidget#MainColumn { background: #0A0B12; }
-QScrollArea, QScrollArea > QWidget, QScrollArea > QWidget > QWidget,
-QAbstractScrollArea, QAbstractScrollArea::viewport {
-    background: transparent;
-    border: none;
-}
-QLabel { background: transparent; }
-
-QFrame#Card {
-    background: rgba(22,24,34,0.62);
-    border: 1px solid rgba(255,255,255,0.07);
-    border-radius: 16px;
-}
-/* Per-variant border + glow — each card carries the color of its content
-   instead of a blanket red glow. Crimson is reserved for primary CTAs. */
-QFrame#Card[accent="indigo"] { border: 1px solid rgba(110,139,255,0.42); }
-QFrame#Card[accent="teal"]   { border: 1px solid rgba(56,189,176,0.48); }
-QFrame#Card[accent="amber"]  { border: 1px solid rgba(242,177,60,0.48); }
-QFrame#Card[accent="red"]    { border: 1px solid rgba(229, 85,106,0.48); }
-QFrame#Card[accent="blue"]   { border: 1px solid rgba(88,166,255,0.48); }
-QFrame#Card[accent="violet"] { border: 1px solid rgba(163,113,247,0.48); }
-QFrame#Card[accent="green"]  { border: 1px solid rgba(63,185,80,0.48); }
-QLabel#Pill[tone="teal"]   { background: rgba(56,189,176,0.16);  color: #7FE0C6; }
-QLabel#Pill[tone="amber"]  { background: rgba(242,177,60,0.16);  color: #F2B13C; }
-QLabel#Pill[tone="green"]  { background: rgba(63,185,80,0.16);   color: #7FE0A6; }
-QLabel#Pill[tone="blue"]   { background: rgba(88,166,255,0.16);  color: #9CC6FF; }
-QLabel#Pill[tone="violet"] { background: rgba(163,113,247,0.16); color: #C6A8FA; }
-QLabel#Pill[tone="red"]    { background: rgba(229,85,106,0.18);  color: #FF8597; }
-QLabel#Pill[tone="dim"]    { background: rgba(255,255,255,0.05); color: #B7BCC6; }
-
-QFrame#Drawer {
-    background: rgba(14,16,26,0.92);
-    border-left: 1px solid rgba(255,255,255,0.08);
-}
-QFrame#TopBar {
-    background: rgba(16,18,28,0.55);
-    border: 1px solid rgba(255,255,255,0.06);
-    border-radius: 18px;
-}
-
-QLabel#Header    { font-size: 19px; font-weight: 700; letter-spacing: 0.3px; }
-QLabel#Sub       { color: #8A92A6; font-size: 12px; }
-QLabel#Metric    { font-size: 26px; font-weight: 800; color: #FFFFFF; }
-QLabel#MetricInd { font-size: 26px; font-weight: 800; color: #FF6B8F; }
-QLabel#Pill {
-    padding: 4px 11px; border-radius: 10px;
-    background: rgba(216,52,95,0.15);
-    color: #FF6B8F; font-weight: 600; font-size: 11px;
-}
-QLabel#PillAge {
-    padding: 4px 11px; border-radius: 10px;
-    background: rgba(255,255,255,0.05);
-    color: #B7BCC6; font-weight: 600; font-size: 11px;
-}
-
-QPushButton#Primary {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-        stop:0 #D8345F, stop:1 #FF8A5C);
-    color: white; font-weight: 700; font-size: 14px;
-    border: none; border-radius: 14px;
-    padding: 11px 22px;
-}
-QPushButton#Primary:hover  {
-    background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
-        stop:0 #E54870, stop:1 #FF9B73);
-}
-QPushButton#Primary:disabled{ background: #23252F; color: #6B6B72; }
-
-QPushButton#Ghost {
-    background: rgba(255,255,255,0.04);
-    color: #DEE0E5; font-weight: 600; font-size: 13px;
-    border: 1px solid rgba(255,255,255,0.10);
-    border-radius: 12px; padding: 9px 16px;
-}
-QPushButton#Ghost:hover  { background: rgba(216,52,95,0.14); border-color: rgba(216,52,95,0.40); color: #fff; }
-
-QToolButton#Drawer {
-    background: rgba(216,52,95,0.12);
-    color: #FF6B8F; font-weight: 700;
-    border: 1px solid rgba(216,52,95,0.30);
-    border-radius: 12px; padding: 8px 12px;
-}
-QToolButton#Drawer:hover { background: rgba(216,52,95,0.22); color: #fff; }
-
-QCheckBox { spacing: 8px; color: #C8C9CC; }
-QCheckBox::indicator { width: 16px; height: 16px; border-radius: 4px;
-    border: 1px solid #3A3A45; background: #14141A; }
-QCheckBox::indicator:checked { background: #D8345F; border-color: #D8345F; }
-
-QTabWidget::pane { border: none; background: transparent; top: 8px; }
-QTabBar::tab {
-    background: transparent; color: #8C8F94;
-    padding: 8px 18px; margin-right: 4px;
-    border-radius: 10px; font-weight: 600;
-}
-QTabBar::tab:selected { background: rgba(216,52,95,0.18); color: #FFFFFF; }
-QTabBar::tab:hover:!selected { color: #ECEDEE; }
-
-QPlainTextEdit, QTextEdit, QTextBrowser {
-    background: transparent;
-    border: 1px solid rgba(255,255,255,0.05);
-    border-radius: 12px; padding: 10px;
-    color: #D6D7DA;
-    selection-background-color: rgba(216,52,95,0.30);
-}
-QTableView {
-    background: transparent;
-    background-color: transparent;
-    gridline-color: rgba(255,255,255,0.04);
-    border: none;
-    border-radius: 10px;
-    selection-background-color: rgba(216,52,95,0.28);
-    selection-color: #fff;
-    alternate-background-color: transparent;
-    outline: 0;
-}
-QTableView::item { background: transparent; border: none; padding: 6px 8px; }
-QTableView::item:alternate { background: transparent; }
-QHeaderView::section {
-    background: rgba(255,255,255,0.025); color: #8A92A6;
-    padding: 6px 8px; border: none;
-    border-bottom: 1px solid rgba(255,255,255,0.06);
-    font-weight: 600;
-}
-
-QProgressBar {
-    background: #14141A; border: none; border-radius: 6px; height: 10px; text-align: center;
-}
-QProgressBar::chunk {
-    background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #D8345F, stop:1 #FF8A5C);
-    border-radius: 6px;
-}
-QStatusBar { background: transparent; color: #8C8F94; }
-QScrollBar:vertical { background: transparent; width: 10px; }
-QScrollBar::handle:vertical { background: #2A2A33; border-radius: 5px; min-height: 30px; }
-QScrollBar::handle:vertical:hover { background: #D8345F; }
-QScrollBar:horizontal { background: transparent; height: 10px; }
-QScrollBar::handle:horizontal { background: #2A2A33; border-radius: 5px; min-width: 30px; }
-"""
+# Every colour, gradient, radius and font size lives in ui/theme.py. Widgets use
+# object names / dynamic properties from that sheet — no inline hex values.
+QSS = THEME.build_qss()
 
 
 # ----------------------------- Helpers --------------------------------------
@@ -397,12 +254,17 @@ class RunnerThread(QThread):
         self.done.emit(summary)
 
 
+from core.ui_readers import format_cell as _fmt_cell  # display-only number formatting
+
+
 def _df_to_model(df: pd.DataFrame) -> QStandardItemModel:
     model = QStandardItemModel(len(df), len(df.columns))
     model.setHorizontalHeaderLabels([str(c) for c in df.columns])
     for r, row in enumerate(df.itertuples(index=False)):
         for c, v in enumerate(row):
-            it = QStandardItem("" if pd.isna(v) else str(v))
+            it = QStandardItem(_fmt_cell(v))
+            if isinstance(v, numbers.Number) and not isinstance(v, bool):
+                it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             it.setEditable(False)
             model.setItem(r, c, it)
     return model
@@ -417,6 +279,7 @@ def _human_age(iso_ts: str | None) -> str:
         return iso_ts
     delta = datetime.now() - ts
     s = int(delta.total_seconds())
+    if s < 0:     return "just now"   # clock skew / timezone mismatch
     if s < 60:    return f"{s}s ago"
     if s < 3600:  return f"{s//60}m ago"
     if s < 86400: return f"{s//3600}h ago"
@@ -459,12 +322,10 @@ class Dashboard(QWidget):
         self.view = None
         root = QVBoxLayout(self); root.setContentsMargins(0, 0, 0, 0); root.setSpacing(12)
 
-        intro = QFrame(); intro.setObjectName("Card"); intro.setProperty("accent", "blue")
-        iv = QVBoxLayout(intro); iv.setContentsMargins(18, 14, 18, 14); iv.setSpacing(6)
-        title = QLabel("Run Summary")
-        title.setStyleSheet("font-size:18px;font-weight:750;color:#FFFFFF;background:transparent;")
-        sub = QLabel("Stable native overview. Use Open in browser for the full interactive HTML dashboard.")
-        sub.setObjectName("Sub"); sub.setWordWrap(True)
+        intro, iv = W.card()
+        title = W.text("Run Summary", "CardTitle")
+        sub = W.text("Stable native overview. Use Open in browser for the full interactive HTML dashboard.",
+                     "Meta", wrap=True)
         iv.addWidget(title); iv.addWidget(sub)
         root.addWidget(intro)
 
@@ -554,9 +415,8 @@ class Dashboard(QWidget):
             ("data/fundamentals_latest.csv", "Fundamentals overlay (Step 6 · auto-fetched via yfinance)"),
             ("data/earnings_calendar.csv",   "Earnings calendar (Step 11, Fincept · auto-fetched)"),
         ]
-        chk_head = QLabel("Overlay activation · auto-refreshed each run · drop your own CSV in data/ to override")
-        chk_head.setObjectName("Sub"); chk_head.setWordWrap(True)
-        chk_head.setStyleSheet("font-size:11px;letter-spacing:1px;text-transform:uppercase;margin-top:10px;")
+        chk_head = W.section_label("Overlay activation · auto-refreshed each run · drop your own CSV in data/ to override")
+        chk_head.setWordWrap(True)
         self.grid.addWidget(chk_head, (len(cards) + 3) // 4, 0, 1, 4)
         base_row = (len(cards) + 3) // 4 + 1
 
@@ -577,23 +437,22 @@ class Dashboard(QWidget):
                     rows = 0
                 age_h = (time.time() - p.stat().st_mtime) / 3600.0
                 if age_h < 24:
-                    mark, tone = "✅", "green"
+                    mark, tone = "●", "green"
                 elif age_h < 24 * 7:
-                    mark, tone = "🟡", "amber"
+                    mark, tone = "◐", "amber"
                 else:
-                    mark, tone = "🟠", "amber"
+                    mark, tone = "○", "amber"
                 sub = f"{rows} rows · updated {_fmt_age(p.stat().st_mtime)}"
             else:
-                mark, tone = "⚠️", "amber"
+                mark, tone = "▲", "amber"
                 sub = "missing — auto-fetch will try next run; overlay quiet meanwhile"
             self.grid.addWidget(_make_kpi_card(f"{mark}  {label}", rel, tone, sub),
                                 base_row + i // 4, i % 4)
 
         # Refresh-now button lets the user re-pull the 4 feeds without a full run.
         refresh_row = base_row + (len(checklist) + 3) // 4
-        btn = QPushButton("🔄 Refresh optional feeds now")
+        btn = QPushButton("⟳  Refresh optional feeds now")
         btn.setCursor(Qt.PointingHandCursor)
-        btn.setStyleSheet("padding:8px 14px;")
         btn.clicked.connect(self._refresh_optional_feeds)
         self.grid.addWidget(btn, refresh_row, 0, 1, 2)
 
@@ -717,6 +576,7 @@ class RunDrawer(QFrame):
         log_label = QLabel("Log"); log_label.setObjectName("Sub")
         wrap.addWidget(log_label)
         self.log = QPlainTextEdit(); self.log.setReadOnly(True)
+        self.log.setObjectName("Log")
         self.log.setFont(QFont("Consolas", 9))
         wrap.addWidget(self.log, 1)
 
@@ -763,15 +623,11 @@ class RunDrawer(QFrame):
 
     @staticmethod
     def _cell_style(status: str) -> str:
-        colors = {
-            "pending": ("#8A92A6", "rgba(255,255,255,0.03)"),
-            "ok":      ("#7FE0C6", "rgba(56,189,176,0.14)"),
-            "error":   ("#FF8597", "rgba(229,85,106,0.18)"),
-            "skipped": ("#E6BB6A", "rgba(242,177,60,0.14)"),
-        }
-        fg, bg = colors.get(status, colors["pending"])
-        return (f"padding:7px 10px;border-radius:8px;background:{bg};"
-                f"color:{fg};font-weight:600;font-size:12px;")
+        tone = {"pending": "dim", "ok": "green", "error": "red",
+                "skipped": "amber"}.get(status, "dim")
+        fg, bg = THEME.tone_fg(tone), THEME.tone_bg(tone)
+        return (f"padding:6px 10px;border-radius:{THEME.RADIUS_MD}px;background:{bg};"
+                f"color:{fg};font-weight:600;font-size:{THEME.TYPE['small']}px;")
 
 
 # --------------------------- Rich tab renderers -----------------------------
@@ -781,27 +637,11 @@ _PILL_TONE_FOR_STATUS = {"ok": "teal", "warn": "amber", "bad": "red", "info": "b
 
 
 def _make_pill(text: str, tone: str = "dim") -> QLabel:
-    lbl = QLabel(text)
-    lbl.setObjectName("Pill")
-    lbl.setProperty("tone", tone)
-    lbl.style().unpolish(lbl); lbl.style().polish(lbl)
-    return lbl
+    return W.pill(text, tone)
 
 
 def _make_kpi_card(title: str, value: str, tone: str = "dim", subtitle: str = "") -> QFrame:
-    card = QFrame(); card.setObjectName("Card"); card.setProperty("accent", tone)
-    v = QVBoxLayout(card); v.setContentsMargins(14, 12, 14, 12); v.setSpacing(4)
-    t = QLabel(title.upper()); t.setObjectName("Sub"); t.setStyleSheet("letter-spacing:1px;font-size:10.5px;")
-    val = QLabel(value); val.setObjectName("Metric")
-    tone_color = {"teal": "#7FE0C6", "amber": "#F2B13C", "red": "#FF8597",
-                  "blue": "#9CC6FF", "violet": "#C6A8FA", "green": "#7FE0A6",
-                  "indigo": "#A9BCFF", "dim": "#FFFFFF"}.get(tone, "#FFFFFF")
-    val.setStyleSheet(f"color:{tone_color};font-size:26px;font-weight:800;")
-    v.addWidget(t); v.addWidget(val)
-    if subtitle:
-        s = QLabel(subtitle); s.setObjectName("Sub"); s.setWordWrap(True)
-        v.addWidget(s)
-    return card
+    return W.kpi_card(title, value, tone, subtitle)
 
 
 class DQReportView(QWidget):
@@ -873,32 +713,29 @@ class DQReportView(QWidget):
 
         flags = dq_summary.get("flag_counts", {}) or {}
         if flags:
-            head = QLabel("ETF quality flag distribution"); head.setObjectName("Sub")
-            head.setStyleSheet("font-size:11px;letter-spacing:1px;text-transform:uppercase;")
-            self._body_v.addWidget(head)
+            self._body_v.addWidget(W.section_label("ETF quality flag distribution"))
             grid = QGridLayout(); grid.setHorizontalSpacing(8); grid.setVerticalSpacing(8)
             for i, (flag, count) in enumerate(sorted(flags.items(), key=lambda x: -x[1])):
-                tone = "teal" if flag.lower() == "complete" else ("amber" if "missing" in flag.lower() else "amber")
-                card = QFrame(); card.setObjectName("Card"); card.setProperty("accent", tone)
-                cv = QHBoxLayout(card); cv.setContentsMargins(12, 8, 12, 8)
+                # OK / complete rows are healthy; every other flag needs a look.
+                tone = "green" if flag.lower() in ("complete", "ok") else "amber"
+                card = QFrame(); card.setObjectName("Tile")
+                cv = QHBoxLayout(card); cv.setContentsMargins(12, 8, 12, 8); cv.setSpacing(10)
                 cv.addWidget(_make_pill(str(count), tone))
-                lbl = QLabel(flag); lbl.setWordWrap(True); lbl.setStyleSheet("color:#DEE0E5;font-size:12.5px;")
-                cv.addWidget(lbl, 1)
+                cv.addWidget(W.text(flag, "Body", wrap=True), 1)
                 grid.addWidget(card, i // 2, i % 2)
             holder = QWidget(); holder.setLayout(grid)
             self._body_v.addWidget(holder)
 
         if quality_df is not None and not quality_df.empty:
-            head = QLabel("Per-ETF quality snapshot"); head.setObjectName("Sub")
-            head.setStyleSheet("font-size:11px;letter-spacing:1px;text-transform:uppercase;margin-top:8px;")
-            self._body_v.addWidget(head)
+            self._body_v.addWidget(W.section_label("Per-ETF quality snapshot"))
             preview_cols = [c for c in ("Symbol", "Name", "ETF_Quality_Data_Flag",
                                         "NAV", "AUM_INR_Cr", "TER", "Benchmark_Index",
                                         "Tracking_Error", "Tracking_Difference")
                             if c in quality_df.columns]
             tbl = QTableView(); tbl.setModel(_df_to_model(quality_df[preview_cols].head(400)))
-            tbl.horizontalHeader().setStretchLastSection(True); tbl.verticalHeader().setVisible(False)
-            tbl.setAlternatingRowColors(False)
+            tbl.horizontalHeader().setStretchLastSection(True)
+            W.style_table(tbl); W.fit_columns(tbl)
+            tbl.setAlternatingRowColors(True)
             tbl.setMinimumHeight(420)
             self._body_v.addWidget(tbl, 1)
         self._body_v.addStretch()
@@ -939,8 +776,8 @@ class TradePlanView(QWidget):
         self.header_row.addStretch()
 
         if trade_df is None or trade_df.empty:
-            note = QLabel("(no trade plan yet — run the pipeline)")
-            note.setObjectName("Sub"); self._v.addWidget(note); self._v.addStretch(); return
+            self._v.addWidget(W.empty_note("No trade plan yet — run the pipeline."))
+            self._v.addStretch(); return
 
         grid = QGridLayout(); grid.setHorizontalSpacing(10); grid.setVerticalSpacing(10)
         # Canonical official ordering — never sort by Final_Score.
@@ -955,9 +792,7 @@ class TradePlanView(QWidget):
         self._v.addWidget(holder)
 
         if report_text:
-            head = QLabel("Report notes"); head.setObjectName("Sub")
-            head.setStyleSheet("font-size:11px;letter-spacing:1px;text-transform:uppercase;margin-top:8px;")
-            self._v.addWidget(head)
+            self._v.addWidget(W.section_label("Report notes"))
             try:
                 md_to_widgets.render_markdown(report_text, self._v)
             except Exception as e:
@@ -977,45 +812,39 @@ class TradePlanView(QWidget):
         elif "overbought" in risk or "elevated" in risk: tone = "amber"
         else: tone = "teal"
 
-        card = QFrame(); card.setObjectName("Card"); card.setProperty("accent", tone)
-        v = QVBoxLayout(card); v.setContentsMargins(14, 12, 14, 12); v.setSpacing(6)
+        card, v = W.card(tone, spacing=6)
         top = QHBoxLayout()
-        sym = QLabel(str(r.get("Symbol", "?"))); sym.setStyleSheet("font-size:15px;font-weight:700;color:#fff;")
+        sym = W.text(str(r.get("Symbol", "?")), "Symbol")
         bucket = str(r.get("Bucket", "") or "")
         bt = "teal" if "Top" in bucket else "amber" if "Risky" in bucket else "blue"
         pill = _make_pill(bucket or "—", bt)
         pill.setToolTip("Raw Score Bucket — diagnostic only. Official standing is the rank + Confidence_Adjusted_Score shown on this card.")
         top.addWidget(sym); top.addStretch(); top.addWidget(pill)
         v.addLayout(top)
-        name = QLabel(str(r.get("Name", "") or "")); name.setStyleSheet("color:#8A92A6;font-size:11px;"); name.setWordWrap(True)
+        name = W.text(str(r.get("Name", "") or ""), "Meta", wrap=True)
         v.addWidget(name)
 
         grid = QGridLayout(); grid.setHorizontalSpacing(8); grid.setVerticalSpacing(4)
-        def _cell(row, col, label, val, color="#ECEDEE"):
-            l = QLabel(label); l.setStyleSheet("background:transparent;color:#6B6F76;font-size:10px;text-transform:uppercase;letter-spacing:.4px;")
-            n = QLabel(val); n.setStyleSheet(f"background:transparent;color:{color};font-size:12.5px;font-weight:650;")
-            grid.addWidget(l, row * 2, col); grid.addWidget(n, row * 2 + 1, col)
+        def _cell(row, col, label, val, tone=None):
+            grid.addWidget(W.text(label, "Faint"), row * 2, col)
+            grid.addWidget(W.text(val, "Value", tone=tone), row * 2 + 1, col)
         _cell(0, 0, "Buy zone", f"{_num(r.get('Buy_Zone_Low'))}–{_num(r.get('Buy_Zone_High'))}")
-        _cell(0, 1, "Stop", _num(r.get('Stop_Loss')), "#F2B13C")
+        _cell(0, 1, "Stop", _num(r.get('Stop_Loss')), "amber")
         _cell(0, 2, "Hold", f"{int(r.get('Hold_Days_Min',5) or 5)}–{int(r.get('Hold_Days_Max',15) or 15)}d")
-        _cell(1, 0, "Target 1", _num(r.get('Target_1')), "#7FE0C6")
-        _cell(1, 1, "Target 2", _num(r.get('Target_2')), "#7FE0C6")
+        _cell(1, 0, "Target 1", _num(r.get('Target_1')), "teal")
+        _cell(1, 1, "Target 2", _num(r.get('Target_2')), "teal")
         # Primary: Confidence-Adjusted Score (authoritative ranking).
         # Secondary: raw Final_Score for reference — never used to sort.
-        _cell(1, 2, "Adjusted Score", _num(r.get(PRIMARY_SCORE_COL), 1), "#9CC6FF")
-        raw_lbl = QLabel(f"Raw Score: {_num(r.get(SECONDARY_SCORE_COL), 1)}")
-        raw_lbl.setStyleSheet("background:transparent;color:#6B6F76;font-size:10.5px;")
+        _cell(1, 2, "Adjusted Score", _num(r.get(PRIMARY_SCORE_COL), 1), "blue")
+        raw_lbl = W.text(f"Raw Score: {_num(r.get(SECONDARY_SCORE_COL), 1)}", "Faint")
         v.addLayout(grid)
         v.addWidget(raw_lbl)
 
         reason = str(r.get("Reason", "") or "").strip()
         if reason:
-            rl = QLabel(reason); rl.setWordWrap(True); rl.setStyleSheet("color:#B7BCC6;font-size:11.5px;margin-top:4px;")
-            v.addWidget(rl)
+            v.addWidget(W.text(reason, "Meta", wrap=True))
         if risk and risk != "no major technical risk flagged":
-            rk = QLabel(f"Risk: {r.get('Key_Risk')}"); rk.setWordWrap(True)
-            rk.setStyleSheet("color:#F2B13C;font-size:11.5px;font-weight:600;")
-            v.addWidget(rk)
+            v.addWidget(W.text(f"Risk: {r.get('Key_Risk')}", "Value", tone="amber", wrap=True))
         return card
 
 
@@ -1068,9 +897,7 @@ class ValidationView(QWidget):
             self.top.addWidget(_make_kpi_card(t, v, tone, sub), i // 4, i % 4)
 
         if report_text:
-            head = QLabel("Validation report"); head.setObjectName("Sub")
-            head.setStyleSheet("font-size:11px;letter-spacing:1px;text-transform:uppercase;")
-            self._v.addWidget(head)
+            self._v.addWidget(W.section_label("Validation report"))
             try:
                 md_to_widgets.render_markdown(report_text, self._v)
             except Exception as e:
@@ -1128,17 +955,15 @@ class CompareView(QWidget):
             self.kpi.addWidget(_make_kpi_card(t, v, tone, sub), 0, i)
 
         if cmp_df is None or cmp_df.empty or len(cmp_df) < 2:
-            note = QFrame(); note.setObjectName("Card"); note.setProperty("accent", "amber")
-            nv = QVBoxLayout(note); nv.setContentsMargins(16, 14, 16, 14)
-            title = QLabel("Shadow comparison table unavailable")
-            title.setStyleSheet("color:#F2B13C;font-weight:700;font-size:14px;")
+            note, nv = W.card("amber")
+            title = W.text("Shadow comparison table unavailable", "Value", tone="amber")
             hint = QLabel("shadow_vs_official.csv has fewer than two comparable rows, "
                           "so there is no side-by-side ranking table to show. This is "
                           "about the ranking comparison file, not forward-return "
                           "maturation. Check that latest_scores_v4_shadow.csv exists "
                           "and carries V4_Confidence_Adjusted_Score; the KPI strip "
                           "above still reflects shadow_vs_official.json.")
-            hint.setWordWrap(True); hint.setStyleSheet("color:#B7BCC6;font-size:12px;margin-top:4px;")
+            hint.setWordWrap(True); hint.setObjectName("Meta")
             nv.addWidget(title); nv.addWidget(hint)
             self._v.addWidget(note); self._v.addStretch(); return
 
@@ -1170,13 +995,11 @@ class CompareView(QWidget):
             except Exception:
                 pass
 
-        head = QLabel("Side-by-side ranking"); head.setObjectName("Sub")
-        head.setStyleSheet("font-size:11px;letter-spacing:1px;text-transform:uppercase;")
-        self._v.addWidget(head)
+        self._v.addWidget(W.section_label("Side-by-side ranking"))
         tbl = QTableView(); tbl.setModel(_df_to_model(show.head(60)))
-        tbl.horizontalHeader().setStretchLastSection(True); tbl.verticalHeader().setVisible(False)
-        tbl.setMinimumHeight(360); tbl.setAlternatingRowColors(False)
-        tbl.setStyleSheet("QTableView{alternate-background-color:transparent;gridline-color:transparent;}")
+        tbl.horizontalHeader().setStretchLastSection(True)
+        W.style_table(tbl); W.fit_columns(tbl)
+        tbl.setMinimumHeight(360); tbl.setAlternatingRowColors(True)
         self._v.addWidget(tbl, 1)
 
         # Top movers panel
@@ -1187,16 +1010,13 @@ class CompareView(QWidget):
             if not movers.empty:
                 up = movers.nsmallest(5, "ΔRank")   # negative delta = improved
                 down = movers.nlargest(5, "ΔRank")
-                mv_head = QLabel("Top movers"); mv_head.setObjectName("Sub")
-                mv_head.setStyleSheet("font-size:11px;letter-spacing:1px;text-transform:uppercase;margin-top:6px;")
-                self._v.addWidget(mv_head)
+                self._v.addWidget(W.section_label("Top movers (shadow vs official)"))
                 grid = QGridLayout(); grid.setHorizontalSpacing(10); grid.setVerticalSpacing(6)
                 def _mover_card(sym, dr, tone):
-                    card = QFrame(); card.setObjectName("Card"); card.setProperty("accent", tone)
+                    card = QFrame(); card.setObjectName("Tile")
                     h = QHBoxLayout(card); h.setContentsMargins(12, 8, 12, 8)
-                    s = QLabel(str(sym)); s.setStyleSheet("color:#fff;font-weight:700;font-size:13px;")
-                    delta = QLabel(f"{'↑' if dr < 0 else '↓'} {abs(int(dr))}")
-                    delta.setStyleSheet(f"color:{'#7FE0C6' if tone=='teal' else '#FF8597'};font-weight:700;")
+                    s = W.text(str(sym), "Value")
+                    delta = W.text(f"{'↑' if dr < 0 else '↓'} {abs(int(dr))}", "Value", tone=tone)
                     h.addWidget(s); h.addStretch(); h.addWidget(delta)
                     return card
                 for i, (_, r) in enumerate(up.iterrows()):
@@ -1209,33 +1029,31 @@ class CompareView(QWidget):
 
 
 
-def _section_header(text: str) -> QLabel:
-    lbl = QLabel(text); lbl.setObjectName("Sub")
-    lbl.setStyleSheet("font-size:11px;letter-spacing:1.2px;text-transform:uppercase;color:#8A92A6;margin-top:6px;")
-    return lbl
+def _section_header(text: str, meta: str = "") -> QWidget:
+    """Section title with an optional faint source note (e.g. the CSV name)."""
+    if not meta:
+        return W.section_label(text)
+    return W.row(W.section_label(text), W.text(meta, "Faint"), spacing=10)
 
 
 def _table_card(df: pd.DataFrame, accent: str = "indigo", max_rows: int = 200,
                 min_height: int = 220) -> QFrame:
-    card = QFrame(); card.setObjectName("Card"); card.setProperty("accent", accent)
-    v = QVBoxLayout(card); v.setContentsMargins(12, 10, 12, 12); v.setSpacing(6)
+    card, v = W.card(accent, margins=8)
     if df is None or df.empty:
-        v.addWidget(QLabel("No data available yet — run the pipeline."))
+        v.addWidget(W.empty_note("No data available yet — run the pipeline."))
         return card
     tbl = QTableView(); tbl.setModel(_df_to_model(df.head(max_rows)))
     tbl.horizontalHeader().setStretchLastSection(True)
-    tbl.verticalHeader().setVisible(False)
-    tbl.setAlternatingRowColors(False)
+    W.style_table(tbl, embedded=True); W.fit_columns(tbl)
+    tbl.setAlternatingRowColors(True)
     tbl.setMinimumHeight(min_height)
     v.addWidget(tbl)
     return card
 
 
 def _empty_card(msg: str, accent: str = "dim") -> QFrame:
-    card = QFrame(); card.setObjectName("Card"); card.setProperty("accent", accent)
-    v = QVBoxLayout(card); v.setContentsMargins(14, 12, 14, 12)
-    lbl = QLabel(msg); lbl.setWordWrap(True); lbl.setStyleSheet("color:#B7BCC6;font-size:12.5px;")
-    v.addWidget(lbl)
+    card, v = W.card(accent)
+    v.addWidget(W.text(msg, "Meta", wrap=True))
     return card
 
 
@@ -1266,24 +1084,21 @@ class PortfolioView(QWidget):
         verdict = str((validation or {}).get("verdict") or "Unknown")
         vtone = {"Ship": "green", "Ship_With_Caveats": "amber",
                  "Downgrade_To_Watch": "red"}.get(verdict, "dim")
-        vcard = QFrame(); vcard.setObjectName("Card"); vcard.setProperty("accent", vtone)
-        vv = QVBoxLayout(vcard); vv.setContentsMargins(14, 12, 14, 12); vv.setSpacing(8)
+        vcard, vv = W.card(vtone)
         row = QHBoxLayout(); row.setSpacing(10)
-        row.addWidget(QLabel("Portfolio Validation")); row.addWidget(_make_pill(verdict.replace("_", " "), vtone))
+        row.addWidget(W.text("Portfolio validation", "CardTitle")); row.addWidget(_make_pill(verdict.replace("_", " "), vtone))
         row.addStretch()
         rw = QWidget(); rw.setLayout(row); vv.addWidget(rw)
         reasons = (validation or {}).get("reasons") or (validation or {}).get("caveats") or []
         if isinstance(reasons, (list, tuple)) and reasons:
             for r in reasons[:8]:
-                lb = QLabel(f"• {r}"); lb.setWordWrap(True)
-                lb.setStyleSheet("color:#DEE0E5;font-size:12.5px;")
-                vv.addWidget(lb)
+                vv.addWidget(W.dot_line(str(r), vtone))
         elif not validation:
-            vv.addWidget(QLabel("No portfolio_validation.json yet — run pipeline."))
+            vv.addWidget(W.empty_note("No portfolio_validation.json yet — run the pipeline."))
         self._v.addWidget(vcard)
 
         # --- Sizing (Step 8) ---
-        self._v.addWidget(_section_header("Position sizing · top5_position_sizing.csv  ·  inspired by Vibe Trading"))
+        self._v.addWidget(_section_header("Position sizing", "top5_position_sizing.csv"))
         if sizing_df is None or sizing_df.empty:
             self._v.addWidget(_empty_card("No sizing output — Step 8 did not produce top5_position_sizing.csv.", "amber"))
         else:
@@ -1293,14 +1108,14 @@ class PortfolioView(QWidget):
             self._v.addWidget(_table_card(sizing_df[cols] if cols else sizing_df, "teal"))
 
         # --- Sector & Peers (Step 12) ---
-        self._v.addWidget(_section_header("Sector & peer context · top5_sector_context.csv  ·  inspired by Fincept Terminal"))
+        self._v.addWidget(_section_header("Sector & peer context", "top5_sector_context.csv"))
         if sector_df is None or sector_df.empty:
             self._v.addWidget(_empty_card("No sector context available.", "amber"))
         else:
             self._v.addWidget(_table_card(sector_df, "violet"))
 
         # --- Events + EV merged (Steps 12/13) ---
-        self._v.addWidget(_section_header("Event risk & expected value · top5_events.csv + top5_expected_value.csv  ·  inspired by Fincept Terminal + Vibe Trading"))
+        self._v.addWidget(_section_header("Event risk & expected value", "top5_events.csv + top5_expected_value.csv"))
         merged = pd.DataFrame()
         if events_df is not None and not events_df.empty and ev_df is not None and not ev_df.empty:
             try:
@@ -1355,7 +1170,7 @@ class MacroRotationView(QWidget):
                       or (regime_tilt or {}).get("fii_regime") or "Unknown")
         ftone = {"Net_Buying": "green", "Net_Selling": "red", "Mixed": "amber"}.get(fii_reg, "dim")
         head = QHBoxLayout(); head.setSpacing(8)
-        head.addWidget(QLabel("Institutional flow (FII/DII + bulk deals)  ·  inspired by Fincept Terminal"))
+        head.addWidget(W.section_label("Institutional flow (FII/DII + bulk deals)"))
         head.addWidget(_make_pill(f"FII: {fii_reg.replace('_',' ')}", ftone))
         head.addStretch()
         hw = QWidget(); hw.setLayout(head); self._v.addWidget(hw)
@@ -1387,7 +1202,7 @@ class MacroRotationView(QWidget):
                         "Gaps are missing data, not zero flow.", "amber"))
 
         # --- Regime tilt (Step 15) ---
-        self._v.addWidget(_section_header("Regime tilt · regime_tilt_report.json  ·  inspired by Vibe Trading"))
+        self._v.addWidget(_section_header("Regime tilt", "regime_tilt_report.json"))
         if not regime_tilt:
             self._v.addWidget(_empty_card("No regime tilt report yet.", "amber"))
         else:
@@ -1396,10 +1211,9 @@ class MacroRotationView(QWidget):
             applied = bool(regime_tilt.get("applied_to_scoring"))
             atone = "green" if applied else "dim"
             atxt = "APPLIED" if applied else "REPORT-ONLY"
-            card = QFrame(); card.setObjectName("Card"); card.setProperty("accent", rtone)
-            cv = QVBoxLayout(card); cv.setContentsMargins(14, 12, 14, 12); cv.setSpacing(8)
+            card, cv = W.card(rtone)
             row = QHBoxLayout(); row.setSpacing(8)
-            row.addWidget(QLabel("Regime")); row.addWidget(_make_pill(regime, rtone))
+            row.addWidget(W.text("Regime", "CardTitle")); row.addWidget(_make_pill(regime, rtone))
             row.addSpacing(10); row.addWidget(_make_pill(atxt, atone))
             row.addStretch()
             rw = QWidget(); rw.setLayout(row); cv.addWidget(rw)
@@ -1413,16 +1227,14 @@ class MacroRotationView(QWidget):
                 fw = QWidget(); fw.setLayout(fg); cv.addWidget(fw)
             n = regime_tilt.get("n_survivors")
             if n is not None:
-                cv.addWidget(QLabel(f"Survivors reweighted: {n}"))
+                cv.addWidget(W.text(f"Survivors reweighted: {n}", "Meta"))
             notes = regime_tilt.get("notes")
             if notes:
-                nl = QLabel(str(notes)); nl.setWordWrap(True)
-                nl.setStyleSheet("color:#B7BCC6;font-size:12px;")
-                cv.addWidget(nl)
+                cv.addWidget(W.text(str(notes), "Meta", wrap=True))
             self._v.addWidget(card)
 
         # --- Rebalance diff (Step 16) ---
-        self._v.addWidget(_section_header("Rebalance diff · rebalance_diff.json  ·  inspired by Vibe Trading"))
+        self._v.addWidget(_section_header("Rebalance diff", "rebalance_diff.json"))
         if not rebalance:
             self._v.addWidget(_empty_card("No rebalance diff yet.", "amber"))
         else:
@@ -1430,10 +1242,9 @@ class MacroRotationView(QWidget):
             rtone = ("green" if rec.startswith("Rotate_Edge") else
                      "amber" if rec.startswith("Rotate") or rec.startswith("Hold_Cost") else
                      "blue" if rec.startswith("Hold") else "dim")
-            card = QFrame(); card.setObjectName("Card"); card.setProperty("accent", rtone)
-            cv = QVBoxLayout(card); cv.setContentsMargins(14, 12, 14, 12); cv.setSpacing(8)
+            card, cv = W.card(rtone)
             row = QHBoxLayout(); row.setSpacing(8)
-            row.addWidget(QLabel("Recommendation")); row.addWidget(_make_pill(rec.replace("_", " "), rtone))
+            row.addWidget(W.text("Recommendation", "CardTitle")); row.addWidget(_make_pill(rec.replace("_", " "), rtone))
             turn = rebalance.get("estimated_turnover_%")
             if turn is not None:
                 row.addSpacing(10); row.addWidget(_make_pill(f"Turnover: {turn}%", "violet"))
@@ -1460,37 +1271,66 @@ class MacroRotationView(QWidget):
             if reasons:
                 cv.addWidget(_section_header("Exit reasons"))
                 for sym, why in reasons.items():
-                    lb = QLabel(f"• {sym}: {why}"); lb.setWordWrap(True)
-                    lb.setStyleSheet("color:#DEE0E5;font-size:12.5px;")
-                    cv.addWidget(lb)
+                    cv.addWidget(W.dot_line(f"{sym}: {why}", "amber"))
             self._v.addWidget(card)
 
         self._v.addStretch()
 
 
 # --------------------------- Embedded HTML dashboard -------------------------
+class _HtmlRebuildBridge(QObject):
+    """Carries "rebuild finished" from a plain Python thread to the GUI thread."""
+    done = Signal(bool, str)
+
+
 class HtmlDashboardView(QWidget):
     """Renders output/dashboard_latest.html inside the app via QWebEngineView.
 
     Loaded on demand (Reload button) or after a completed run — never on a
     timer, to avoid the historical Windows access-violation from repeated
     local-file reloads.
+
+    Inside the app the page hides its own sidebar (the app sidebar is the one
+    navigation); section jumps move to the "Jump to" control in this toolbar.
     """
+    # (label, element id in dashboard_latest.html)
+    SECTIONS = (
+        ("Overview", "plainSummary"),
+        ("Validation", "validationProgress"),
+        ("Data health", "dataHealth"),
+        ("Shadow vs official", "shadowTitle"),
+        ("Candidates", "top5Title"),
+        ("Risk notes", "plainDisclaimer"),
+    )
+
     def __init__(self):
         super().__init__()
-        root = QVBoxLayout(self); root.setContentsMargins(0, 0, 0, 0); root.setSpacing(6)
+        root = QVBoxLayout(self); root.setContentsMargins(0, 0, 0, 0); root.setSpacing(8)
 
-        bar = QHBoxLayout(); bar.setContentsMargins(12, 8, 12, 0); bar.setSpacing(8)
-        self.btn_reload = QPushButton("⟳ Reload"); self.btn_reload.setObjectName("Ghost")
-        self.btn_browser = QPushButton("Open in browser ↗"); self.btn_browser.setObjectName("Ghost")
-        self.status = QLabel("no dashboard on disk yet"); self.status.setObjectName("Sub")
-        bar.addWidget(self.btn_reload); bar.addWidget(self.btn_browser)
+        bar = QHBoxLayout(); bar.setContentsMargins(0, 0, 0, 0); bar.setSpacing(8)
+        self.btn_reload = QPushButton("⟳  Reload"); self.btn_reload.setObjectName("Ghost")
+        self.btn_reload.setToolTip("Reload output/dashboard_latest.html")
+        self.btn_browser = QPushButton("↗  Open in browser"); self.btn_browser.setObjectName("Ghost")
+        self.btn_rebuild = QPushButton("⟲  Rebuild"); self.btn_rebuild.setObjectName("Ghost")
+        self.btn_rebuild.setToolTip("Regenerate dashboard_latest.html from the current output/ files "
+                                    "(runs dashboard_html_builder.py only — no fetching, no scoring)")
+        self.cb_jump = QComboBox()
+        self.cb_jump.addItems(["Jump to section…"] + [lbl for lbl, _id in self.SECTIONS])
+        self.cb_jump.setToolTip("Scroll the dashboard to a section")
+        W.polish_combo(self.cb_jump)
+        self.status = QLabel("No dashboard on disk yet"); self.status.setObjectName("Faint")
+        bar.addWidget(self.cb_jump); bar.addWidget(self.btn_reload); bar.addWidget(self.btn_rebuild)
+        bar.addWidget(self.btn_browser)
         bar.addSpacing(12); bar.addWidget(self.status, 1)
         root.addLayout(bar)
 
         if HAS_WEBENGINE and QWebEngineView is not None:
             self.view = QWebEngineView()
             root.addWidget(self.view, 1)
+            try:
+                self.view.loadFinished.connect(self._on_loaded)
+            except Exception:
+                pass
         else:
             self.view = None
             hint = QLabel("QWebEngineView not available — install PySide6-WebEngine and restart.")
@@ -1499,6 +1339,12 @@ class HtmlDashboardView(QWidget):
 
         self.btn_reload.clicked.connect(self.reload)
         self.btn_browser.clicked.connect(self._open_browser)
+        self.btn_rebuild.clicked.connect(self._rebuild)
+        self.cb_jump.currentIndexChanged.connect(self._jump)
+        self._rebuild_busy = False
+        self._rebuild_thread = None
+        self._rebuild_bridge = _HtmlRebuildBridge()
+        self._rebuild_bridge.done.connect(self._on_rebuilt)
 
     def _html_path(self) -> Path:
         return OUT / "dashboard_latest.html"
@@ -1506,11 +1352,104 @@ class HtmlDashboardView(QWidget):
     def reload(self):
         p = self._html_path()
         if not p.exists():
-            self.status.setText("no dashboard on disk yet — run the pipeline")
+            self.status.setText("No dashboard on disk yet — run the pipeline")
             return
         if self.view is not None:
-            self.view.setUrl(QUrl.fromLocalFile(str(p.resolve())))
-            self.status.setText(f"loaded {p.name} · {datetime.now().strftime('%H:%M:%S')}")
+            url = QUrl.fromLocalFile(str(p.resolve()))
+            # Tells the page it is inside the app, which has its own sidebar.
+            url.setQuery("embedded=1")
+            self.view.setUrl(url)
+            built = datetime.fromtimestamp(p.stat().st_mtime).strftime("%d %b %H:%M")
+            self.status.setText(f"Built {built} · loaded {datetime.now().strftime('%H:%M:%S')}")
+
+    # Injected after every load, so it works for ANY dashboard_latest.html —
+    # including one built before this app version (a stale file kept its own
+    # sidebar because it predates the page's .embedded rules).
+    _EMBED_JS = (
+        "(function(){"
+        "document.documentElement.classList.add('embedded');"
+        "if(!document.getElementById('nq-embedded-style')){"
+        "var st=document.createElement('style');st.id='nq-embedded-style';"
+        "st.textContent='aside.side,.side{display:none!important}'"
+        "+'body{padding-left:24px!important;padding-right:24px!important}'"
+        "+'.shell{display:block!important}'"
+        "+'.content{max-width:none!important;padding:6px 0 40px!important;margin:0!important}';"
+        "document.head.appendChild(st);}"
+        "})();"
+    )
+
+    def _on_loaded(self, ok: bool) -> None:
+        if not ok or self.view is None:
+            return
+        try:
+            self.view.page().runJavaScript(self._EMBED_JS)
+        except Exception:
+            pass
+
+    def _jump(self, index: int) -> None:
+        if index <= 0 or self.view is None:
+            return
+        _label, el_id = self.SECTIONS[index - 1]
+        try:
+            self.view.page().runJavaScript(
+                f"(function(){{var e=document.getElementById('{el_id}');"
+                f"if(e)e.scrollIntoView({{behavior:'smooth',block:'start'}});}})();")
+        except Exception:
+            pass
+        was = self.cb_jump.blockSignals(True)
+        self.cb_jump.setCurrentIndex(0)
+        self.cb_jump.blockSignals(was)
+
+    def _rebuild(self) -> None:
+        """Regenerate the HTML dashboard off the GUI thread, then reload it.
+
+        Plain threading.Thread + signal bridge (same pattern as the manual feed
+        refresh): the work is a child process and touches no Qt object.
+        """
+        if getattr(self, "_rebuild_busy", False):
+            return
+        self._rebuild_busy = True
+        self.btn_rebuild.setEnabled(False)
+        self.status.setText("Rebuilding dashboard…")
+
+        def _work() -> None:
+            ok, msg = False, ""
+            try:
+                proc = subprocess.run(
+                    [sys.executable, str(BASE / "dashboard_html_builder.py")],
+                    cwd=str(BASE), capture_output=True, text=True,
+                    encoding="utf-8", errors="replace", timeout=300)
+                ok = proc.returncode == 0
+                msg = (proc.stdout or proc.stderr or "").strip().splitlines()[-1:] or [""]
+                msg = msg[0]
+            except Exception as exc:
+                msg = f"{type(exc).__name__}: {exc}"
+            finally:
+                try:
+                    self._rebuild_bridge.done.emit(ok, msg)
+                except RuntimeError:
+                    pass
+
+        t = threading.Thread(target=_work, name="dashboard-rebuild", daemon=True)
+        self._rebuild_thread = t
+        t.start()
+
+    def _on_rebuilt(self, ok: bool, msg: str) -> None:
+        self._rebuild_busy = False
+        self.btn_rebuild.setEnabled(True)
+        if ok:
+            self.reload()
+        else:
+            self.status.setText(f"Rebuild failed — {msg[:160]}")
+            _log_crash(f"Dashboard rebuild failed: {msg}")
+
+    def wait_for_background_work(self, msec: int = 15000) -> bool:
+        """Block until a running rebuild finishes. True if idle."""
+        t = getattr(self, "_rebuild_thread", None)
+        if t is None or not t.is_alive():
+            return True
+        t.join(msec / 1000.0)
+        return not t.is_alive()
 
     def _open_browser(self):
         p = self._html_path()
@@ -1519,56 +1458,85 @@ class HtmlDashboardView(QWidget):
             webbrowser.open(p.resolve().as_uri())
 
 
-
-
-
 class MainWindow(QMainWindow):
+    # (label, glyph, page title, page subtitle) — order matches self.tabs.
+    NAV = (
+        ("Overview",    "\u25C6", "Overview",
+         "Verdict, evidence progress and what changed since the last run"),
+        ("Candidates",  "\u25CE", "Candidates",
+         "Search, filter and inspect the official ranking"),
+        ("Validation",  "\u2713", "Validation",
+         "Is the ranking proven yet? The statistics behind the verdict"),
+        ("Portfolio",   "\u25A6", "Portfolio",
+         "Sizing, sector, event and portfolio checks for the top five"),
+        ("Context",     "\u25D1", "Market context",
+         "Macro regime, flows, rotation and news. Context only, never a score input"),
+        ("Data Health", "\u271A", "Data health",
+         "ETF metadata coverage and quality flags"),
+        ("Advanced",    "\u22EF", "Advanced",
+         "Raw tables, shadow engine, HTML dashboard and trade-plan detail"),
+    )
+    SIDEBAR_W = 228
+    SIDEBAR_W_COMPACT = 76
+    COMPACT_BELOW = 1240
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"NSE Quant Engine — v{APP_VERSION}")
         self.resize(1480, 920)
+        self.setMinimumSize(1000, 680)
+        self._compact = None
 
         central = QWidget(); central.setObjectName("AppRoot"); self.setCentralWidget(central)
         outer = QHBoxLayout(central); outer.setContentsMargins(0, 0, 0, 0); outer.setSpacing(0)
 
-        # ---- Left: main column (top bar + tabs) ----
-        left = QWidget(); left.setObjectName("MainColumn")
-        col = QVBoxLayout(left); col.setContentsMargins(20, 16, 16, 12); col.setSpacing(12)
+        # ---- Left: navigation sidebar ----
+        outer.addWidget(self._build_sidebar())
 
-        # Top bar
+        # ---- Centre: header + pages ----
+        left = QWidget(); left.setObjectName("MainColumn")
+        col = QVBoxLayout(left); col.setContentsMargins(24, 14, 20, 12); col.setSpacing(14)
+
         topbar = QFrame(); topbar.setObjectName("TopBar")
-        tb = QHBoxLayout(topbar); tb.setContentsMargins(18, 12, 14, 12); tb.setSpacing(12)
-        title = QLabel("NSE Quant Engine"); title.setObjectName("Header")
-        self._version_pill = QLabel(f"v{APP_VERSION}"); self._version_pill.setObjectName("Pill")
-        pill = self._version_pill
+        tb = QHBoxLayout(topbar); tb.setContentsMargins(0, 4, 0, 14); tb.setSpacing(10)
+        titles = QVBoxLayout(); titles.setSpacing(2); titles.setContentsMargins(0, 0, 0, 0)
+        # Breadcrumb ("Advanced") shown above the title on sub-pages only.
+        self.lbl_breadcrumb = QLabel(""); self.lbl_breadcrumb.setObjectName("Faint")
+        self.lbl_breadcrumb.setVisible(False)
+        titles.addWidget(self.lbl_breadcrumb)
+        self.lbl_page_title = QLabel(self.NAV[0][2]); self.lbl_page_title.setObjectName("PageTitle")
+        self.lbl_page_sub = QLabel(self.NAV[0][3]); self.lbl_page_sub.setObjectName("PageSub")
+        titles.addWidget(self.lbl_page_title); titles.addWidget(self.lbl_page_sub)
+        tb.addLayout(titles, 1)
+
+        # Version pill stays a named widget: the startup self-check reads it.
+        self._version_pill = QLabel(f"v{APP_VERSION}"); self._version_pill.setObjectName("PillAge")
         self.lbl_lastrun = QLabel("no runs yet"); self.lbl_lastrun.setObjectName("PillAge")
-        tb.addWidget(title); tb.addSpacing(8); tb.addWidget(pill)
-        tb.addSpacing(8); tb.addWidget(self.lbl_lastrun)
-        tb.addStretch()
+        tb.addWidget(self.lbl_lastrun, 0, Qt.AlignVCenter)
+        tb.addSpacing(6)
 
         self.cb_shadow = QCheckBox("Include shadow"); self.cb_shadow.setChecked(True)
+        self.cb_shadow.setToolTip("Also run the V4 shadow engine (diagnostic only, never promoted)")
         self.cb_fetch  = QCheckBox("Refresh data");   self.cb_fetch.setChecked(True)
-        tb.addWidget(self.cb_shadow); tb.addWidget(self.cb_fetch)
+        self.cb_fetch.setToolTip("Refresh the optional context feeds before scoring")
+        tb.addWidget(self.cb_shadow, 0, Qt.AlignVCenter); tb.addWidget(self.cb_fetch, 0, Qt.AlignVCenter)
 
-        self.btn_reload = QPushButton("⟳ Reload last run"); self.btn_reload.setObjectName("Ghost")
-        self.btn_browser = QPushButton("Open in browser ↗"); self.btn_browser.setObjectName("Ghost")
-        self.btn_evidence = QPushButton("📦 Evidence zip"); self.btn_evidence.setObjectName("Ghost")
-        self.btn_evidence.setToolTip("Reveal the newest output/insight_bundle_*.zip "
-                                     "(built after the news step — hand this zip to any LLM)")
-
-        self.btn_run = QPushButton("▶  Run Full Pipeline"); self.btn_run.setObjectName("Primary")
+        self.btn_run = QPushButton("\u25B6  Run Full Pipeline"); self.btn_run.setObjectName("Primary")
+        self.btn_run.setCursor(Qt.PointingHandCursor)
+        self.btn_run.setToolTip("Run every pipeline step in an isolated process")
         self.btn_drawer = QToolButton(); self.btn_drawer.setObjectName("Drawer")
-        self.btn_drawer.setText("☰  Activity")
+        self.btn_drawer.setText("\u2630  Activity")
+        self.btn_drawer.setCursor(Qt.PointingHandCursor)
         self.btn_drawer.setToolTip("Toggle run activity drawer (F9)")
-        tb.addWidget(self.btn_reload); tb.addWidget(self.btn_browser); tb.addWidget(self.btn_evidence)
-        tb.addWidget(self.btn_run); tb.addWidget(self.btn_drawer)
+        tb.addWidget(self.btn_run, 0, Qt.AlignVCenter); tb.addWidget(self.btn_drawer, 0, Qt.AlignVCenter)
         col.addWidget(topbar)
 
-        # Tabs — reorganized per Phase 4:
-        #   Overview | Candidates | Validation | Portfolio | Context | Data Health | Advanced
-        # `Advanced` is a nested QTabWidget containing power-user views (Raw Scores,
-        # Shadow, Compare, embedded HTML dashboard).
+        # Pages. The QTabWidget stays the page container (every refresh path
+        # addresses its pages); its own tab bar is hidden because the sidebar
+        # is the navigation. Nested Context / Advanced keep their tab bars.
         self.tabs = QTabWidget()
+        self.tabs.tabBar().hide()
+        self.tabs.setDocumentMode(True)
         self.dashboard = DecisionCenterView(BASE, OUT)
         self.tab_candidates = CandidatesWorkbench(BASE, OUT)
         self.tab_scores = self._make_table_tab()
@@ -1609,6 +1577,13 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.tab_dq,        "Data Health")
         self.tabs.addTab(self.tab_advanced,  "Advanced")
         col.addWidget(self.tabs, 1)
+        self.tabs.currentChanged.connect(self._on_page_changed)
+        # One navigation system: Context and Advanced sub-pages live in the
+        # sidebar, so their own tab bars are hidden (the QTabWidgets stay as
+        # page containers — every render path still addresses them).
+        self.tab_context.tabBar().hide()
+        self.tab_advanced.tabBar().hide()
+        self._attach_subnav()
 
         outer.addWidget(left, 1)
 
@@ -1616,9 +1591,11 @@ class MainWindow(QMainWindow):
         self.drawer = RunDrawer()
         outer.addWidget(self.drawer)
         self.dashboard.set_console_callback(self.drawer.append_log)
+        self.dashboard.set_open_symbol_callback(self._inspect_symbol)
 
         # Status bar
         self.status = QStatusBar(); self.setStatusBar(self.status)
+        self.status.addPermanentWidget(self._version_pill)
         self.status.showMessage("Ready.")
 
         # Wire up
@@ -1629,11 +1606,18 @@ class MainWindow(QMainWindow):
         self.btn_drawer.clicked.connect(self.drawer.toggle)
         QShortcut(QKeySequence("F9"), self, activated=self.drawer.toggle)
         QShortcut(QKeySequence("Ctrl+R"), self, activated=self.load_last_run)
+        QShortcut(QKeySequence("Ctrl+F"), self, activated=self._focus_candidate_search)
+        for i in range(len(self.NAV)):
+            QShortcut(QKeySequence(f"Ctrl+{i + 1}"), self,
+                      activated=lambda i=i: self._go_to(i))
 
         self.bridge = LogBridge()
         self.bridge.line.connect(self.drawer.append_log)
         self.bridge.step.connect(self._on_step)
         self.thread: RunnerThread | None = None
+
+        self._go_to(0)
+        self._apply_compact(self.width() < self.COMPACT_BELOW)
 
         # Boot: show whatever the last run produced.
         self.load_last_run()
@@ -1643,9 +1627,210 @@ class MainWindow(QMainWindow):
         except Exception as e:
             _log_crash(f"self-check failed: {e}")
 
+    # ----- shell: sidebar navigation -----
+    def _build_sidebar(self) -> QFrame:
+        side = QFrame(); side.setObjectName("Sidebar")
+        side.setFixedWidth(self.SIDEBAR_W)
+        self._sidebar = side
+        v = QVBoxLayout(side); v.setContentsMargins(14, 18, 14, 14); v.setSpacing(6)
+
+        brand = QHBoxLayout(); brand.setSpacing(10); brand.setContentsMargins(4, 0, 0, 0)
+        mark = QLabel("NQ"); mark.setObjectName("BrandMark")
+        mark.setFixedSize(36, 36); mark.setAlignment(Qt.AlignCenter)
+        names = QVBoxLayout(); names.setSpacing(0)
+        self._brand_name = QLabel("NSE Quant"); self._brand_name.setObjectName("BrandName")
+        self._brand_sub = QLabel("Research screener"); self._brand_sub.setObjectName("BrandSub")
+        names.addWidget(self._brand_name); names.addWidget(self._brand_sub)
+        brand.addWidget(mark); brand.addLayout(names, 1)
+        v.addLayout(brand)
+        v.addSpacing(18)
+
+        self._nav_group = QButtonGroup(self)
+        self._nav_group.setExclusive(True)
+        self._nav_buttons: list[QPushButton] = []
+        self._sub_boxes: list[tuple[QFrame, QVBoxLayout]] = []
+        for i, (label, glyph, _title, sub) in enumerate(self.NAV):
+            b = QPushButton(f"{glyph}   {label}"); b.setObjectName("NavItem")
+            b.setCheckable(True); b.setCursor(Qt.PointingHandCursor)
+            b.setToolTip(f"{label} — {sub}  (Ctrl+{i + 1})")
+            b.clicked.connect(lambda _checked=False, i=i: self._go_to(i))
+            self._nav_group.addButton(b, i)
+            self._nav_buttons.append(b)
+            v.addWidget(b)
+            # Sub-page container, filled by _attach_subnav() once the pages
+            # exist. Shown only under the active section (accordion).
+            box = QFrame(); box.setObjectName("SubNav")
+            bl = QVBoxLayout(box); bl.setContentsMargins(0, 2, 0, 4); bl.setSpacing(2)
+            box.setVisible(False)
+            self._sub_boxes.append((box, bl))
+            v.addWidget(box)
+
+        v.addStretch(1)
+
+        # Evidence status — visible from every page, so the watchlist warning
+        # never depends on which tab is open.
+        self._side_status = QFrame(); self._side_status.setObjectName("SideStatus")
+        sv = QVBoxLayout(self._side_status); sv.setContentsMargins(12, 10, 12, 12); sv.setSpacing(6)
+        st = QLabel("Evidence status"); st.setObjectName("Faint")
+        self._side_verdict = QLabel("—"); self._side_verdict.setObjectName("Value")
+        self._side_verdict.setWordWrap(True)
+        self._side_mode = QLabel("—"); self._side_mode.setObjectName("Pill")
+        self._side_mode.setProperty("tone", "dim")
+        sv.addWidget(st); sv.addWidget(self._side_verdict)
+        sv.addWidget(self._side_mode, 0, Qt.AlignLeft)
+        v.addWidget(self._side_status)
+        v.addSpacing(8)
+
+        # Secondary actions live here so the header stays one clean row.
+        self.btn_reload = QPushButton("\u27F3   Reload last run"); self.btn_reload.setObjectName("Ghost")
+        self.btn_reload.setToolTip("Re-read output/ without running anything (Ctrl+R)")
+        self.btn_browser = QPushButton("\u2197   Open HTML dashboard"); self.btn_browser.setObjectName("Ghost")
+        self.btn_browser.setToolTip("Open output/dashboard_latest.html in your browser")
+        self.btn_evidence = QPushButton("\u25A3   Evidence zip"); self.btn_evidence.setObjectName("Ghost")
+        self.btn_evidence.setToolTip("Reveal the newest output/insight_bundle_*.zip "
+                                     "(built after the news step — hand this zip to any LLM)")
+        self._side_actions = (
+            (self.btn_reload, "\u27F3", "Reload last run"),
+            (self.btn_browser, "\u2197", "Open HTML dashboard"),
+            (self.btn_evidence, "\u25A3", "Evidence zip"),
+        )
+        for b, _g, _t in self._side_actions:
+            b.setCursor(Qt.PointingHandCursor)
+            b.setStyleSheet("text-align: left;")
+            v.addWidget(b)
+        return side
+
+    # Sub-page descriptions for the header (keyed by the nested tab label).
+    SUB_DESC = {
+        "Macro / Rotation": "Institutional flow, regime tilt and rebalance diff. Context only",
+        "News & Events": "Headlines and filings for candidates. Context only, never a score input",
+        "Raw Scores": "latest_scores.csv as written by the engine (first 250 rows)",
+        "Shadow": "V4 shadow engine scores. Diagnostic only, never promoted",
+        "Official vs Shadow": "Where the shadow ranking agrees and disagrees with the official one",
+        "Dashboard (HTML)": "The generated evidence dashboard, embedded",
+        "Trade Plan (detail)": "Mechanical reference levels per candidate. Watchlist only until validation is positive",
+    }
+
+    def _subgroups(self) -> dict:
+        """page index -> nested QTabWidget whose pages appear as sidebar sub-items."""
+        return {4: self.tab_context, 6: self.tab_advanced}
+
+    def _attach_subnav(self) -> None:
+        self._sub_buttons: dict[int, list[QPushButton]] = {}
+        self._sub_last: dict[int, int] = {}
+        self._sub_group = QButtonGroup(self)
+        self._sub_group.setExclusive(True)
+        for page, tw in self._subgroups().items():
+            box, bl = self._sub_boxes[page]
+            buttons = []
+            for j in range(tw.count()):
+                label = tw.tabText(j)
+                b = QPushButton(W.button_text(label)); b.setObjectName("NavSubItem")
+                b.setCheckable(True); b.setCursor(Qt.PointingHandCursor)
+                b.setToolTip(self.SUB_DESC.get(label, label))
+                b.clicked.connect(lambda _c=False, page=page, j=j: self._go_to(page, j))
+                self._sub_group.addButton(b)
+                bl.addWidget(b)
+                buttons.append(b)
+            self._sub_buttons[page] = buttons
+            self._sub_last[page] = 0
+
+    def _go_to(self, index: int, sub: int | None = None) -> None:
+        if not (0 <= index < self.tabs.count()):
+            return
+        tw = self._subgroups().get(index) if hasattr(self, "_sub_buttons") else None
+        if tw is not None:
+            j = self._sub_last.get(index, 0) if sub is None else sub
+            j = max(0, min(j, tw.count() - 1))
+            tw.setCurrentIndex(j)
+            self._sub_last[index] = j
+        self.tabs.setCurrentIndex(index)
+        self._on_page_changed(index)
+
+    def _on_page_changed(self, index: int) -> None:
+        if not (0 <= index < len(self.NAV)):
+            return
+        _label, _glyph, title, sub = self.NAV[index]
+        crumb = ""
+        tw = self._subgroups().get(index) if hasattr(self, "_sub_buttons") else None
+        if tw is not None and tw.count():
+            j = tw.currentIndex()
+            label = tw.tabText(j)
+            crumb, title, sub = self.NAV[index][2], label, self.SUB_DESC.get(label, sub)
+            buttons = self._sub_buttons.get(index, [])
+            if 0 <= j < len(buttons) and not buttons[j].isChecked():
+                buttons[j].setChecked(True)
+        self.lbl_breadcrumb.setText(crumb)
+        self.lbl_breadcrumb.setVisible(bool(crumb))
+        self.lbl_page_title.setText(title)
+        self.lbl_page_sub.setText(sub)
+        btn = self._nav_buttons[index] if index < len(self._nav_buttons) else None
+        if btn is not None and not btn.isChecked():
+            btn.setChecked(True)
+        self._sync_subnav_visibility()
+
+    def _sync_subnav_visibility(self) -> None:
+        """Accordion: only the active section shows its sub-pages (never in compact)."""
+        cur = self.tabs.currentIndex()
+        for page, (box, _bl) in enumerate(self._sub_boxes):
+            has_items = page in getattr(self, "_sub_buttons", {})
+            box.setVisible(has_items and page == cur and not bool(self._compact))
+
+    def _inspect_symbol(self, symbol: str) -> None:
+        """Overview link -> Candidates page with that symbol selected."""
+        self._go_to(1)
+        self.tab_candidates.focus_symbol(symbol)
+
+    def _focus_candidate_search(self) -> None:
+        self._go_to(1)
+        self.tab_candidates.focus_search()
+
+    def _apply_compact(self, compact: bool) -> None:
+        """Icon-only sidebar below COMPACT_BELOW px so pages keep their width."""
+        if compact == self._compact:
+            return
+        self._compact = compact
+        self._sidebar.setFixedWidth(self.SIDEBAR_W_COMPACT if compact else self.SIDEBAR_W)
+        for (label, glyph, _t, _s), b in zip(self.NAV, self._nav_buttons):
+            b.setText(glyph if compact else f"{glyph}   {label}")
+            b.setStyleSheet("text-align: center; font-size: 16px;" if compact else "")
+        for b, glyph, label in self._side_actions:
+            b.setText(glyph if compact else f"{glyph}   {label}")
+            b.setStyleSheet("text-align: center;" if compact else "text-align: left;")
+        self._brand_name.setVisible(not compact)
+        self._brand_sub.setVisible(not compact)
+        self._side_status.setVisible(not compact)
+        self.lbl_page_sub.setVisible(not compact)
+        self._sync_subnav_visibility()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        try:
+            self._apply_compact(self.width() < self.COMPACT_BELOW)
+        except Exception:
+            pass
+
+    def _update_side_status(self) -> None:
+        """Verdict + decision mode from validation_status.json (the authority)."""
+        try:
+            from core.ui_readers import read_validation_status
+            st = read_validation_status(OUT)
+        except Exception:
+            st = {}
+        verdict = str(st.get("verdict") or "No verdict yet")
+        live = bool(st.get("is_valid_positive"))
+        self._side_verdict.setText(verdict)
+        self._side_mode.setText("Live — validation positive" if live else "Watchlist only")
+        self._side_mode.setProperty("tone", "green" if live else "amber")
+        self._side_mode.style().unpolish(self._side_mode)
+        self._side_mode.style().polish(self._side_mode)
+        self._side_status.setToolTip(
+            "From output/validation_status.json. Trade levels are mechanical "
+            "reference levels until validation is positive.")
+
     def _startup_self_check(self):
         """Post-boot: verify version pill matches APP_VERSION and, once the
-        WebEngine dashboard finishes loading, check that the expected v4.8
+        WebEngine dashboard finishes loading, check that the expected
         dashboard blocks are present. Findings go to the Activity drawer."""
         want = f"v{APP_VERSION}"
         got = self._version_pill.text()
@@ -1690,7 +1875,7 @@ class MainWindow(QMainWindow):
     def _make_table_tab(self):
         w = QWidget(); l = QVBoxLayout(w); l.setContentsMargins(0, 0, 0, 0)
         tv = QTableView(); tv.horizontalHeader().setStretchLastSection(True)
-        tv.verticalHeader().setVisible(False)
+        W.style_table(tv); tv.setAlternatingRowColors(True)
         l.addWidget(tv); w.table = tv
         return w
 
@@ -1846,9 +2031,14 @@ class MainWindow(QMainWindow):
             extra = ("  ·  shadow currently ahead (experimental) — manual review suggested"
                      if lead == "shadow" else "")
             self.lbl_lastrun.setText(
-                f"last run: {_human_age(finished)} · official engine: {champ}{extra}")
+                f"Last run {_human_age(finished)} · official engine: {champ}{extra}")
+            self.lbl_lastrun.setToolTip(f"Completed {finished}")
         else:
-            self.lbl_lastrun.setText("no runs yet — click ▶ Run Full Pipeline")
+            self.lbl_lastrun.setText("No runs yet — click ▶ Run Full Pipeline")
+        try:
+            self._update_side_status()
+        except Exception as e:
+            _log_crash(f"Sidebar status refresh failed: {e}")
 
         if not refresh_tabs:
             try:
@@ -1871,6 +2061,7 @@ class MainWindow(QMainWindow):
                 return pd.DataFrame()
         self.tab_scores.table.setModel(_df_to_model(load_csv(OUT / "latest_scores.csv").head(250)))
         self.tab_shadow.table.setModel(_df_to_model(load_csv(OUT / "latest_scores_v4_shadow.csv").head(250)))
+        W.fit_columns(self.tab_scores.table); W.fit_columns(self.tab_shadow.table)
         cmp_df = load_csv(OUT / "shadow_vs_official.csv")
         # Structured tabs (DQ, Validation, Trade Plan)
         def _safe_json(p: Path) -> dict:
@@ -1972,11 +2163,10 @@ def main():
     app.setStyleSheet(QSS)
     app.setQuitOnLastWindowClosed(False)
     pal = app.palette()
-    pal.setColor(QPalette.Window, QColor("#0A0B12"))
-    pal.setColor(QPalette.Base, QColor("#0A0B12"))
-    pal.setColor(QPalette.Text, QColor("#ECEDEE"))
-    pal.setColor(QPalette.WindowText, QColor("#ECEDEE"))
-    pal.setColor(QPalette.Highlight, QColor("#D8345F"))
+    for _role, _hex in THEME.PALETTE.items():
+        _r = getattr(QPalette, _role, None)
+        if _r is not None:
+            pal.setColor(_r, QColor(_hex))
     app.setPalette(pal)
 
     global _crash_bridge

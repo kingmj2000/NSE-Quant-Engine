@@ -19,6 +19,7 @@ try:
         QSplitter, QListWidget, QListWidgetItem, QSizePolicy,
     )
     from PySide6.QtCore import QUrl
+    from ui import widgets as W
 except Exception:  # pragma: no cover — non-Qt envs (CI, headless tests)
     QWidget = object  # type: ignore
 
@@ -67,31 +68,34 @@ class NewsEventsView(QWidget):
 
     # ---------- ui ----------
     def _build_ui(self) -> None:
-        root = QVBoxLayout(self); root.setContentsMargins(10, 10, 10, 10); root.setSpacing(8)
+        root = QVBoxLayout(self); root.setContentsMargins(0, 4, 0, 0); root.setSpacing(12)
 
-        banner = QLabel(FIXED_BANNER)
-        banner.setWordWrap(True)
-        banner.setStyleSheet("background:#2a1919;color:#f5d7d7;padding:8px;border-radius:6px;")
-        root.addWidget(banner)
+        root.addWidget(W.banner(FIXED_BANNER, "blue"))
 
-        self._kpi_row = QHBoxLayout()
+        self._kpi_row = QHBoxLayout(); self._kpi_row.setSpacing(12)
         root.addLayout(self._kpi_row)
 
-        # Filters
-        filt = QHBoxLayout()
+        # Filters (captions above each control, same as the Candidates bar)
+        bar, bar_v = W.card(margins=12)
+        filt = QHBoxLayout(); filt.setContentsMargins(0, 0, 0, 0); filt.setSpacing(10)
+        bar_v.addLayout(filt)
         self.f_scope = QComboBox(); self.f_scope.addItems(["All candidates", "Top 5", "Top 15"])
         self.f_type = QComboBox(); self.f_type.addItems(["All", "Official filings", "Media", "New since last run"])
         self.f_event = QComboBox(); self.f_event.addItem("All events")
         self.f_recency = QComboBox(); self.f_recency.addItems(
             ["All ages", "Recent_0_7D", "Current_8_30D", "Older_31_90D", "Stale_90DPlus", "Unknown_Date"])
-        self.f_symbol = QLineEdit(); self.f_symbol.setPlaceholderText("Symbol…")
-        for w in (QLabel("Scope"), self.f_scope, QLabel("Type"), self.f_type,
-                  QLabel("Event"), self.f_event, QLabel("Recency"), self.f_recency,
-                  QLabel("Symbol"), self.f_symbol):
-            filt.addWidget(w)
-        btn = QPushButton("Refresh"); btn.clicked.connect(self.refresh)
-        filt.addWidget(btn); filt.addStretch(1)
-        root.addLayout(filt)
+        self.f_symbol = QLineEdit(); self.f_symbol.setPlaceholderText("e.g. WIPRO")
+        self.f_symbol.setClearButtonEnabled(True)
+        for cb in (self.f_scope, self.f_type, self.f_event, self.f_recency):
+            W.polish_combo(cb)
+        for caption, w in (("Scope", self.f_scope), ("Type", self.f_type),
+                           ("Event", self.f_event), ("Recency", self.f_recency),
+                           ("Symbol", self.f_symbol)):
+            filt.addWidget(W.labeled(caption, w), 1)
+        btn = QPushButton("⟳  Refresh"); btn.clicked.connect(self.refresh)
+        btn.setCursor(Qt.PointingHandCursor)
+        filt.addWidget(btn, 0, Qt.AlignBottom)
+        root.addWidget(bar)
 
         for combo in (self.f_scope, self.f_type, self.f_event, self.f_recency):
             combo.currentIndexChanged.connect(self._apply_filters)
@@ -102,14 +106,17 @@ class NewsEventsView(QWidget):
         self.tbl_candidates = QTableWidget(0, 7)
         self.tbl_candidates.setHorizontalHeaderLabels(
             ["Symbol", "Rank", "Stories", "Filings", "Latest event", "Latest age (d)", "Coverage"])
-        self.tbl_candidates.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        W.style_table(self.tbl_candidates)
+        self.tbl_candidates.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.tbl_candidates.itemSelectionChanged.connect(self._on_symbol_selected)
         split.addWidget(self.tbl_candidates)
 
         self.tbl_timeline = QTableWidget(0, 7)
         self.tbl_timeline.setHorizontalHeaderLabels(
             ["Published", "Event", "Headline", "Source", "Kind", "Relevance", "Open"])
-        self.tbl_timeline.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        W.style_table(self.tbl_timeline)
+        self.tbl_timeline.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.tbl_timeline.setToolTip("Double-click a row to open its link")
         self.tbl_timeline.cellDoubleClicked.connect(self._open_link)
         split.addWidget(self.tbl_timeline)
         split.setStretchFactor(0, 1); split.setStretchFactor(1, 2)
@@ -118,11 +125,9 @@ class NewsEventsView(QWidget):
         self._kpis: dict[str, QLabel] = {}
         for label in ("Last refresh", "Candidates", "Recent items", "Official filings",
                       "Unknown-date", "Failed sources"):
-            box = QFrame(); box.setFrameShape(QFrame.StyledPanel)
-            box.setStyleSheet("background:#161616;border:1px solid #333;border-radius:6px;padding:6px;")
-            v = QVBoxLayout(box); v.setContentsMargins(6, 4, 6, 4); v.setSpacing(2)
-            title = QLabel(label); title.setStyleSheet("color:#888;font-size:11px;")
-            value = QLabel("—"); value.setStyleSheet("color:#eee;font-size:15px;font-weight:600;")
+            box, v = W.tile()
+            title = W.text(label, "Faint")
+            value = W.text("—", "MetricSmall")
             v.addWidget(title); v.addWidget(value)
             self._kpi_row.addWidget(box)
             self._kpis[label] = value
@@ -216,6 +221,7 @@ class NewsEventsView(QWidget):
                 it = QTableWidgetItem(str(v))
                 it.setFlags(it.flags() ^ Qt.ItemIsEditable)
                 self.tbl_candidates.setItem(i, j, it)
+        W.fit_columns(self.tbl_candidates, max_w=180)
 
     def _render_timeline(self, rows: list[dict]) -> None:
         self.tbl_timeline.setRowCount(len(rows))
@@ -229,6 +235,7 @@ class NewsEventsView(QWidget):
                 it = QTableWidgetItem(str(v) if v is not None else "")
                 it.setFlags(it.flags() ^ Qt.ItemIsEditable)
                 self.tbl_timeline.setItem(i, j, it)
+        W.fit_columns(self.tbl_timeline, max_w=360)
 
     def _on_symbol_selected(self) -> None:
         items = self.tbl_candidates.selectedItems()

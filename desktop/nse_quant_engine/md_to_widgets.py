@@ -32,28 +32,13 @@ _VERDICT_TONE = {
     "review":                "blue",
 }
 
-_TONE_BORDER = {
-    "teal":   "rgba(56,189,176,0.45)",
-    "amber":  "rgba(242,177,60,0.45)",
-    "green":  "rgba(63,185,80,0.45)",
-    "blue":   "rgba(88,166,255,0.45)",
-    "violet": "rgba(163,113,247,0.45)",
-    "red":    "rgba(229,85,106,0.45)",
-    "dim":    "rgba(255,255,255,0.07)",
-}
-_TONE_GLOW = {
-    "teal":   "0 12px 40px -18px rgba(56,189,176,0.55)",
-    "amber":  "0 12px 40px -18px rgba(242,177,60,0.55)",
-    "green":  "0 12px 40px -18px rgba(63,185,80,0.50)",
-    "blue":   "0 12px 40px -18px rgba(88,166,255,0.55)",
-    "violet": "0 12px 40px -18px rgba(163,113,247,0.55)",
-    "red":    "0 12px 40px -18px rgba(229,85,106,0.45)",
-    "dim":    "0 8px 24px -14px rgba(0,0,0,0.55)",
-}
-_TONE_TEXT = {
-    "teal": "#7FE0C6", "amber": "#F2B13C", "green": "#7FE0A6",
-    "blue": "#9CC6FF", "violet": "#C6A8FA", "red": "#FF8597", "dim": "#DEE0E5",
-}
+# Colours come from ui/theme.py so report panels match every other card.
+from ui import theme as _theme
+from ui import widgets as _W
+
+_TONE_TEXT = {k: v["fg"] for k, v in _theme.TONES.items()}
+_TONE_TEXT["dim"] = _theme.C["text"]
+_BODY = _theme.C["text"]
 
 
 def _tone_for_heading(text: str) -> str:
@@ -142,13 +127,13 @@ def _md_inline_to_html(s: str, accent_color: str) -> str:
     s = (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
     s = _BOLD_RE.sub(rf'<strong style="color:{accent_color}">\1</strong>', s)
     s = _ITAL_RE.sub(r"<em>\1</em>", s)
-    s = _CODE_RE.sub(r'<code style="background:rgba(255,255,255,0.05);padding:1px 4px;border-radius:4px;">\1</code>', s)
+    s = _CODE_RE.sub(r'<code style="background:rgba(255,255,255,0.06);padding:1px 4px;">\1</code>', s)
     return s
 
 
 def _body_html(body: str, tone: str) -> str:
     """Convert paragraphs + bullet lists into themed HTML."""
-    accent = _TONE_TEXT.get(tone, "#DEE0E5")
+    accent = _TONE_TEXT.get(tone, _BODY)
     out_parts: List[str] = []
     para: List[str] = []
     bullets: List[str] = []
@@ -156,7 +141,7 @@ def _body_html(body: str, tone: str) -> str:
     def flush_para():
         if para:
             out_parts.append(
-                '<p style="color:#DEE0E5;margin:0 0 8px 0;line-height:1.55;">'
+                '<p style="margin:0 0 8px 0;line-height:1.55;">'
                 + " ".join(_md_inline_to_html(l, accent) for l in para) + "</p>"
             )
             para.clear()
@@ -164,7 +149,7 @@ def _body_html(body: str, tone: str) -> str:
     def flush_bullets():
         if bullets:
             items = "".join(
-                f'<li style="margin:2px 0;color:#DEE0E5;">{_md_inline_to_html(b, accent)}</li>'
+                f'<li style="margin:2px 0;">{_md_inline_to_html(b, accent)}</li>'
                 for b in bullets
             )
             out_parts.append(
@@ -201,52 +186,27 @@ def _make_table_view(headers: List[str], rows: List[List[str]]) -> QTableView:
             model.setItem(r, c, item)
     view = QTableView()
     view.setModel(model)
-    view.setAlternatingRowColors(False)
-    view.setStyleSheet(
-        "QTableView{background:transparent;background-color:transparent;border:none;"
-        "gridline-color:transparent;alternate-background-color:transparent;color:#DEE0E5;"
-        "selection-background-color:rgba(216,52,95,0.25);}"
-        "QTableView::viewport{background:transparent;background-color:transparent;}"
-        "QTableView::item{background:transparent;border:none;padding:7px 8px;}"
-        "QTableView::item:alternate{background:transparent;}"
-        "QHeaderView::section{background:rgba(255,255,255,0.025);color:#8A92A6;padding:6px 8px;"
-        "border:none;border-bottom:1px solid rgba(255,255,255,0.08);font-weight:600;font-size:11px;"
-        "text-transform:uppercase;letter-spacing:0.5px;}"
-    )
-    view.verticalHeader().setVisible(False)
-    view.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+    _W.style_table(view, embedded=True)
+    view.setAlternatingRowColors(True)
+    if len(headers) <= 8:
+        view.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+    else:
+        # Wide report tables (Spread Summary has ~20 columns) squashed every
+        # header into "inusBotton"; size to content and scroll sideways.
+        _W.fit_columns(view, max_w=200)
     view.setMinimumHeight(min(720, max(180, 34 * (len(rows) + 1) + 24)))
     return view
 
 
 def _make_section_panel(heading: str, tone: str) -> Tuple[QFrame, QVBoxLayout]:
-    panel = QFrame()
-    panel.setObjectName("MdSection")
-    panel.setStyleSheet(
-        f"QFrame#MdSection{{background:rgba(22,24,34,0.42);border:1px solid {_TONE_BORDER[tone]};"
-        f"border-radius:14px;}}"
-    )
-    v = QVBoxLayout(panel)
-    v.setContentsMargins(16, 12, 16, 14)
-    v.setSpacing(8)
+    panel, v = _W.card(tone)
     if heading:
-        head = QLabel(heading)
-        head.setStyleSheet(
-            f"color:{_TONE_TEXT[tone]};font-size:12px;font-weight:700;"
-            "text-transform:uppercase;letter-spacing:1px;background:transparent;"
-        )
-        v.addWidget(head)
+        v.addWidget(_W.text(heading, "CardTitle", wrap=True))
     return panel, v
 
 
 def _make_empty_note(text: str) -> QLabel:
-    lbl = QLabel(text.strip("_ "))
-    lbl.setWordWrap(True)
-    lbl.setStyleSheet(
-        "color:#8A92A6;font-style:italic;font-size:12px;background:transparent;"
-        "padding:6px 2px;"
-    )
-    return lbl
+    return _W.empty_note(text.strip("_ "))
 
 
 def render_markdown(md_text: str, parent_layout: QVBoxLayout) -> None:
@@ -281,13 +241,8 @@ def render_markdown(md_text: str, parent_layout: QVBoxLayout) -> None:
                 tb.setWordWrap(True)
                 tb.setOpenExternalLinks(True)
                 tb.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
-                tb.setText(
-                    f"<div style='font-family:-apple-system,Segoe UI,Inter,sans-serif;"
-                    f"font-size:12.5px;color:#DEE0E5;'>{html}</div>"
-                )
-                tb.setStyleSheet(
-                    "QLabel{background:transparent;border:none;color:#DEE0E5;padding:2px 0;}"
-                )
+                tb.setObjectName("Body")
+                tb.setText(f"<div style='color:{_BODY};'>{html}</div>")
                 v.addWidget(tb)
 
         parent_layout.addWidget(panel)

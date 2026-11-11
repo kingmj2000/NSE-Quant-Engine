@@ -176,11 +176,19 @@ def build_evidence_json(output_dir: Path, top5: pd.DataFrame) -> dict:
     }
 
 
+def _engine_version() -> str:
+    try:
+        from core.version import APP_NAME, APP_VERSION
+        return f"{APP_NAME} v{APP_VERSION} (insight engine, steps 1-16)"
+    except Exception:
+        return "insight-engine v4 + steps 1-16"
+
+
 def build_manifest(output_dir: Path, included: list[str],
                    config_snapshot: Optional[dict]) -> dict:
     return {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
-        "engine_version": "insight-engine v4 + steps 1-16",
+        "engine_version": _engine_version(),
         "included_files": included,
         "missing_files": [f for f in _CANDIDATE_FILES if f not in included],
         "config_snapshot": config_snapshot or {},
